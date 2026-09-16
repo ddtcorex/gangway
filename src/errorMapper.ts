@@ -30,7 +30,7 @@ export function mapSftpError(err: unknown): MappedError {
   if (code === 'ECONNRESET') {
     return { message: 'The connection was reset by the server.', actions: ['retry', 'disconnect'] };
   }
-  if (/permission denied|4\d\d/i.test(rawMessage)) {
+  if (/permission denied|\b4\d{2}\b/i.test(rawMessage)) {
     return { message: `Permission denied by the server: ${rawMessage}`, actions: ['openOutput'] };
   }
   return { message: rawMessage, actions: ['retry', 'openOutput'] };

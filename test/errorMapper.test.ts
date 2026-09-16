@@ -37,4 +37,18 @@ describe('mapSftpError', () => {
     expect(mapped.message).toContain('something exotic happened');
     expect(mapped.actions).toEqual(expect.arrayContaining(['retry', 'openOutput']));
   });
+
+  it('does not misclassify incidental 3-digit numbers as permission-denied', () => {
+    const err = new Error('Failed to connect: timeout after 400ms');
+    const mapped = mapSftpError(err);
+    expect(mapped.message).toContain('Failed to connect: timeout after 400ms');
+    expect(mapped.actions).toEqual(['retry', 'openOutput']);
+  });
+
+  it('correctly identifies real 4xx permission-denied codes with word boundaries', () => {
+    const err = new Error('SFTP error: 403 Forbidden');
+    const mapped = mapSftpError(err);
+    expect(mapped.message).toMatch(/permission denied/i);
+    expect(mapped.actions).toEqual(['openOutput']);
+  });
 });
