@@ -24,7 +24,8 @@ describe('tmpPath', () => {
 
   it('is stable for the same host:user:port and differs across connections', () => {
     const other: ConnectionConfig = { ...connection, id: 'c2', host: 'other.example.com' };
-    expect(tmpRootFor(connection)).toBe(tmpRootFor({ ...connection, id: 'different-id' }));
+    const withDifferentId: ConnectionConfig = { ...connection, id: 'different-id' };
+    expect(tmpRootFor(connection)).toBe(tmpRootFor(withDifferentId));
     expect(tmpRootFor(connection)).not.toBe(tmpRootFor(other));
   });
 
