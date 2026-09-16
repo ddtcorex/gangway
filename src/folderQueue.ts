@@ -31,7 +31,7 @@ async function walk(root: RemoteEntry, listRemote: ListRemote, signal: AbortSign
   const children = await listRemote(root.path);
   checkCancelled(signal);
   for (const child of children) {
-    if (child.isDirectory) {
+    if (child.isDirectory && !child.isSymbolicLink) {
       await walk(child, listRemote, signal, out);
     } else {
       out.push(child);
