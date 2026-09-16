@@ -7,6 +7,25 @@
   "engines": { "vscode": "^1.90.0" },
   "categories": ["Other"],
   "main": "./dist/extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "commands": [
+      { "command": "gangway.openConnectionForm", "title": "Gangway: Open Connection Form" },
+      { "command": "gangway.downloadFile", "title": "Gangway: Download File" },
+      { "command": "gangway.uploadFile", "title": "Gangway: Upload File" },
+      { "command": "gangway.cleanupCache", "title": "Gangway: Cleanup Cache" }
+    ],
+    "keybindings": [
+      { "command": "gangway.uploadFile", "key": "alt+shift+q", "mac": "option+shift+q", "when": "editorTextFocus && resourceScheme == file" },
+      { "command": "gangway.downloadFile", "key": "alt+shift+w", "mac": "option+shift+w", "when": "editorTextFocus && resourceScheme == file" }
+    ],
+    "views": {
+      "gangway": [{ "id": "gangway.remoteExplorer", "name": "Remote Explorer" }]
+    },
+    "viewsContainers": {
+      "activitybar": [{ "id": "gangway", "title": "Gangway", "icon": "$(cloud)" }]
+    }
+  },
   "scripts": {
     "build": "node esbuild.js",
     "watch": "node esbuild.js --watch",

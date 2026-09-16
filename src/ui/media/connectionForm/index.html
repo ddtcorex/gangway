@@ -1,0 +1,29 @@
+<!-- src/ui/media/connectionForm/index.html -->
+<!-- Template only: {{TOOLKIT_URI}}/{{MAIN_URI}}/{{CSP_SOURCE}}/{{NONCE}} are substituted by
+     buildConnectionFormHtml() with real vscode-webview-resource:// URIs. Nothing here is ever
+     fetched from the network: both scripts are bundled into dist/media/ at build time
+     (see esbuild.js) and loaded strictly through Webview.asWebviewUri, never a CDN. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-{{NONCE}}'; style-src {{CSP_SOURCE}};" />
+</head>
+<body>
+<form id="connectionForm">
+  <vscode-text-field id="name" placeholder="Connection Name"></vscode-text-field>
+  <vscode-text-field id="host" placeholder="Host"></vscode-text-field>
+  <vscode-text-field id="port" placeholder="Port" value="22"></vscode-text-field>
+  <vscode-text-field id="username" placeholder="Username"></vscode-text-field>
+  <vscode-dropdown id="authMethod">
+    <vscode-option value="password">Password</vscode-option>
+    <vscode-option value="key">SSH Key</vscode-option>
+    <vscode-option value="agent">Agent</vscode-option>
+  </vscode-dropdown>
+  <vscode-text-field id="remotePath" placeholder="Remote Path"></vscode-text-field>
+  <vscode-button id="save">Save</vscode-button>
+</form>
+<script type="module" nonce="{{NONCE}}" src="{{TOOLKIT_URI}}"></script>
+<script type="module" nonce="{{NONCE}}" src="{{MAIN_URI}}"></script>
+</body>
+</html>
