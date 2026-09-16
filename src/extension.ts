@@ -17,6 +17,7 @@ import { createTmpStatusBarItem } from './ui/statusBar';
 import { buildConnectionFormHtml } from './ui/connectionFormHtml';
 import { ConnectionFormPanel } from './ui/connectionFormPanel';
 import { SftpClientAdapter, type RawSftpClient } from './transfer/sftpClientAdapter';
+import { runFolderDownload, runFolderUpload } from './ui/folderTransferCommands';
 import type { ConnectionConfig } from './types';
 
 export function activate(context: vscode.ExtensionContext): { connectionManager: ConnectionManager; secrets: ConnectionSecretStore } {
@@ -147,6 +148,78 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     vscode.commands.registerCommand('gangway.cleanupCache', async () => {
       const connection = requireActiveConnection();
       if (connection) await purgeExpiredTmp(tmpRootFor(connection), 0);
+    }),
+    vscode.commands.registerCommand('gangway.downloadFolder', async (remotePath: string) => {
+      const connection = requireActiveConnection();
+      if (!connection) return;
+      try {
+        const adapter = await getAdapter(connection);
+        await vscode.window.withProgress(
+          { location: { viewId: 'gangway.remoteExplorer' }, title: 'Downloading folder' },
+          () =>
+            runFolderDownload(
+              { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 },
+              async (dirPath) => {
+                const entries = await adapter.list(dirPath);
+                return entries.map((entry) => ({
+                  path: `${dirPath}/${entry.name}`,
+                  isDirectory: entry.type === 'd',
+                  isSymbolicLink: entry.type === 'l',
+                  size: 0,
+                }));
+              },
+              async (file) => {
+                await downloadFile(adapter, connection, file);
+              },
+              () => {},
+            ),
+        );
+      } catch (err) {
+        const mapped = mapSftpError(err);
+        await vscode.window.showErrorMessage(mapped.message, ...mapped.actions.map(actionLabel));
+      }
+    }),
+    vscode.commands.registerCommand('gangway.uploadFolder', async (remotePath: string, localRoot: string) => {
+      const connection = requireActiveConnection();
+      if (!connection) return;
+      try {
+        const adapter = await getAdapter(connection);
+        await runFolderUpload(
+          { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 },
+          async (dirPath) => {
+            const entries = await adapter.list(dirPath);
+            return entries.map((entry) => ({
+              path: `${dirPath}/${entry.name}`,
+              isDirectory: entry.type === 'd',
+              isSymbolicLink: entry.type === 'l',
+              size: 0,
+            }));
+          },
+          async (file) => {
+            const relative = file.slice(remotePath.length);
+            const localPath = `${localRoot}${relative}`;
+            const bytes = (await import('node:fs/promises')).default.stat(localPath).then((s) => s.size);
+            await uploadFile(adapter, connection.id, localPath, file, await bytes, auditLog);
+          },
+          async (file) => {
+            const sidecar = await readSidecar(`${localRoot}${file.slice(remotePath.length)}`);
+            if (!sidecar) return false;
+            const freshStat = await adapter.stat(file);
+            return checkConflict(sidecar, freshStat) === 'conflict';
+          },
+          async (conflictedPaths) => {
+            const choice = await vscode.window.showWarningMessage(
+              `${conflictedPaths.length} file(s) changed on the server since download.`,
+              'Review one by one',
+              'Skip conflicted',
+            );
+            return choice === 'Review one by one' ? 'reviewOneByOne' : 'skipConflicted';
+          },
+        );
+      } catch (err) {
+        const mapped = mapSftpError(err);
+        await vscode.window.showErrorMessage(mapped.message, ...mapped.actions.map(actionLabel));
+      }
     }),
   );
 
