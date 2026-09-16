@@ -6,8 +6,8 @@ export class Disposable {
 }
 
 export class EventEmitter<T> {
-  private listeners: Array<(value: T) => void> = [];
-  readonly event = (listener: (value: T) => void): Disposable => {
+  private listeners: Array<(value: T) => void | Promise<void>> = [];
+  readonly event = (listener: (value: T) => void | Promise<void>): Disposable => {
     this.listeners.push(listener);
     return new Disposable(() => {
       this.listeners = this.listeners.filter((l) => l !== listener);
@@ -15,6 +15,16 @@ export class EventEmitter<T> {
   };
   fire(value: T): void {
     for (const listener of this.listeners) listener(value);
+  }
+  async fireAsync(value: T): Promise<void> {
+    const promises: Promise<void>[] = [];
+    for (const listener of this.listeners) {
+      const result = listener(value);
+      if (result instanceof Promise) {
+        promises.push(result);
+      }
+    }
+    await Promise.all(promises);
   }
 }
 
@@ -70,7 +80,7 @@ function createFakeWebviewPanel() {
     onDidDispose: () => new Disposable(),
     dispose: () => {},
     reveal: () => {},
-    __test_fireMessage: (msg: unknown) => onDidReceiveMessage.fire(msg),
+    __test_fireMessage: (msg: unknown) => onDidReceiveMessage.fireAsync(msg),
   };
 }
 
