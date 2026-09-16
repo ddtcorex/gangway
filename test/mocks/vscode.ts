@@ -84,7 +84,15 @@ function createFakeWebviewPanel() {
   };
 }
 
+export interface MockTextEditor {
+  document: { uri: { fsPath: string } };
+}
+
 export const window = {
+  // Mutable so tests can simulate "the user has this file open" by
+  // assigning `vscode.window.activeTextEditor = { document: { uri: { fsPath: '...' } } }`
+  // before invoking a command handler, and reset to undefined afterwards.
+  activeTextEditor: undefined as MockTextEditor | undefined,
   createWebviewPanel: (..._args: unknown[]) => createFakeWebviewPanel(),
   createStatusBarItem: (..._args: unknown[]) => ({
     text: '',
@@ -103,6 +111,8 @@ export const window = {
   showInformationMessage: async (_msg: string, ..._items: string[]) => undefined,
   showQuickPick: async (_items: unknown[], _opts?: unknown) => undefined,
   showTextDocument: async (_uri: unknown) => ({}),
+  withProgress: async <T>(_opts: unknown, task: (progress: { report: (v: unknown) => void }, token: unknown) => Promise<T>) =>
+    task({ report: () => {} }, {}),
 };
 
 export const commands = {

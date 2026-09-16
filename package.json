@@ -24,7 +24,8 @@
     "menus": {
       "view/item/context": [
         { "command": "gangway.downloadFolder", "when": "view == gangway.remoteExplorer && viewItem == gangway.folder" },
-        { "command": "gangway.uploadFolder", "when": "view == gangway.remoteExplorer && viewItem == gangway.folder" }
+        { "command": "gangway.uploadFolder", "when": "view == gangway.remoteExplorer && viewItem == gangway.folder" },
+        { "command": "gangway.downloadFile", "when": "view == gangway.remoteExplorer && viewItem == gangway.file" }
       ]
     },
     "views": {

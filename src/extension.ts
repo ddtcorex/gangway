@@ -10,9 +10,9 @@ import { AuditLog } from './auditLog';
 import { checkConflict } from './conflictGuard';
 import { readSidecar } from './tmpStore';
 import { purgeExpiredTmp } from './tmpRetention';
-import { tmpRootFor } from './tmpPath';
+import { tmpFilePathFor, tmpRootFor } from './tmpPath';
 import { mapSftpError, actionLabel } from './errorMapper';
-import { RemoteTreeProvider } from './ui/remoteTreeProvider';
+import { RemoteTreeProvider, type RemoteTreeNode } from './ui/remoteTreeProvider';
 import { createTmpStatusBarItem } from './ui/statusBar';
 import { buildConnectionFormHtml } from './ui/connectionFormHtml';
 import { ConnectionFormPanel } from './ui/connectionFormPanel';
@@ -96,9 +96,20 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   }
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('gangway.downloadFile', async (remotePath: string) => {
+    vscode.commands.registerCommand('gangway.downloadFile', async (node?: RemoteTreeNode) => {
       const connection = requireActiveConnection();
       if (!connection) return;
+      if (!node?.entry?.path) {
+        // Guards the pre-existing keybinding (alt+shift+w), which VS Code
+        // fires with no arguments at all -- a keybinding can only pass a
+        // static `args` value declared in package.json, never "the tree
+        // item that's currently selected". The real, working invocation
+        // path is the file-node context menu entry, which always supplies
+        // one.
+        await vscode.window.showWarningMessage('Select a file in the Gangway Remote Explorer to download it.');
+        return;
+      }
+      const remotePath = node.entry.path;
       try {
         const adapter = await getAdapter(connection);
         const { localPath } = await downloadFile(adapter, connection, remotePath);
@@ -109,9 +120,41 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         await vscode.window.showErrorMessage(mapped.message, ...mapped.actions.map(actionLabel));
       }
     }),
-    vscode.commands.registerCommand('gangway.uploadFile', async (localPath: string, remotePath: string) => {
+    vscode.commands.registerCommand('gangway.uploadFile', async (localPathArg?: string, remotePathArg?: string) => {
       const connection = requireActiveConnection();
       if (!connection) return;
+
+      let localPath = localPathArg;
+      let remotePath = remotePathArg;
+
+      // Real keybinding invocation (Alt+Shift+Q) supplies no arguments at
+      // all -- VS Code keybindings can only pass a static `args` value
+      // declared in package.json, never "the currently active file". The
+      // actual context is simply "whatever tmp file is open right now":
+      // derive both the local path and its remote counterpart from the
+      // active editor + that file's own sidecar metadata.
+      if (!localPath) {
+        const activeEditor = vscode.window.activeTextEditor;
+        if (!activeEditor) {
+          await vscode.window.showWarningMessage('No active editor to upload. Open a Gangway-downloaded file first.');
+          return;
+        }
+        localPath = activeEditor.document.uri.fsPath;
+        const sidecar = await readSidecar(localPath);
+        if (!sidecar) {
+          await vscode.window.showWarningMessage(
+            `${localPath} is not a Gangway-managed file (no sidecar metadata found).`,
+          );
+          return;
+        }
+        remotePath = sidecar.remotePath;
+      }
+
+      if (!remotePath) {
+        await vscode.window.showWarningMessage('Upload requires a remote path; none was provided or derived.');
+        return;
+      }
+
       try {
         const adapter = await getAdapter(connection);
         const sidecar = await readSidecar(localPath);
@@ -149,9 +192,14 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       const connection = requireActiveConnection();
       if (connection) await purgeExpiredTmp(tmpRootFor(connection), 0);
     }),
-    vscode.commands.registerCommand('gangway.downloadFolder', async (remotePath: string) => {
+    vscode.commands.registerCommand('gangway.downloadFolder', async (node?: RemoteTreeNode) => {
       const connection = requireActiveConnection();
       if (!connection) return;
+      if (!node?.entry?.path) {
+        await vscode.window.showWarningMessage('Select a folder in the Gangway Remote Explorer to download it.');
+        return;
+      }
+      const remotePath = node.entry.path;
       try {
         const adapter = await getAdapter(connection);
         await vscode.window.withProgress(
@@ -179,12 +227,23 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         await vscode.window.showErrorMessage(mapped.message, ...mapped.actions.map(actionLabel));
       }
     }),
-    vscode.commands.registerCommand('gangway.uploadFolder', async (remotePath: string, localRoot: string) => {
+    vscode.commands.registerCommand('gangway.uploadFolder', async (node?: RemoteTreeNode) => {
       const connection = requireActiveConnection();
       if (!connection) return;
+      if (!node?.entry?.path) {
+        await vscode.window.showWarningMessage('Select a folder in the Gangway Remote Explorer to upload it.');
+        return;
+      }
+      const remotePath = node.entry.path;
+      // A tree-view context-menu command only ever receives the one clicked
+      // node -- there is no second free-form argument a real invocation can
+      // supply. Derive the local tmp mirror the same way single-file
+      // downloads do (tmpFilePathFor mirrors connection.remotePath-relative
+      // paths under the per-connection tmp root).
+      const localRoot = tmpFilePathFor(connection, remotePath);
       try {
         const adapter = await getAdapter(connection);
-        await runFolderUpload(
+        const result = await runFolderUpload(
           { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 },
           async (dirPath) => {
             const entries = await adapter.list(dirPath);
@@ -215,6 +274,9 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
             );
             return choice === 'Review one by one' ? 'reviewOneByOne' : 'skipConflicted';
           },
+        );
+        await vscode.window.showInformationMessage(
+          `Uploaded ${result.uploaded.length} file(s). ${result.skippedConflicted.length} skipped (conflicted), ${result.skippedSymlinks.length} skipped (symlinks).`,
         );
       } catch (err) {
         const mapped = mapSftpError(err);
