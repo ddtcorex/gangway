@@ -6,7 +6,9 @@
     "strict": true,
     "skipLibCheck": true,
     "outDir": "out",
-    "rootDir": "."
+    "rootDir": ".",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true
   },
   "include": ["src/**/*.ts", "test/**/*.ts"]
 }

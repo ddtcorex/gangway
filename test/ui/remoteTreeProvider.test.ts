@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import * as vscode from 'vscode';
 import { RemoteTreeProvider } from '../../src/ui/remoteTreeProvider';
 import type { RemoteEntry } from '../../src/folderQueue';
 
@@ -34,9 +35,9 @@ describe('RemoteTreeProvider', () => {
     const provider = new RemoteTreeProvider('/var/www', listRemote);
     const [folder, file, symlink] = await provider.getChildren();
 
-    expect(provider.getTreeItem(folder).iconPath?.id).toBe('folder');
-    expect(provider.getTreeItem(file).iconPath?.id).toBe('file');
-    expect(provider.getTreeItem(symlink).iconPath?.id).toBe('file-symlink-file');
+    expect((provider.getTreeItem(folder).iconPath as vscode.ThemeIcon)?.id).toBe('folder');
+    expect((provider.getTreeItem(file).iconPath as vscode.ThemeIcon)?.id).toBe('file');
+    expect((provider.getTreeItem(symlink).iconPath as vscode.ThemeIcon)?.id).toBe('file-symlink-file');
   });
 
   it('fires onDidChangeTreeData when refresh() is called', () => {
