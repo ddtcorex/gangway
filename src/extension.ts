@@ -16,6 +16,8 @@ import { RemoteTreeProvider } from './ui/remoteTreeProvider';
 import { createTmpStatusBarItem } from './ui/statusBar';
 import { buildConnectionFormHtml } from './ui/connectionFormHtml';
 import { ConnectionFormPanel } from './ui/connectionFormPanel';
+import { SftpClientAdapter, type RawSftpClient } from './transfer/sftpClientAdapter';
+import type { ConnectionConfig } from './types';
 
 export function activate(context: vscode.ExtensionContext): { connectionManager: ConnectionManager; secrets: ConnectionSecretStore } {
   const connectionManager = new ConnectionManager(context.globalState, context.workspaceState);
@@ -61,13 +63,26 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     return connection;
   }
 
+  /**
+   * The one place the pooled client (typed only as the minimal
+   * `SftpClientLike` connect/end pair) gets cast back to the real
+   * `ssh2-sftp-client` shape and wrapped in `SftpClientAdapter`, which
+   * translates the real client's `modifyTime` field to the `mtime` that
+   * `RemoteStat`/`checkConflict` expect. Every command below goes through
+   * this instead of casting ad-hoc at each call site.
+   */
+  async function getAdapter(connection: ConnectionConfig): Promise<SftpClientAdapter> {
+    const client = await pool.getClient(connection);
+    return new SftpClientAdapter(client as unknown as RawSftpClient);
+  }
+
   const initialConnection = getActiveConnection();
   if (initialConnection) {
     const treeProvider = new RemoteTreeProvider(initialConnection.remotePath, async (dirPath) => {
       const connection = requireActiveConnection();
       if (!connection) return [];
-      const client = await pool.getClient(connection);
-      const list = await (client as unknown as { list: (p: string) => Promise<Array<{ name: string; type: string }>> }).list(dirPath);
+      const adapter = await getAdapter(connection);
+      const list = await adapter.list(dirPath);
       return list.map((entry) => ({
         path: `${dirPath}/${entry.name}`,
         isDirectory: entry.type === 'd',
@@ -84,8 +99,8 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       const connection = requireActiveConnection();
       if (!connection) return;
       try {
-        const client = await pool.getClient(connection);
-        const { localPath } = await downloadFile(client as never, connection, remotePath);
+        const adapter = await getAdapter(connection);
+        const { localPath } = await downloadFile(adapter, connection, remotePath);
         createTmpStatusBarItem(connection.name, remotePath);
         await vscode.window.showTextDocument(vscode.Uri.file(localPath) as never);
       } catch (err) {
@@ -97,19 +112,17 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       const connection = requireActiveConnection();
       if (!connection) return;
       try {
-        const client = await pool.getClient(connection);
+        const adapter = await getAdapter(connection);
         const sidecar = await readSidecar(localPath);
-        const freshStat = await (client as unknown as { stat: (p: string) => Promise<{ mtime: number; size: number }> }).stat(
-          remotePath,
-        );
-        if (sidecar && checkConflict(sidecar, { ...freshStat, isDirectory: false, isSymbolicLink: false }) === 'conflict') {
+        const freshStat = await adapter.stat(remotePath);
+        if (sidecar && checkConflict(sidecar, freshStat) === 'conflict') {
           await vscode.window.showWarningMessage(
             `${remotePath} changed on the server since download. Open the diff and choose Overwrite, Keep server, or Cancel.`,
           );
           return;
         }
         const bytes = (await import('node:fs/promises')).default.stat(localPath).then((s) => s.size);
-        await uploadFile(client as never, connection.id, localPath, remotePath, await bytes, auditLog);
+        await uploadFile(adapter, connection.id, localPath, remotePath, await bytes, auditLog);
       } catch (err) {
         const mapped = mapSftpError(err);
         await vscode.window.showErrorMessage(mapped.message, ...mapped.actions.map(actionLabel));
