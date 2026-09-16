@@ -173,13 +173,47 @@ describe('activate - realistic command invocation', () => {
     expect(fakeRawClient.fastGet).toHaveBeenCalledWith('/var/www/app/config.php', expect.any(String));
   });
 
-  it('gangway.downloadFile warns and never touches the network when invoked with no node (e.g. a stray keybinding)', async () => {
+  it('gangway.downloadFile derives the remote path from the active editor + its sidecar when invoked with no arguments (the real keybinding case, refreshing from server)', async () => {
+    const localPath = path.join(tmpHome, 'stale-config.php');
+    await fs.writeFile(localPath, 'stale local content');
+    await writeSidecar(localPath, {
+      connectionId: connection.id,
+      remotePath: '/var/www/app/config.php',
+      mtime: 1700000000000,
+      size: 5,
+      downloadedAt: Date.now(),
+    });
+    fakeRawClient.stat.mockResolvedValue({ size: 5, modifyTime: 1700000000000, isDirectory: false, isSymbolicLink: false });
+    vscode.window.activeTextEditor = { document: { uri: { fsPath: localPath } } } as unknown as vscode.TextEditor;
+
+    const handler = handlers.get('gangway.downloadFile')!;
+    await handler();
+
+    expect(fakeRawClient.stat).toHaveBeenCalledWith('/var/www/app/config.php');
+    expect(fakeRawClient.fastGet).toHaveBeenCalledWith('/var/www/app/config.php', expect.any(String));
+  });
+
+  it('gangway.downloadFile warns and never touches the network when invoked with no arguments and no active editor', async () => {
+    vscode.window.activeTextEditor = undefined;
     const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
     const handler = handlers.get('gangway.downloadFile')!;
 
     await handler(undefined);
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Select a file'));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('No active editor'));
+    expect(fakeRawClient.stat).not.toHaveBeenCalled();
+  });
+
+  it('gangway.downloadFile warns cleanly when invoked with no arguments and the open file has no Gangway sidecar metadata', async () => {
+    const localPath = path.join(tmpHome, 'not-managed.php');
+    await fs.writeFile(localPath, 'plain content');
+    vscode.window.activeTextEditor = { document: { uri: { fsPath: localPath } } } as unknown as vscode.TextEditor;
+    const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+
+    const handler = handlers.get('gangway.downloadFile')!;
+    await handler();
+
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not a Gangway-managed file'));
     expect(fakeRawClient.stat).not.toHaveBeenCalled();
   });
 

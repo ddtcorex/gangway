@@ -99,17 +99,35 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     vscode.commands.registerCommand('gangway.downloadFile', async (node?: RemoteTreeNode) => {
       const connection = requireActiveConnection();
       if (!connection) return;
-      if (!node?.entry?.path) {
-        // Guards the pre-existing keybinding (alt+shift+w), which VS Code
-        // fires with no arguments at all -- a keybinding can only pass a
-        // static `args` value declared in package.json, never "the tree
-        // item that's currently selected". The real, working invocation
-        // path is the file-node context menu entry, which always supplies
-        // one.
-        await vscode.window.showWarningMessage('Select a file in the Gangway Remote Explorer to download it.');
-        return;
+
+      let remotePath = node?.entry?.path;
+
+      // Real keybinding invocation (Alt+Shift+W) supplies no arguments at
+      // all -- a keybinding can only pass a static `args` value declared in
+      // package.json, never "the tree item that's currently selected". The
+      // actual context is "re-download whatever tmp file is open right now,
+      // discarding local edits": derive the remote path from the active
+      // editor's own sidecar, symmetric to how gangway.uploadFile derives
+      // its arguments from the active editor.
+      if (!remotePath) {
+        const activeEditor = vscode.window.activeTextEditor;
+        if (!activeEditor) {
+          await vscode.window.showWarningMessage(
+            'No active editor to download. Select a file in the Gangway Remote Explorer, or open a Gangway-downloaded file first.',
+          );
+          return;
+        }
+        const localPath = activeEditor.document.uri.fsPath;
+        const sidecar = await readSidecar(localPath);
+        if (!sidecar) {
+          await vscode.window.showWarningMessage(
+            `${localPath} is not a Gangway-managed file (no sidecar metadata found).`,
+          );
+          return;
+        }
+        remotePath = sidecar.remotePath;
       }
-      const remotePath = node.entry.path;
+
       try {
         const adapter = await getAdapter(connection);
         const { localPath } = await downloadFile(adapter, connection, remotePath);
