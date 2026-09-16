@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { readSidecar } from './tmpStore';
+import { sidecarPathFor } from './tmpPath';
 
 async function collectFiles(dir: string, out: string[]): Promise<void> {
   const entries = await fs.readdir(dir, { withFileTypes: true });
@@ -29,7 +30,7 @@ export async function purgeExpiredTmp(tmpRoot: string, retentionDays = 7, now = 
     const meta = await readSidecar(filePath);
     if (meta && meta.downloadedAt < cutoff) {
       await fs.rm(filePath, { force: true });
-      await fs.rm(`${filePath}.meta.json`, { force: true });
+      await fs.rm(sidecarPathFor(filePath), { force: true });
       purged.push(filePath);
     }
   }

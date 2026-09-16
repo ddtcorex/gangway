@@ -48,4 +48,10 @@ describe('purgeExpiredTmp', () => {
     expect(purged).toEqual([]);
     await expect(fs.access(freshPath)).resolves.toBeUndefined();
   });
+
+  it('returns an empty array when tmpRoot does not exist at all', async () => {
+    const missingRoot = path.join(tmpRoot, 'does-not-exist');
+    const purged = await purgeExpiredTmp(missingRoot, 7, Date.now());
+    expect(purged).toEqual([]);
+  });
 });
