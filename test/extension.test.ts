@@ -339,6 +339,21 @@ describe('activate - realistic command invocation', () => {
     expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Uploaded 1 file(s)'));
   });
 
+  it('gangway.uploadFolder reports a path-escape error through showErrorMessage instead of an unhandled rejection', async () => {
+    // tmpFilePathFor() throws when the node's remote path resolves outside
+    // the connection's own remotePath (see tmpPath.ts). That call used to sit
+    // one line outside this handler's try block, so the throw skipped the
+    // catch entirely and became an unhandled rejection instead of the same
+    // mapSftpError -> showErrorMessage path every other failure here takes.
+    const errorSpy = vi.spyOn(vscode.window, 'showErrorMessage');
+    const handler = handlers.get('gangway.uploadFolder')!;
+
+    await handler({ entry: { path: '/etc/passwd', isDirectory: true, isSymbolicLink: false, size: 0 } });
+
+    expect(errorSpy).toHaveBeenCalled();
+    expect(fakeRawClient.list).not.toHaveBeenCalled();
+  });
+
   it('gangway.uploadFolder warns and never touches the network when invoked with no node', async () => {
     const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
     const handler = handlers.get('gangway.uploadFolder')!;

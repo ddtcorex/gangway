@@ -372,13 +372,16 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         return;
       }
       const remotePath = node.entry.path;
-      // A tree-view context-menu command only ever receives the one clicked
-      // node -- there is no second free-form argument a real invocation can
-      // supply. Derive the local tmp mirror the same way single-file
-      // downloads do (tmpFilePathFor mirrors connection.remotePath-relative
-      // paths under the per-connection tmp root).
-      const localRoot = tmpFilePathFor(connection, remotePath);
       try {
+        // A tree-view context-menu command only ever receives the one
+        // clicked node -- there is no second free-form argument a real
+        // invocation can supply. Derive the local tmp mirror the same way
+        // single-file downloads do (tmpFilePathFor mirrors
+        // connection.remotePath-relative paths under the per-connection tmp
+        // root). tmpFilePathFor throws on an escaping path (see tmpPath.ts),
+        // and that throw must land in this catch like every other failure
+        // below, not become an unhandled rejection outside it.
+        const localRoot = tmpFilePathFor(connection, remotePath);
         const adapter = await getAdapter(connection);
         const result = await withCancellableProgress(`Uploading ${remotePath}`, (signal, reportProgress) =>
           runFolderUpload(
