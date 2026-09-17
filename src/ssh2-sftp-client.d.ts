@@ -35,6 +35,7 @@ declare module 'ssh2-sftp-client' {
     fastGet(remotePath: string, localPath: string): Promise<string>;
     fastPut(localPath: string, remotePath: string): Promise<string>;
     posixRename(fromPath: string, toPath: string): Promise<string>;
+    delete(remotePath: string, notFoundOK?: boolean): Promise<string>;
     list(remotePath: string): Promise<Array<{ name: string; type: string }>>;
   }
 }

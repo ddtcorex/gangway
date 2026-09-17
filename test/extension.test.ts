@@ -23,6 +23,7 @@ const fakeRawClient = vi.hoisted(() => ({
   }),
   fastPut: vi.fn().mockResolvedValue(undefined),
   posixRename: vi.fn().mockResolvedValue(undefined),
+  delete: vi.fn().mockResolvedValue(undefined),
 }));
 
 function resetFakeClient(): void {
@@ -33,6 +34,7 @@ function resetFakeClient(): void {
   fakeRawClient.fastGet.mockClear();
   fakeRawClient.fastPut.mockClear();
   fakeRawClient.posixRename.mockClear();
+  fakeRawClient.delete.mockClear();
 }
 
 // activate() builds its own ConnectionPool internally (not injectable), and

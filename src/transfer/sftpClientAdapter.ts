@@ -37,6 +37,8 @@ export interface RawSftpClient {
    * `atmoz/sftp` container in Task 19's E2E suite -- see ssh2-sftp-client.d.ts).
    */
   posixRename(fromPath: string, toPath: string): Promise<unknown>;
+  /** Used only to clean up an orphaned `<name>.tmp` after a failed rename. */
+  delete(remotePath: string): Promise<unknown>;
   list(remotePath: string): Promise<RawSftpListEntry[]>;
 }
 
@@ -84,6 +86,10 @@ export class SftpClientAdapter {
 
   posixRename(fromPath: string, toPath: string): Promise<unknown> {
     return this.raw.posixRename(fromPath, toPath);
+  }
+
+  delete(remotePath: string): Promise<unknown> {
+    return this.raw.delete(remotePath);
   }
 
   list(remotePath: string): Promise<RawSftpListEntry[]> {

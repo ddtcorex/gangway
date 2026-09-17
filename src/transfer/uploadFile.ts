@@ -22,6 +22,13 @@ export interface UploadClient {
    * sidecar refresh below.
    */
   stat(remotePath: string): Promise<RemoteStat>;
+  /**
+   * `delete(remotePath, notFoundOK?)` on the real `ssh2-sftp-client`
+   * (verified against node_modules/ssh2-sftp-client/src/index.js, 2026-09-17:
+   * there is no `unlink`). Used only to clean up our own orphaned `.tmp`
+   * upload below, never to remove a file the user asked to keep.
+   */
+  delete(remotePath: string): Promise<unknown>;
 }
 
 export async function uploadFile(
@@ -40,7 +47,21 @@ export async function uploadFile(
 ): Promise<void> {
   const tmpRemotePath = `${remotePath}.tmp`;
   await client.fastPut(localPath, tmpRemotePath);
-  await client.posixRename(tmpRemotePath, remotePath);
+
+  try {
+    await client.posixRename(tmpRemotePath, remotePath);
+  } catch (err) {
+    // The put succeeded, so `<name>.tmp` is sitting in the client's
+    // production tree right now. Leaving it there is exactly the litter this
+    // tool exists to avoid. Best effort only: a cleanup that also fails must
+    // never replace or mask the rename failure the caller needs to see.
+    try {
+      await client.delete(tmpRemotePath);
+    } catch {
+      /* keep the original error */
+    }
+    throw err;
+  }
 
   // Everything past this line runs AFTER the hotfix has already landed on the
   // server. Letting an audit-log problem throw reported a successful push to
