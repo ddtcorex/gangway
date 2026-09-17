@@ -49,6 +49,35 @@ describe('purgeExpiredTmp', () => {
     await expect(fs.access(freshPath)).resolves.toBeUndefined();
   });
 
+  it('purges an orphaned tmp file that has no sidecar once it is older than the window', async () => {
+    // A download interrupted by a crash leaves the file without a sidecar.
+    // Keying purge solely on sidecar.downloadedAt meant such a file -- which
+    // still holds real client production data -- was retained forever.
+    const now = Date.parse('2026-09-16T00:00:00Z');
+    const orphanPath = path.join(tmpRoot, 'app', 'orphan.php');
+    await fs.mkdir(path.dirname(orphanPath), { recursive: true });
+    await fs.writeFile(orphanPath, 'half-downloaded production data');
+    const eightDaysAgo = now - 8 * 24 * 60 * 60 * 1000;
+    await fs.utimes(orphanPath, new Date(eightDaysAgo), new Date(eightDaysAgo));
+
+    const purged = await purgeExpiredTmp(tmpRoot, 7, now);
+
+    expect(purged).toEqual([orphanPath]);
+    await expect(fs.access(orphanPath)).rejects.toThrow();
+  });
+
+  it('keeps a recent orphan, which may be a download still in flight', async () => {
+    const now = Date.now();
+    const orphanPath = path.join(tmpRoot, 'app', 'in-flight.php');
+    await fs.mkdir(path.dirname(orphanPath), { recursive: true });
+    await fs.writeFile(orphanPath, 'downloading right now');
+
+    const purged = await purgeExpiredTmp(tmpRoot, 7, now);
+
+    expect(purged).toEqual([]);
+    await expect(fs.access(orphanPath)).resolves.toBeUndefined();
+  });
+
   it('returns an empty array when tmpRoot does not exist at all', async () => {
     const missingRoot = path.join(tmpRoot, 'does-not-exist');
     const purged = await purgeExpiredTmp(missingRoot, 7, Date.now());

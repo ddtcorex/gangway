@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { tmpFilePathFor } from '../tmpPath';
-import { writeSidecar } from '../tmpStore';
+import { ensureOwnerOnlyPermissions, writeSidecar } from '../tmpStore';
 import type { ConnectionConfig, RemoteStat, SidecarMeta } from '../types';
 
 export interface DownloadClient {
@@ -22,6 +22,16 @@ export async function downloadFile(
   const remoteStat = await client.stat(remotePath);
   const localPath = tmpFilePathFor(connection, remotePath);
   await fs.mkdir(path.dirname(localPath), { recursive: true });
+
+  // Pre-create owner-only so the file is never readable by anyone else, not
+  // even for the duration of the transfer. `writeSidecar()` also chmods 600,
+  // but only after a *successful* download: a transfer that crashed
+  // mid-stream used to leave client production data sitting at the default
+  // umask mode (typically 0644). fastGet truncates an existing file rather
+  // than recreating it, so the mode set here survives the download.
+  await fs.writeFile(localPath, '', { mode: 0o600 });
+  await ensureOwnerOnlyPermissions(localPath);
+
   await client.fastGet(remotePath, localPath);
 
   const meta: SidecarMeta = {

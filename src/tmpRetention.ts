@@ -28,7 +28,15 @@ export async function purgeExpiredTmp(tmpRoot: string, retentionDays = 7, now = 
   const purged: string[] = [];
   for (const filePath of files) {
     const meta = await readSidecar(filePath);
-    if (meta && meta.downloadedAt < cutoff) {
+
+    // A tmp file with no sidecar is a download that never finished (a crash
+    // mid-stream, say). It still holds real client production data, so
+    // keeping it forever -- which is what keying purge solely on
+    // `sidecar.downloadedAt` did -- is the wrong default. Its own mtime
+    // stands in for `downloadedAt`, so a transfer still in flight, or a file
+    // the user is actively editing, is left alone.
+    const age = meta ? meta.downloadedAt : (await fs.stat(filePath)).mtimeMs;
+    if (age < cutoff) {
       await fs.rm(filePath, { force: true });
       await fs.rm(sidecarPathFor(filePath), { force: true });
       purged.push(filePath);

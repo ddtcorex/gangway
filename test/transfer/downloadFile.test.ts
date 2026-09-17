@@ -29,6 +29,26 @@ afterEach(async () => {
 });
 
 describe('downloadFile', () => {
+  it('creates the tmp file owner-only BEFORE any server bytes are written into it', async () => {
+    // Tmp files hold client production data. writeSidecar() chmods 600, but
+    // it only runs after a successful download: a transfer that crashed
+    // mid-stream left the file at the default umask mode (typically 0644),
+    // world-readable, for as long as it sat there. Pre-creating it closes the
+    // window entirely rather than narrowing it.
+    let modeDuringTransfer: number | undefined;
+    const client = {
+      stat: vi.fn().mockResolvedValue({ mtime: 1700000000, size: 42, isDirectory: false, isSymbolicLink: false }),
+      fastGet: vi.fn().mockImplementation(async (_remote: string, local: string) => {
+        modeDuringTransfer = (await fs.stat(local)).mode & 0o777;
+        await fs.writeFile(local, 'server content');
+      }),
+    };
+
+    await downloadFile(client, connection, '/var/www/app/config.php');
+
+    expect(modeDuringTransfer).toBe(0o600);
+  });
+
   it('streams the remote file to tmp and writes a sidecar with the fresh stat', async () => {
     const client = {
       stat: vi.fn().mockResolvedValue({ mtime: 1700000000, size: 42, isDirectory: false, isSymbolicLink: false }),
