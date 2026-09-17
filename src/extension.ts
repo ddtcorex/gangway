@@ -173,6 +173,10 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       const connection = connectionManager.list().find((c) => c.id === connectionId);
       return vscode.Uri.file(connection ? tmpFilePathFor(connection, remotePath) : remotePath);
     },
+    (err) => {
+      const mapped = mapSftpError(err);
+      void vscode.window.showErrorMessage(mapped.message, ...mapped.actions.map(actionLabel));
+    },
   );
   const treeView = vscode.window.createTreeView('gangway.remoteExplorer', {
     treeDataProvider: treeProvider as never,

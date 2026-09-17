@@ -60,6 +60,15 @@ export class GangwayTreeProvider implements vscode.TreeDataProvider<GangwayTreeN
      * FileDecorationProvider watching that same local path can decorate
      * this node too. */
     private readonly localUriFor: (connectionId: string, remotePath: string) => vscode.Uri,
+    /** Called when connecting or listing the bound connection's root fails
+     * (bad credentials, unreachable host, ...). A connect failure here used
+     * to reject getChildren() with nothing catching it, which left the tree
+     * spinning forever with no feedback at all -- worse than any visible
+     * error, since VS Code gives no indication that anything went wrong.
+     * Real callers map and surface the error the same way every command
+     * here already does; this stays a plain callback so the provider itself
+     * never touches vscode.window directly, matching its existing style. */
+    private readonly onRootError: (error: unknown) => void = () => {},
   ) {}
 
   private boundConnection(): ConnectionConfig | undefined {
@@ -72,9 +81,17 @@ export class GangwayTreeProvider implements vscode.TreeDataProvider<GangwayTreeN
       const selector: SelectorNode = { kind: 'selector' };
       const connection = this.boundConnection();
       if (!connection) return [selector];
-      await this.connect(connection);
-      const entries = await this.listRemote(connection, connection.remotePath);
-      return [selector, ...this.toEntryNodes(connection.id, entries)];
+      try {
+        await this.connect(connection);
+        const entries = await this.listRemote(connection, connection.remotePath);
+        return [selector, ...this.toEntryNodes(connection.id, entries)];
+      } catch (err) {
+        // The selector row must still render (so the user can pick a
+        // different connection, or retry this one) instead of leaving the
+        // whole view stuck on VS Code's built-in loading spinner forever.
+        this.onRootError(err);
+        return [selector];
+      }
     }
 
     if (isSelectorNode(node)) return [];

@@ -67,6 +67,39 @@ describe('GangwayTreeProvider', () => {
       expect(connect).not.toHaveBeenCalled();
       expect(listRemote).not.toHaveBeenCalled();
     });
+
+    it('still returns the selector row and reports the error, instead of leaving getChildren() rejected, when connect() fails', async () => {
+      // A rejected getChildren() used to have nothing catching it: VS Code's
+      // tree view just stayed on its built-in loading spinner forever, with
+      // no error and no way to pick a different connection -- discovered by
+      // driving a real Extension Development Host end to end, not by any
+      // unit test (every collaborator here was individually mocked to
+      // succeed, so the gap was invisible until connect() genuinely failed).
+      const target = connection();
+      const connect = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+      const listRemote = vi.fn();
+      const onRootError = vi.fn();
+      const provider = new GangwayTreeProvider(() => [target], () => target.id, connect, listRemote, localUriFor, onRootError);
+
+      const roots = await provider.getChildren();
+
+      expect(roots).toEqual([SELECTOR]);
+      expect(listRemote).not.toHaveBeenCalled();
+      expect(onRootError).toHaveBeenCalledWith(expect.objectContaining({ message: 'ECONNREFUSED' }));
+    });
+
+    it('still returns the selector row and reports the error when connect() succeeds but listRemote() fails', async () => {
+      const target = connection();
+      const connect = vi.fn().mockResolvedValue(undefined);
+      const listRemote = vi.fn().mockRejectedValue(new Error('permission denied'));
+      const onRootError = vi.fn();
+      const provider = new GangwayTreeProvider(() => [target], () => target.id, connect, listRemote, localUriFor, onRootError);
+
+      const roots = await provider.getChildren();
+
+      expect(roots).toEqual([SELECTOR]);
+      expect(onRootError).toHaveBeenCalledWith(expect.objectContaining({ message: 'permission denied' }));
+    });
   });
 
   it('the selector node itself has no children', async () => {
