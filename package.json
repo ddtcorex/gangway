@@ -13,7 +13,7 @@
       { "command": "gangway.openConnectionForm", "title": "Gangway: Open Connection Form" },
       { "command": "gangway.downloadFile", "title": "Gangway: Download File" },
       { "command": "gangway.uploadFile", "title": "Gangway: Upload File" },
-      { "command": "gangway.cleanupCache", "title": "Gangway: Cleanup Cache" },
+      { "command": "gangway.cleanupCache", "title": "Gangway: Cleanup Cache (Remove All Local Tmp Files for This Connection)" },
       { "command": "gangway.downloadFolder", "title": "Gangway: Download Folder" },
       { "command": "gangway.uploadFolder", "title": "Gangway: Upload Folder" }
     ],

@@ -330,6 +330,15 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       });
     }),
     vscode.commands.registerCommand('gangway.cleanupCache', async () => {
+      // Explicit user gesture, so it intentionally bypasses the default
+      // 7-day retention window (`retentionDays = 0` purges everything whose
+      // recorded age is not in the future, which in practice is every tmp
+      // file for this connection). That includes files with no sidecar yet
+      // -- a download genuinely still in flight, or one that crashed
+      // mid-stream -- since purgeExpiredTmp() cannot tell those apart from an
+      // abandoned one. This command is "empty the cache for this
+      // connection", not "sweep only what's expired"; run it while a
+      // transfer is in progress at your own risk.
       const connection = requireActiveConnection();
       if (connection) await purgeExpiredTmp(tmpRootFor(connection), 0);
     }),
