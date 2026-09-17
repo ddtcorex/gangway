@@ -175,6 +175,17 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
           );
           return;
         }
+        if (sidecar.connectionId !== connection.id) {
+          // A tmp file left open from a previously-bound connection would
+          // otherwise run against whatever connection is active now: pushing
+          // a hotfix to the wrong server is the worst outcome this tool can
+          // produce, so it stops here rather than issuing any network call.
+          await vscode.window.showWarningMessage(
+            `${localPath} belongs to a different connection than the one currently active for this workspace ` +
+              `("${connection.name}"). Bind that connection to this workspace before continuing.`,
+          );
+          return;
+        }
         remotePath = sidecar.remotePath;
       }
 
@@ -212,6 +223,17 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         if (!sidecar) {
           await vscode.window.showWarningMessage(
             `${localPath} is not a Gangway-managed file (no sidecar metadata found).`,
+          );
+          return;
+        }
+        if (sidecar.connectionId !== connection.id) {
+          // A tmp file left open from a previously-bound connection would
+          // otherwise run against whatever connection is active now: pushing
+          // a hotfix to the wrong server is the worst outcome this tool can
+          // produce, so it stops here rather than issuing any network call.
+          await vscode.window.showWarningMessage(
+            `${localPath} belongs to a different connection than the one currently active for this workspace ` +
+              `("${connection.name}"). Bind that connection to this workspace before continuing.`,
           );
           return;
         }

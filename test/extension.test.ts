@@ -342,6 +342,51 @@ describe('activate - realistic command invocation', () => {
   });
 
   /**
+   * The worst outcome this tool can produce is pushing a hotfix to the wrong
+   * server. Both no-args (keybinding) paths derive the remote path from the
+   * open file's own sidecar; a stale tmp file left open from a
+   * previously-bound connection would otherwise run against whatever
+   * connection is active now, silently.
+   */
+  describe('stale tmp file from another connection', () => {
+    async function seedForeignFile(name: string): Promise<string> {
+      const localPath = path.join(tmpHome, name);
+      await fs.writeFile(localPath, 'content from another server');
+      await writeSidecar(localPath, {
+        connectionId: 'a-different-connection-id',
+        remotePath: '/var/www/app/config.php',
+        mtime: 1700000000000,
+        size: 5,
+        downloadedAt: Date.now(),
+      });
+      vscode.window.activeTextEditor = { document: { uri: { fsPath: localPath } } } as unknown as vscode.TextEditor;
+      return localPath;
+    }
+
+    it('gangway.uploadFile refuses to push a file belonging to a different connection', async () => {
+      await seedForeignFile('foreign-upload.php');
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+
+      await handlers.get('gangway.uploadFile')!();
+
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('different connection'));
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+      expect(fakeRawClient.stat).not.toHaveBeenCalled();
+    });
+
+    it('gangway.downloadFile refuses to refresh a file belonging to a different connection', async () => {
+      await seedForeignFile('foreign-download.php');
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+
+      await handlers.get('gangway.downloadFile')!();
+
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('different connection'));
+      expect(fakeRawClient.fastGet).not.toHaveBeenCalled();
+      expect(fakeRawClient.stat).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
    * Conflict Guard, second half. Before this, a detected conflict showed a
    * warning telling the user to "Open the diff and choose Overwrite, Keep
    * server, or Cancel" and then simply returned: no diff was ever opened, no
