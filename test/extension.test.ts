@@ -234,6 +234,30 @@ describe('activate - realistic command invocation', () => {
     expect(fakeRawClient.fastGet).toHaveBeenCalledWith('/var/www/app/config.php', expect.any(String));
   });
 
+  it('skips a hostile listing entry name instead of downloading outside the tmp root', async () => {
+    // A compromised or spoofed server (the exact threat TOFU host-key
+    // verification defends against) can put anything in a directory listing,
+    // and the name used to be concatenated straight into a local path.
+    fakeRawClient.list.mockImplementation(async (dirPath: string) =>
+      dirPath === '/var/www/app'
+        ? [
+            { name: '../../../../../../../../tmp/gangway-pwned', type: '-' },
+            { name: 'config.php', type: '-' },
+          ]
+        : [],
+    );
+
+    await handlers.get('gangway.downloadFolder')!({
+      entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 },
+    });
+
+    expect(fakeRawClient.fastGet).toHaveBeenCalledTimes(1);
+    expect(fakeRawClient.fastGet).toHaveBeenCalledWith('/var/www/app/config.php', expect.any(String));
+    for (const [, localPath] of fakeRawClient.fastGet.mock.calls as Array<[string, string]>) {
+      expect(localPath.startsWith(tmpHome)).toBe(true);
+    }
+  });
+
   it('gangway.downloadFolder warns and never touches the network when invoked with no node', async () => {
     const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
     const handler = handlers.get('gangway.downloadFolder')!;

@@ -13,6 +13,7 @@ import { readSidecar } from './tmpStore';
 import { purgeExpiredTmp } from './tmpRetention';
 import { tmpFilePathFor, tmpRootFor } from './tmpPath';
 import { mapSftpError, actionLabel } from './errorMapper';
+import { mapListingToEntries } from './remoteListing';
 import { RemoteTreeProvider, type RemoteTreeNode } from './ui/remoteTreeProvider';
 import { createTmpStatusBarItem } from './ui/statusBar';
 import { buildConnectionFormHtml } from './ui/connectionFormHtml';
@@ -91,6 +92,15 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   }
 
   /**
+   * A listing entry the server sent that could not be turned into a safe
+   * local path (see remoteListing.ts). Skipped rather than trusted, and
+   * recorded so a genuinely odd server is diagnosable instead of silent.
+   */
+  function reportUnsafeListingName(name: string): void {
+    output.appendLine(`Skipped a server listing entry with an unsafe name: ${JSON.stringify(name)}`);
+  }
+
+  /**
    * The native half of the Conflict Guard: the built-in diff editor plus a
    * three-way choice matching `FileConflictDecision`. Kept here (and injected
    * into `resolveFileConflict`) so the decision flow itself stays testable
@@ -128,13 +138,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       const connection = requireActiveConnection();
       if (!connection) return [];
       const adapter = await getAdapter(connection);
-      const list = await adapter.list(dirPath);
-      return list.map((entry) => ({
-        path: `${dirPath}/${entry.name}`,
-        isDirectory: entry.type === 'd',
-        isSymbolicLink: entry.type === 'l',
-        size: 0,
-      }));
+      return mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName);
     });
     vscode.window.createTreeView?.('gangway.remoteExplorer', { treeDataProvider: treeProvider as never });
     void purgeExpiredTmp(tmpRootFor(initialConnection));
@@ -277,15 +281,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
           () =>
             runFolderDownload(
               { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 },
-              async (dirPath) => {
-                const entries = await adapter.list(dirPath);
-                return entries.map((entry) => ({
-                  path: `${dirPath}/${entry.name}`,
-                  isDirectory: entry.type === 'd',
-                  isSymbolicLink: entry.type === 'l',
-                  size: 0,
-                }));
-              },
+              async (dirPath) => mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName),
               async (file) => {
                 await downloadFile(adapter, connection, file);
               },
@@ -315,15 +311,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         const adapter = await getAdapter(connection);
         const result = await runFolderUpload(
           { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 },
-          async (dirPath) => {
-            const entries = await adapter.list(dirPath);
-            return entries.map((entry) => ({
-              path: `${dirPath}/${entry.name}`,
-              isDirectory: entry.type === 'd',
-              isSymbolicLink: entry.type === 'l',
-              size: 0,
-            }));
-          },
+          async (dirPath) => mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName),
           async (file) => {
             const relative = file.slice(remotePath.length);
             const localPath = `${localRoot}${relative}`;

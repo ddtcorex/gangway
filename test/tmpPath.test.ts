@@ -34,6 +34,13 @@ describe('tmpPath', () => {
     expect(tmpFile).toBe(path.join(tmpRootFor(connection), 'app/config.php'));
   });
 
+  it('refuses to map a remote path that would resolve outside the connection tmp root', () => {
+    // Defense in depth behind remoteListing's name validation: even if some
+    // other path ever reached here, a tmp file must never be written outside
+    // the per-connection root.
+    expect(() => tmpFilePathFor(connection, '/var/www/../../etc/passwd')).toThrow(/outside/i);
+  });
+
   it('derives the sidecar path by appending .meta.json', () => {
     const tmpFile = tmpFilePathFor(connection, '/var/www/app/config.php');
     expect(sidecarPathFor(tmpFile)).toBe(`${tmpFile}.meta.json`);
