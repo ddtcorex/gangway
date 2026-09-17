@@ -98,4 +98,47 @@ describe('ConnectionFormPanel', () => {
     // The key material itself must never reach the connection record.
     expect(JSON.stringify(created)).not.toContain('phrase');
   });
+
+  it('binds the newly saved connection to the workspace, so the commands can actually use it', async () => {
+    // Nothing in src/ ever called setWorkspaceBinding(): a user could create a
+    // connection and store its secret, yet every command still failed with
+    // "No SFTP connection is bound to this workspace yet", because
+    // requireActiveConnection() resolves through the binding. V1 supports one
+    // connection per workspace by design, so the connection just saved here
+    // is unambiguously the one this workspace means.
+    const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+    const secrets = new ConnectionSecretStore(fakeSecretStore());
+    const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+    const panel = new ConnectionFormPanel(rawPanel as never, manager, secrets);
+
+    await (rawPanel as unknown as { __test_fireMessage: (m: unknown) => void }).__test_fireMessage({
+      nonce: panel.nonce,
+      type: 'saveConnection',
+      payload: {
+        name: 'staging',
+        host: 'example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'agent',
+      },
+    });
+
+    expect(manager.getWorkspaceBinding()).toBe(manager.list()[0].id);
+  });
+
+  it('never binds anything when the message nonce does not match', async () => {
+    const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+    const secrets = new ConnectionSecretStore(fakeSecretStore());
+    const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+    new ConnectionFormPanel(rawPanel as never, manager, secrets);
+
+    await (rawPanel as unknown as { __test_fireMessage: (m: unknown) => void }).__test_fireMessage({
+      nonce: 'wrong-nonce',
+      type: 'saveConnection',
+      payload: { name: 'x', host: 'x', port: 22, username: 'x', remotePath: '/', authMethod: 'agent' },
+    });
+
+    expect(manager.getWorkspaceBinding()).toBeUndefined();
+  });
 });

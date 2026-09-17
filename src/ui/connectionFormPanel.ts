@@ -44,6 +44,15 @@ export class ConnectionFormPanel {
       if (connectionFields.authMethod === 'key' && keyPassphrase) {
         await this.secrets.set(created.id, 'keyPassphrase', keyPassphrase);
       }
+      // Without this the connection exists in the global library but no
+      // command can reach it: requireActiveConnection() in extension.ts
+      // resolves through the workspace binding, and nothing else in the
+      // product ever set one, so every upload/download failed with "No SFTP
+      // connection is bound to this workspace yet" no matter what the user
+      // did. V1 is deliberately one connection per workspace (spec §7), so
+      // the connection the user just saved here is unambiguously the one this
+      // workspace means.
+      await this.connectionManager.setWorkspaceBinding(created.id);
     }
   }
 }
