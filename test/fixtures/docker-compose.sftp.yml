@@ -1,0 +1,16 @@
+services:
+  sftp:
+    image: atmoz/sftp:latest
+    ports:
+      - "2222:22"
+    command: testuser:testpass:::var/www
+    volumes:
+      - ./sftp-data:/home/testuser/var/www
+    healthcheck:
+      # atmoz/sftp ships neither nc nor curl/wget; grep for sshd's listening
+      # port (22 == 0x0016) directly in /proc/net/tcp instead.
+      test: ["CMD-SHELL", "grep -q ':0016 ' /proc/net/tcp"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s

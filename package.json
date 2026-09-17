@@ -40,7 +40,8 @@
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:e2e": "node ./out/test/runE2e.js"
   },
   "dependencies": {
     "ssh2-sftp-client": "^11.0.0",

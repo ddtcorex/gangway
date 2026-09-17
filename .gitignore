@@ -2,3 +2,16 @@ node_modules/
 dist/
 out/
 *.vsix
+
+# E2E SFTP fixture data is mutated in place by the hotfix E2E test run
+# (uploads, out-of-band conflict edits); it is regenerated fresh by
+# test/runE2e.ts before every run and must never be committed.
+test/fixtures/sftp-data/
+.vscode-test/
+
+# AuditLog's default path (extension.ts) when no gangway.auditLogPath is
+# configured in globalState -- falls back to the extension host process's
+# own cwd. Real E2E runs (test/runE2e.ts) don't seed that key (unlike the
+# unit tests' fakeContext(), which points it at os.tmpdir()), so a real run
+# leaves this at the repo root.
+/sftp-hotfix-uploads.log
