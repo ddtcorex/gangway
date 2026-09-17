@@ -26,10 +26,12 @@ interface PooledEntry {
   idleTimer: NodeJS.Timeout;
 }
 
-/** Mutable out-param: lets getClient's catch block tell a user-declined host
- * key apart from a transient connect() failure, without parsing error text. */
+/** Mutable out-param: lets getClient's catch block tell a host-key decision
+ * that must never be retried (the user declined, or the trust decision could
+ * not be persisted) apart from a transient connect() failure, without parsing
+ * error text. */
 interface HostVerifierState {
-  rejectedByUser: boolean;
+  blockedByHostKey: boolean;
 }
 
 /**
@@ -54,14 +56,31 @@ function createHostVerifier(
       callback(true);
       return;
     }
-    void hostKeyPrompt.confirmNewOrChangedKey(host, port, fingerprint, verdict === 'mismatch').then((decision) => {
-      if (decision === 'reject') {
-        state.rejectedByUser = true;
+    // ssh2 only resolves or rejects connect() once this callback fires, so
+    // EVERY path out of here must call it. A rejected prompt or a rejected
+    // record() used to skip the .then() chain entirely, leaving a live
+    // handshake stalled until ssh2's internal readyTimeout -- silently, in
+    // the middle of a network connection.
+    void (async () => {
+      try {
+        const decision = await hostKeyPrompt.confirmNewOrChangedKey(host, port, fingerprint, verdict === 'mismatch');
+        if (decision === 'reject') {
+          state.blockedByHostKey = true;
+          callback(false);
+          return;
+        }
+        await hostKeyStore.record(host, port, fingerprint);
+        callback(true);
+      } catch {
+        // Fail closed. We cannot be sure the trust decision was persisted (or
+        // even made), and proceeding on an unrecorded one would defeat the
+        // point of TOFU: the next connect would prompt again as if this were
+        // still a first contact. Blocking lets the user retry instead. This
+        // is a security decision, so it is not retried with backoff either.
+        state.blockedByHostKey = true;
         callback(false);
-        return;
       }
-      void hostKeyStore.record(host, port, fingerprint).then(() => callback(true));
-    });
+    })();
   };
 }
 
@@ -106,7 +125,7 @@ export class ConnectionPool {
   private async connectWithRetry(connection: ConnectionConfig): Promise<SftpClientLike> {
     const client = this.clientFactory.create();
     const baseOptions = await resolveConnectOptions(connection, this.secrets);
-    const hostVerifierState: HostVerifierState = { rejectedByUser: false };
+    const hostVerifierState: HostVerifierState = { blockedByHostKey: false };
     const connectOptions = {
       ...baseOptions,
       hostHash: 'sha256' as const,
@@ -127,10 +146,11 @@ export class ConnectionPool {
         this.entries.set(connection.id, entry);
         return client;
       } catch (err) {
-        // A user declining a new/changed host key is a security decision,
-        // not a transient network blip: never retry it, and never re-prompt
-        // for the same connect() call.
-        if (hostVerifierState.rejectedByUser) throw err;
+        // A blocked host key is a security decision, not a transient network
+        // blip: never retry it, and never re-prompt for the same connect()
+        // call. Covers both a user declining and a trust decision that could
+        // not be persisted.
+        if (hostVerifierState.blockedByHostKey) throw err;
         lastError = err;
         if (attempt < BACKOFF_MS.length - 1) await sleep(BACKOFF_MS[attempt]);
       }

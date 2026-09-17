@@ -105,6 +105,28 @@ describe('ConnectionPool', () => {
     expect(prompt.confirmNewOrChangedKey).toHaveBeenCalledWith('example.com', 22, expect.any(String), true);
   });
 
+  it(
+    'still settles the handshake when persisting the trusted host key fails, instead of hanging',
+    async () => {
+      // ssh2 only resolves or rejects connect() once the hostVerifier
+      // callback is invoked. A rejected record() used to skip the .then()
+      // that called it, leaving a live handshake stalled until ssh2's own
+      // readyTimeout -- silently, mid-connection. Failing closed is the safe
+      // reading: we cannot be sure the trust decision was persisted, so the
+      // user retries rather than proceeding on an unrecorded one.
+      const client = clientThatInvokesHostVerifier(Buffer.from('deadbeef', 'hex'));
+      const factory = { create: vi.fn().mockReturnValue(client) };
+      const prompt = { confirmNewOrChangedKey: vi.fn().mockResolvedValue('accept') };
+      vi.spyOn(hostKeyStore, 'record').mockRejectedValue(new Error('globalState write failed'));
+      const pool = new ConnectionPool(factory, hostKeyStore, prompt, secrets);
+
+      await expect(pool.getClient(connection)).rejects.toThrow(/host key/i);
+      // Fail-closed must also mean "do not re-prompt three times over".
+      expect(prompt.confirmNewOrChangedKey).toHaveBeenCalledTimes(1);
+    },
+    3000,
+  );
+
   it('retries connect with 1s/2s/4s backoff up to 3 attempts before giving up', async () => {
     vi.useFakeTimers();
     const connectMock = vi
