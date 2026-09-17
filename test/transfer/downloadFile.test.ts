@@ -74,6 +74,7 @@ describe('downloadFile', () => {
       mtime: 1700000000,
       size: 42,
       downloadedAt: expect.any(Number),
+      localMtimeMs: expect.any(Number),
     });
     expect(result.meta).toEqual(sidecar);
   });

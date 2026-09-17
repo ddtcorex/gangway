@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises';
 import type { AuditLog } from '../auditLog';
 import { writeSidecar } from '../tmpStore';
 import type { RemoteStat } from '../types';
@@ -85,11 +86,13 @@ export async function uploadFile(
   // that confuses a user during a completely normal multi-edit hotfix
   // session (found in review after Task 19's real-server E2E work).
   const freshStat = await client.stat(remotePath);
+  const localStat = await fs.stat(localPath);
   await writeSidecar(localPath, {
     connectionId,
     remotePath,
     mtime: freshStat.mtime,
     size: freshStat.size,
     downloadedAt: Date.now(),
+    localMtimeMs: localStat.mtimeMs,
   });
 }

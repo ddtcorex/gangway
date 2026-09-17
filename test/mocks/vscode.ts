@@ -135,6 +135,16 @@ export const window = {
       token: { isCancellationRequested: boolean; onCancellationRequested: (listener: () => void) => Disposable },
     ) => Promise<T>,
   ) => task({ report: () => {} }, { isCancellationRequested: false, onCancellationRequested: () => new Disposable() }),
+  registerFileDecorationProvider: (_provider: unknown) => new Disposable(),
+};
+
+const onDidSaveTextDocumentEmitter = new EventEmitter<{ uri: { fsPath: string } }>();
+
+export const workspace = {
+  onDidSaveTextDocument: onDidSaveTextDocumentEmitter.event,
+  /** Test-only: fires the real onDidSaveTextDocument listeners a production
+   * subscriber attached, simulating a real editor save. */
+  __test_fireDidSaveTextDocument: (uri: { fsPath: string }) => onDidSaveTextDocumentEmitter.fire({ uri }),
 };
 
 export const commands = {

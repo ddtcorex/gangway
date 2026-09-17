@@ -79,6 +79,7 @@ describe('uploadFile', () => {
       mtime: 1700000999,
       size: 14,
       downloadedAt: expect.any(Number),
+      localMtimeMs: expect.any(Number),
     });
   });
 

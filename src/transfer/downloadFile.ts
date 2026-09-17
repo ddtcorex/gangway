@@ -53,6 +53,7 @@ export async function downloadFile(
   // root): the moment `localPath` changes, it is the complete file, never a
   // partial one.
   await fs.rename(downloadingPath, localPath);
+  const localStat = await fs.stat(localPath);
 
   const meta: SidecarMeta = {
     connectionId: connection.id,
@@ -60,6 +61,7 @@ export async function downloadFile(
     mtime: remoteStat.mtime,
     size: remoteStat.size,
     downloadedAt: Date.now(),
+    localMtimeMs: localStat.mtimeMs,
   };
   await writeSidecar(localPath, meta);
 
