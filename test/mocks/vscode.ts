@@ -117,4 +117,8 @@ export const window = {
 
 export const commands = {
   registerCommand: (_id: string, _handler: (...args: unknown[]) => unknown) => new Disposable(),
+  // Used by the Conflict Guard to open the built-in diff editor
+  // (`vscode.diff`). Tests spy on this to assert the diff was really opened
+  // before the overwrite/keep-server/cancel choice was offered.
+  executeCommand: async (_command: string, ..._args: unknown[]): Promise<unknown> => undefined,
 };

@@ -18,6 +18,8 @@ import { buildConnectionFormHtml } from './ui/connectionFormHtml';
 import { ConnectionFormPanel } from './ui/connectionFormPanel';
 import { SftpClientAdapter, type RawSftpClient } from './transfer/sftpClientAdapter';
 import { runFolderDownload, runFolderUpload } from './ui/folderTransferCommands';
+import { resolveFileConflict, type ConflictResolutionUi } from './ui/conflictResolution';
+import type { FileConflictDecision } from './conflictGuard';
 import type { ConnectionConfig } from './types';
 
 export function activate(context: vscode.ExtensionContext): { connectionManager: ConnectionManager; secrets: ConnectionSecretStore } {
@@ -76,6 +78,38 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     const client = await pool.getClient(connection);
     return new SftpClientAdapter(client as unknown as RawSftpClient);
   }
+
+  /**
+   * The native half of the Conflict Guard: the built-in diff editor plus a
+   * three-way choice matching `FileConflictDecision`. Kept here (and injected
+   * into `resolveFileConflict`) so the decision flow itself stays testable
+   * outside a VS Code extension host, matching how every other module in this
+   * extension takes its collaborators.
+   */
+  const conflictUi: ConflictResolutionUi = {
+    showDiff: async (localPath, serverCopyPath, title) => {
+      await vscode.commands.executeCommand(
+        'vscode.diff',
+        vscode.Uri.file(localPath),
+        vscode.Uri.file(serverCopyPath),
+        title,
+      );
+    },
+    askDecision: async (remotePath): Promise<FileConflictDecision> => {
+      // Keep the phrase "changed on the server" in this copy: the E2E suite
+      // recognises the conflict prompt by it.
+      const choice = await vscode.window.showWarningMessage(
+        `${remotePath} changed on the server since it was downloaded. Review the diff, then choose what to do.`,
+        'Overwrite server',
+        'Keep server',
+        'Cancel',
+      );
+      if (choice === 'Overwrite server') return 'overwrite';
+      if (choice === 'Keep server') return 'keepServer';
+      // A dismissed notification (undefined) must never mean "push anyway".
+      return 'cancel';
+    },
+  };
 
   const initialConnection = getActiveConnection();
   if (initialConnection) {
@@ -178,10 +212,14 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         const sidecar = await readSidecar(localPath);
         const freshStat = await adapter.stat(remotePath);
         if (sidecar && checkConflict(sidecar, freshStat) === 'conflict') {
-          await vscode.window.showWarningMessage(
-            `${remotePath} changed on the server since download. Open the diff and choose Overwrite, Keep server, or Cancel.`,
-          );
-          return;
+          const decision = await resolveFileConflict(adapter, connection.id, localPath, remotePath, conflictUi);
+          if (decision === 'keepServer') {
+            await vscode.window.showInformationMessage(
+              `Local edits discarded: ${localPath} now matches the server copy of ${remotePath}.`,
+            );
+            return;
+          }
+          if (decision !== 'overwrite') return;
         }
         const bytes = (await import('node:fs/promises')).default.stat(localPath).then((s) => s.size);
         await uploadFile(adapter, connection.id, localPath, remotePath, await bytes, auditLog);
@@ -291,6 +329,15 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
               'Skip conflicted',
             );
             return choice === 'Review one by one' ? 'reviewOneByOne' : 'skipConflicted';
+          },
+          // The per-file review. Without this argument runFolderUpload has
+          // nothing to call, so "Review one by one" silently behaved exactly
+          // like "Skip conflicted": the user was offered a choice that did
+          // nothing. Each conflicted file now gets the same diff and
+          // three-way decision as a single-file push.
+          async (file) => {
+            const localPath = `${localRoot}${file.slice(remotePath.length)}`;
+            return resolveFileConflict(adapter, connection.id, localPath, file, conflictUi);
           },
         );
         await vscode.window.showInformationMessage(

@@ -312,6 +312,144 @@ describe('activate - realistic command invocation', () => {
     expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
   });
 
+  /**
+   * Conflict Guard, second half. Before this, a detected conflict showed a
+   * warning telling the user to "Open the diff and choose Overwrite, Keep
+   * server, or Cancel" and then simply returned: no diff was ever opened, no
+   * choice was ever offered, and a conflicted file could not be pushed by any
+   * means. These tests drive the three real outcomes.
+   */
+  describe('conflict diff and resolution', () => {
+    // These tests replace `showWarningMessage`'s behaviour, so every spy is
+    // tracked and restored afterwards. `vi.restoreAllMocks()` is off-limits
+    // here: it would also tear down the hoisted fakeRawClient and the
+    // connectionPool module mock (see the note in beforeEach above).
+    const spies: Array<{ mockRestore: () => void }> = [];
+    function track<T extends { mockRestore: () => void }>(spy: T): T {
+      spies.push(spy);
+      return spy;
+    }
+
+    afterEach(() => {
+      while (spies.length) spies.pop()!.mockRestore();
+    });
+
+    async function seedConflictedFile(): Promise<string> {
+      const localPath = path.join(tmpHome, 'conflicted.php');
+      await fs.writeFile(localPath, 'local edit');
+      await writeSidecar(localPath, {
+        connectionId: connection.id,
+        remotePath: '/var/www/app/config.php',
+        mtime: 1700000000000,
+        size: 5,
+        downloadedAt: Date.now(),
+      });
+      // Server moved on since the download: different mtime -> conflict.
+      fakeRawClient.stat.mockResolvedValue({
+        size: 14,
+        modifyTime: 1900000000000,
+        isDirectory: false,
+        isSymbolicLink: false,
+      });
+      vscode.window.activeTextEditor = { document: { uri: { fsPath: localPath } } } as unknown as vscode.TextEditor;
+      return localPath;
+    }
+
+    it('opens the native diff between the local file and a fresh server copy, then blocks the push on Cancel', async () => {
+      const localPath = await seedConflictedFile();
+      const execSpy = track(vi.spyOn(vscode.commands, 'executeCommand'));
+      // An undismissed/dismissed warning returns undefined, which must mean cancel.
+      track(vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue(undefined as never));
+
+      await handlers.get('gangway.uploadFile')!();
+
+      expect(execSpy).toHaveBeenCalledWith(
+        'vscode.diff',
+        expect.objectContaining({ fsPath: localPath }),
+        expect.objectContaining({ fsPath: `${localPath}.gangway-server-fresh` }),
+        expect.stringContaining('config.php'),
+      );
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+      await expect(fs.readFile(localPath, 'utf8')).resolves.toBe('local edit');
+    });
+
+    it('pushes the local file anyway when the user chooses Overwrite', async () => {
+      const localPath = await seedConflictedFile();
+      track(
+        vi.spyOn(vscode.window, 'showWarningMessage').mockImplementation((async (_msg: string, ...items: string[]) =>
+          items.find((item) => /overwrite/i.test(item))) as never),
+      );
+
+      await handlers.get('gangway.uploadFile')!();
+
+      expect(fakeRawClient.fastPut).toHaveBeenCalledWith(localPath, '/var/www/app/config.php.tmp');
+      expect(fakeRawClient.posixRename).toHaveBeenCalledWith(
+        '/var/www/app/config.php.tmp',
+        '/var/www/app/config.php',
+      );
+    });
+
+    it('discards the local edits and does not push when the user chooses Keep server', async () => {
+      const localPath = await seedConflictedFile();
+      track(
+        vi.spyOn(vscode.window, 'showWarningMessage').mockImplementation((async (_msg: string, ...items: string[]) =>
+          items.find((item) => /keep server/i.test(item))) as never),
+      );
+
+      await handlers.get('gangway.uploadFile')!();
+
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+      // The fake client's fastGet writes 'server content'.
+      await expect(fs.readFile(localPath, 'utf8')).resolves.toBe('server content');
+      // The throwaway copy must not survive the flow.
+      await expect(fs.access(`${localPath}.gangway-server-fresh`)).rejects.toThrow();
+    });
+
+    it('wires a real per-file review into folder upload instead of silently skipping every conflict', async () => {
+      // `runFolderUpload`'s reviewOneConflict parameter was never supplied at
+      // the real call site, so "Review one by one" behaved exactly like
+      // "Skip conflicted" -- the user was offered a choice that did nothing.
+      fakeRawClient.list.mockImplementation(async (dirPath: string) =>
+        dirPath === '/var/www/app' ? [{ name: 'conflicted.php', type: '-' }] : [],
+      );
+      fakeRawClient.stat.mockResolvedValue({
+        size: 14,
+        modifyTime: 1900000000000,
+        isDirectory: false,
+        isSymbolicLink: false,
+      });
+      const localFile = tmpFilePathFor(connection, '/var/www/app/conflicted.php');
+      await fs.mkdir(path.dirname(localFile), { recursive: true });
+      await fs.writeFile(localFile, 'local edit');
+      await writeSidecar(localFile, {
+        connectionId: connection.id,
+        remotePath: '/var/www/app/conflicted.php',
+        mtime: 1700000000000,
+        size: 5,
+        downloadedAt: Date.now(),
+      });
+
+      const execSpy = track(vi.spyOn(vscode.commands, 'executeCommand'));
+      track(
+        vi.spyOn(vscode.window, 'showWarningMessage').mockImplementation((async (_msg: string, ...items: string[]) =>
+          items.find((item) => /review one by one/i.test(item)) ??
+          items.find((item) => /overwrite/i.test(item))) as never),
+      );
+
+      await handlers.get('gangway.uploadFolder')!({
+        entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 },
+      });
+
+      expect(execSpy).toHaveBeenCalledWith(
+        'vscode.diff',
+        expect.objectContaining({ fsPath: localFile }),
+        expect.objectContaining({ fsPath: `${localFile}.gangway-server-fresh` }),
+        expect.any(String),
+      );
+      expect(fakeRawClient.fastPut).toHaveBeenCalledWith(localFile, '/var/www/app/conflicted.php.tmp');
+    });
+  });
+
   it('gangway.uploadFile still accepts explicit localPath/remotePath arguments (Task 19 E2E contract)', async () => {
     const localPath = path.join(tmpHome, 'explicit.php');
     await fs.writeFile(localPath, 'explicit content');
