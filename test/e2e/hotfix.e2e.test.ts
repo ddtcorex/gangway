@@ -100,7 +100,7 @@ export async function run(): Promise<void> {
   log('extension activated');
 
   // The extension has no connection bound at boot in a fresh test profile.
-  // Real users create one through gangway.openConnectionForm's Webview; an
+  // Real users create one through gangway.manageRemotes's Webview; an
   // automated test cannot drive that UI, so it sets up the same state
   // through the exact modules the form itself calls (Task 17's export).
   const connection = await api.connectionManager.add({

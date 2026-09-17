@@ -14,10 +14,10 @@ import { purgeExpiredTmp } from './tmpRetention';
 import { tmpFilePathFor, tmpRootFor } from './tmpPath';
 import { mapSftpError, actionLabel } from './errorMapper';
 import { mapListingToEntries } from './remoteListing';
-import { GangwayTreeProvider, type ConnectionNode, type RemoteTreeNode } from './ui/gangwayTreeProvider';
+import { GangwayTreeProvider, type RemoteTreeNode } from './ui/gangwayTreeProvider';
 import { createTmpStatusBarItem } from './ui/statusBar';
 import { DirtyDecorationProvider } from './ui/dirtyDecoration';
-import { buildConnectionFormHtml, resolveConnectionFormFields } from './ui/connectionFormHtml';
+import { buildConnectionFormHtml, resolveConnectionFormFields, toConnectionsJson } from './ui/connectionFormHtml';
 import { ConnectionFormPanel } from './ui/connectionFormPanel';
 import { SftpClientAdapter, type RawSftpClient } from './transfer/sftpClientAdapter';
 import { runFolderDownload, runFolderUpload } from './ui/folderTransferCommands';
@@ -61,7 +61,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   /**
    * Resolved fresh on every command invocation, never cached at activate()
    * time: a brand-new user has no connection yet when the extension boots,
-   * creates one later via gangway.openConnectionForm, and the download/upload
+   * creates one later via gangway.manageRemotes, and the download/upload
    * keybindings must work in that same session without a window reload.
    */
   function getActiveConnection() {
@@ -222,16 +222,17 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   if (initialConnection) purgeTmpFor(initialConnection);
 
   /**
-   * Shared by both gangway.openConnectionForm (add) and gangway.editConnection
-   * (edit): the only difference between the two is whether an existing
-   * connection's data is baked into the initial HTML, which is what puts the
-   * form in edit mode (see connectionFormHtml.ts's data-connection-id).
+   * The Manage Remotes page: an add/edit form (left) plus a sidebar listing
+   * every saved connection (right), matching PhpStorm's Deployment dialog.
+   * `initialConnection` only decides which entry the form starts on -- the
+   * sidebar always lists everything and the user can click any row, or "+
+   * Add", to change what the form is editing without reopening the page.
    */
-  function openConnectionFormPanel(existingConnection?: ConnectionConfig): void {
+  function openManageRemotesPanel(initialConnection?: ConnectionConfig): void {
     const mediaDir = vscode.Uri.joinPath(context.extensionUri, 'dist', 'media', 'connectionForm');
     const rawPanel = vscode.window.createWebviewPanel(
       'gangway.connectionForm',
-      existingConnection ? `Gangway: Edit ${existingConnection.name}` : 'Gangway: New Connection',
+      'Gangway: Manage Remotes',
       vscode.ViewColumn.Active,
       { enableScripts: true, localResourceRoots: [mediaDir] },
     );
@@ -239,12 +240,13 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       rawPanel,
       connectionManager,
       secrets,
-      (connection) => {
-        // A new connection turns the (already present, but empty) tree into
-        // one with a real root node; an edited one may have a new name/host,
-        // both of which the tree needs to re-render.
+      (connections) => {
+        // Any add/edit/delete can change what the tree's selector row and
+        // file listing should show (a renamed bound connection, one that
+        // just lost its binding because it was deleted, ...).
         treeProvider.refresh();
-        purgeTmpFor(connection);
+        const bound = connections.find((c) => c.id === connectionManager.getWorkspaceBinding());
+        if (bound) purgeTmpFor(bound);
       },
       async () => {
         const picked = await vscode.window.showOpenDialog({
@@ -256,13 +258,22 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         });
         return picked?.[0]?.fsPath;
       },
+      async (connection) => {
+        const choice = await vscode.window.showWarningMessage(
+          `Delete the saved connection "${connection.name}" (${connection.host})? This does not touch anything on the server.`,
+          { modal: true },
+          'Delete',
+        );
+        return choice === 'Delete';
+      },
     );
     rawPanel.webview.html = buildConnectionFormHtml({
       toolkitUri: rawPanel.webview.asWebviewUri(vscode.Uri.joinPath(mediaDir, 'toolkit.min.js')).toString(),
       mainScriptUri: rawPanel.webview.asWebviewUri(vscode.Uri.joinPath(mediaDir, 'main.js')).toString(),
       cspSource: rawPanel.webview.cspSource,
       nonce: panel.nonce,
-      ...resolveConnectionFormFields(existingConnection),
+      ...resolveConnectionFormFields(initialConnection),
+      connectionsJson: toConnectionsJson(connectionManager.list()),
     });
   }
 
@@ -401,35 +412,42 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         await vscode.window.showErrorMessage(mapped.message, ...mapped.actions.map(actionLabel));
       }
     }),
-    vscode.commands.registerCommand('gangway.openConnectionForm', () => openConnectionFormPanel()),
-    vscode.commands.registerCommand('gangway.editConnection', (node?: ConnectionNode) => {
-      if (!node?.connection) return;
-      openConnectionFormPanel(node.connection);
-    }),
-    vscode.commands.registerCommand('gangway.deleteConnection', async (node?: ConnectionNode) => {
-      if (!node?.connection) return;
-      const { connection } = node;
-      const choice = await vscode.window.showWarningMessage(
-        `Delete the saved connection "${connection.name}" (${connection.host})? This does not touch anything on the server.`,
-        { modal: true },
-        'Delete',
-      );
-      if (choice !== 'Delete') return;
-      await connectionManager.remove(connection.id);
-      if (connectionManager.getWorkspaceBinding() === connection.id) {
-        await connectionManager.setWorkspaceBinding(undefined);
+    vscode.commands.registerCommand('gangway.manageRemotes', () => openManageRemotesPanel(getActiveConnection())),
+    vscode.commands.registerCommand('gangway.pickConnection', async () => {
+      // The native analogue of PhpStorm's host dropdown: VS Code has no
+      // built-in <select> inside a TreeView, and a QuickPick is the
+      // idiomatic way to let the user pick one of several named things.
+      type PickItem = vscode.QuickPickItem & { connectionId?: string; action?: 'add' | 'manage' };
+      const items: PickItem[] = [
+        ...connectionManager
+          .list()
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .map(
+            (c): PickItem => ({
+              label: c.name,
+              description: `${c.username}@${c.host}:${c.port}`,
+              detail: c.remotePath,
+              connectionId: c.id,
+            }),
+          ),
+        { label: '$(add) Add New Remote...', action: 'add' },
+        { label: '$(gear) Manage Remotes...', action: 'manage' },
+      ];
+      const picked = await vscode.window.showQuickPick(items, {
+        placeHolder: 'Select a connection to bind to this workspace',
+      });
+      if (!picked) return;
+      if (picked.action === 'add') {
+        openManageRemotesPanel();
+        return;
       }
+      if (picked.action === 'manage') {
+        openManageRemotesPanel(getActiveConnection());
+        return;
+      }
+      if (!picked.connectionId) return;
+      await connectionManager.setWorkspaceBinding(picked.connectionId);
       treeProvider.refresh();
-    }),
-    vscode.commands.registerCommand('gangway.disconnectConnection', async (node?: ConnectionNode) => {
-      // "Disconnect" only clears which connection keybindings (Alt+Shift+Q/W)
-      // act on -- it deliberately does not tear down the pooled SFTP client,
-      // so the connection's own subtree stays browsable in the tree.
-      if (!node?.connection) return;
-      if (connectionManager.getWorkspaceBinding() === node.connection.id) {
-        await connectionManager.setWorkspaceBinding(undefined);
-        treeProvider.refresh();
-      }
     }),
     vscode.commands.registerCommand('gangway.cleanupCache', async () => {
       // Explicit user gesture, so it intentionally bypasses the default

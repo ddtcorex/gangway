@@ -94,10 +94,8 @@ describe('activate', () => {
         'gangway.uploadFile',
         'gangway.downloadFile',
         'gangway.cleanupCache',
-        'gangway.openConnectionForm',
-        'gangway.editConnection',
-        'gangway.deleteConnection',
-        'gangway.disconnectConnection',
+        'gangway.manageRemotes',
+        'gangway.pickConnection',
         'gangway.downloadFolder',
         'gangway.uploadFolder',
       ]),
@@ -641,7 +639,7 @@ describe('activate - realistic command invocation', () => {
   });
 });
 
-describe('activate - connection tree commands (connect, edit, delete, disconnect)', () => {
+describe('activate - the connection selector (pickConnection) and Manage Remotes page', () => {
   let tmpHome: string;
   let handlers: Map<string, (...args: unknown[]) => unknown>;
   let osTmpdirSpy: ReturnType<typeof vi.spyOn>;
@@ -668,8 +666,8 @@ describe('activate - connection tree commands (connect, edit, delete, disconnect
     await fs.rm(tmpHome, { recursive: true, force: true });
   });
 
-  it('gangway.deleteConnection removes the connection and clears the binding if it was the bound one', async () => {
-    const connection = await result.connectionManager.add({
+  it('gangway.pickConnection binds the connection the user picked from the QuickPick', async () => {
+    const staging = await result.connectionManager.add({
       name: 'staging',
       host: 'example.com',
       port: 22,
@@ -677,41 +675,7 @@ describe('activate - connection tree commands (connect, edit, delete, disconnect
       remotePath: '/var/www',
       authMethod: 'password',
     });
-    await result.connectionManager.setWorkspaceBinding(connection.id);
-    vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue('Delete' as never);
-
-    await handlers.get('gangway.deleteConnection')!({ connection });
-
-    expect(result.connectionManager.list()).toEqual([]);
-    expect(result.connectionManager.getWorkspaceBinding()).toBeUndefined();
-  });
-
-  it('gangway.deleteConnection does nothing when the confirmation is declined', async () => {
-    const connection = await result.connectionManager.add({
-      name: 'staging',
-      host: 'example.com',
-      port: 22,
-      username: 'deploy',
-      remotePath: '/var/www',
-      authMethod: 'password',
-    });
-    vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue(undefined);
-
-    await handlers.get('gangway.deleteConnection')!({ connection });
-
-    expect(result.connectionManager.list()).toHaveLength(1);
-  });
-
-  it('gangway.disconnectConnection clears the binding only when this connection is the one bound', async () => {
-    const bound = await result.connectionManager.add({
-      name: 'staging',
-      host: 'example.com',
-      port: 22,
-      username: 'deploy',
-      remotePath: '/var/www',
-      authMethod: 'password',
-    });
-    const other = await result.connectionManager.add({
+    await result.connectionManager.add({
       name: 'prod',
       host: 'prod.example.com',
       port: 22,
@@ -719,17 +683,53 @@ describe('activate - connection tree commands (connect, edit, delete, disconnect
       remotePath: '/var/www',
       authMethod: 'agent',
     });
-    await result.connectionManager.setWorkspaceBinding(bound.id);
+    vi.spyOn(vscode.window, 'showQuickPick').mockImplementation(
+      (async (items: Array<{ label: string; connectionId?: string }>) =>
+        items.find((i) => i.label === 'staging')) as never,
+    );
 
-    await handlers.get('gangway.disconnectConnection')!({ connection: other });
-    expect(result.connectionManager.getWorkspaceBinding()).toBe(bound.id);
+    await handlers.get('gangway.pickConnection')!();
 
-    await handlers.get('gangway.disconnectConnection')!({ connection: bound });
-    expect(result.connectionManager.getWorkspaceBinding()).toBeUndefined();
+    expect(result.connectionManager.getWorkspaceBinding()).toBe(staging.id);
   });
 
-  it('gangway.editConnection opens the webview panel pre-filled with the connection being edited', async () => {
-    const connection = await result.connectionManager.add({
+  it('gangway.pickConnection opens a blank Manage Remotes page for "Add New Remote..."', async () => {
+    const createPanelSpy = vi.spyOn(vscode.window, 'createWebviewPanel');
+    vi.spyOn(vscode.window, 'showQuickPick').mockImplementation(
+      (async (items: Array<{ label: string; action?: string }>) => items.find((i) => i.action === 'add')) as never,
+    );
+
+    await handlers.get('gangway.pickConnection')!();
+
+    const rawPanel = createPanelSpy.mock.results[0]!.value as { webview: { html: string } };
+    expect(rawPanel.webview.html).toContain('data-connection-id=""');
+    expect(rawPanel.webview.html).toContain('New Connection');
+  });
+
+  it('gangway.pickConnection opens Manage Remotes pre-filled with the bound connection for "Manage Remotes..."', async () => {
+    const staging = await result.connectionManager.add({
+      name: 'staging',
+      host: 'example.com',
+      port: 22,
+      username: 'deploy',
+      remotePath: '/var/www',
+      authMethod: 'password',
+    });
+    await result.connectionManager.setWorkspaceBinding(staging.id);
+    const createPanelSpy = vi.spyOn(vscode.window, 'createWebviewPanel');
+    vi.spyOn(vscode.window, 'showQuickPick').mockImplementation(
+      (async (items: Array<{ label: string; action?: string }>) => items.find((i) => i.action === 'manage')) as never,
+    );
+
+    await handlers.get('gangway.pickConnection')!();
+
+    const rawPanel = createPanelSpy.mock.results[0]!.value as { webview: { html: string } };
+    expect(rawPanel.webview.html).toContain(`data-connection-id="${staging.id}"`);
+    expect(rawPanel.webview.html).toContain('value="staging"');
+  });
+
+  it('gangway.manageRemotes opens the page with every saved connection embedded for the sidebar, and deleting one from it clears its workspace binding', async () => {
+    const staging = await result.connectionManager.add({
       name: 'staging',
       host: 'example.com',
       port: 22,
@@ -738,20 +738,41 @@ describe('activate - connection tree commands (connect, edit, delete, disconnect
       authMethod: 'key',
       keyPath: '/home/deploy/.ssh/id_ed25519',
     });
+    const prod = await result.connectionManager.add({
+      name: 'prod',
+      host: 'prod.example.com',
+      port: 22,
+      username: 'deploy',
+      remotePath: '/var/www',
+      authMethod: 'agent',
+    });
+    await result.connectionManager.setWorkspaceBinding(staging.id);
     const createPanelSpy = vi.spyOn(vscode.window, 'createWebviewPanel');
+    vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue('Delete' as never);
 
-    handlers.get('gangway.editConnection')!({ connection });
+    handlers.get('gangway.manageRemotes')!();
 
-    const rawPanel = createPanelSpy.mock.results[0]!.value as { webview: { html: string } };
-    expect(rawPanel.webview.html).toContain(`data-connection-id="${connection.id}"`);
-    expect(rawPanel.webview.html).toContain('value="staging"');
-    expect(rawPanel.webview.html).toContain('value="/home/deploy/.ssh/id_ed25519"');
+    const rawPanel = createPanelSpy.mock.results[0]!.value as {
+      webview: { html: string };
+      __test_fireMessage: (m: unknown) => Promise<void>;
+    };
+    // Pre-filled with the bound connection.
+    expect(rawPanel.webview.html).toContain(`data-connection-id="${staging.id}"`);
+    // Both connections' non-secret fields are embedded for the sidebar list.
+    expect(rawPanel.webview.html).toContain('"name":"staging"');
+    expect(rawPanel.webview.html).toContain('"name":"prod"');
+
+    const nonceMatch = rawPanel.webview.html.match(/data-nonce="([^"]+)"/)!;
+    await rawPanel.__test_fireMessage({ nonce: nonceMatch[1], type: 'deleteConnection', payload: { id: staging.id } });
+
+    expect(result.connectionManager.list().map((c) => c.id)).toEqual([prod.id]);
+    expect(result.connectionManager.getWorkspaceBinding()).toBeUndefined();
   });
 });
 
 /**
  * Every test above pre-binds a connection directly via connectionManager.add
- * + setWorkspaceBinding in beforeEach, bypassing gangway.openConnectionForm
+ * + setWorkspaceBinding in beforeEach, bypassing gangway.manageRemotes
  * and its real ConnectionFormPanel entirely. That exact seam (real webview
  * panel -> saveConnection message -> workspace binding -> a command that
  * depends on it) is what hid three Critical, whole-branch-review-only bugs:
@@ -789,7 +810,7 @@ describe('activate - end to end via the real connection form panel', () => {
     const result = activate(fakeContext());
 
     const createPanelSpy = vi.spyOn(vscode.window, 'createWebviewPanel');
-    handlers.get('gangway.openConnectionForm')!();
+    handlers.get('gangway.manageRemotes')!();
     const rawPanel = createPanelSpy.mock.results[0]!.value as {
       webview: { html: string };
       __test_fireMessage: (message: unknown) => Promise<void>;

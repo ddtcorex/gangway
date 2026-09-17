@@ -10,10 +10,8 @@
   "activationEvents": ["onStartupFinished"],
   "contributes": {
     "commands": [
-      { "command": "gangway.openConnectionForm", "title": "Gangway: Add Connection", "icon": "$(add)" },
-      { "command": "gangway.editConnection", "title": "Gangway: Edit Connection", "icon": "$(edit)" },
-      { "command": "gangway.deleteConnection", "title": "Gangway: Delete Connection", "icon": "$(trash)" },
-      { "command": "gangway.disconnectConnection", "title": "Gangway: Disconnect", "icon": "$(debug-disconnect)" },
+      { "command": "gangway.pickConnection", "title": "Gangway: Switch Connection" },
+      { "command": "gangway.manageRemotes", "title": "Gangway: Manage Remotes", "icon": "$(ellipsis)" },
       { "command": "gangway.downloadFile", "title": "Gangway: Download File" },
       { "command": "gangway.uploadFile", "title": "Gangway: Upload File" },
       { "command": "gangway.cleanupCache", "title": "Gangway: Cleanup Cache (Remove All Local Tmp Files for This Connection)" },
@@ -26,27 +24,12 @@
     ],
     "menus": {
       "view/title": [
-        { "command": "gangway.openConnectionForm", "when": "view == gangway.remoteExplorer", "group": "navigation" }
+        { "command": "gangway.manageRemotes", "when": "view == gangway.remoteExplorer", "group": "navigation" }
       ],
       "view/item/context": [
         { "command": "gangway.downloadFolder", "when": "view == gangway.remoteExplorer && viewItem == gangway.folder" },
         { "command": "gangway.uploadFolder", "when": "view == gangway.remoteExplorer && viewItem == gangway.folder" },
-        { "command": "gangway.downloadFile", "when": "view == gangway.remoteExplorer && viewItem == gangway.file" },
-        {
-          "command": "gangway.disconnectConnection",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.connectionNode.active",
-          "group": "inline@1"
-        },
-        {
-          "command": "gangway.editConnection",
-          "when": "view == gangway.remoteExplorer && viewItem =~ /^gangway\\.connectionNode/",
-          "group": "inline@2"
-        },
-        {
-          "command": "gangway.deleteConnection",
-          "when": "view == gangway.remoteExplorer && viewItem =~ /^gangway\\.connectionNode/",
-          "group": "inline@3"
-        }
+        { "command": "gangway.downloadFile", "when": "view == gangway.remoteExplorer && viewItem == gangway.file" }
       ]
     },
     "views": {
