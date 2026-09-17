@@ -35,7 +35,21 @@ export async function purgeExpiredTmp(tmpRoot: string, retentionDays = 7, now = 
     // `sidecar.downloadedAt` did -- is the wrong default. Its own mtime
     // stands in for `downloadedAt`, so a transfer still in flight, or a file
     // the user is actively editing, is left alone.
-    const age = meta ? meta.downloadedAt : (await fs.stat(filePath)).mtimeMs;
+    let age: number;
+    if (meta) {
+      age = meta.downloadedAt;
+    } else {
+      try {
+        age = (await fs.stat(filePath)).mtimeMs;
+      } catch (err) {
+        // Another purge run, or the download itself, removed this file
+        // between collectFiles() listing it and this stat: nothing left to
+        // purge, so move on instead of crashing the whole sweep on one
+        // already-gone entry.
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw err;
+      }
+    }
     if (age < cutoff) {
       await fs.rm(filePath, { force: true });
       await fs.rm(sidecarPathFor(filePath), { force: true });

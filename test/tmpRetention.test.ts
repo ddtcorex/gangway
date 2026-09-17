@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -82,5 +82,41 @@ describe('purgeExpiredTmp', () => {
     const missingRoot = path.join(tmpRoot, 'does-not-exist');
     const purged = await purgeExpiredTmp(missingRoot, 7, Date.now());
     expect(purged).toEqual([]);
+  });
+
+  it('skips an orphan file removed by a concurrent purge/download between listing and stat, instead of crashing the whole sweep', async () => {
+    // collectFiles() lists the directory once up front; readSidecar() and
+    // fs.stat() run later, one file at a time. Anything can remove a
+    // sidecar-less file in that window (a second purge run, or the download
+    // that was writing it finishing and being deleted for some other
+    // reason). An unguarded fs.stat() on a file that is already gone throws
+    // ENOENT and used to abort the loop, leaving every later file in the
+    // sweep unchecked.
+    const orphanPath = path.join(tmpRoot, 'app', 'vanishes.php');
+    const survivorPath = path.join(tmpRoot, 'app', 'survivor.php');
+    await fs.mkdir(path.dirname(orphanPath), { recursive: true });
+    await fs.writeFile(orphanPath, 'removed before stat runs');
+    const now = Date.parse('2026-09-16T00:00:00Z');
+    const eightDaysAgo = now - 8 * 24 * 60 * 60 * 1000;
+    await seed('app/survivor.php', eightDaysAgo);
+
+    const orphanDir = path.dirname(orphanPath);
+    const realReaddir = fs.readdir.bind(fs) as (dir: string, options: unknown) => Promise<unknown>;
+    const readdirSpy = vi.spyOn(fs, 'readdir').mockImplementation((async (dir: string, options: unknown) => {
+      const entries = await realReaddir(dir, options);
+      // Remove the orphan only once its own directory has just been listed
+      // (so it is captured into `files` first), simulating a concurrent
+      // removal in the window between collectFiles() and this file's own
+      // fs.stat() call later in purgeExpiredTmp's per-file loop.
+      if (dir === orphanDir) await fs.rm(orphanPath, { force: true });
+      return entries;
+    }) as typeof fs.readdir);
+
+    try {
+      const purged = await purgeExpiredTmp(tmpRoot, 7, now);
+      expect(purged).toEqual([survivorPath]);
+    } finally {
+      readdirSpy.mockRestore();
+    }
   });
 });
