@@ -94,6 +94,10 @@ export const window = {
   // before invoking a command handler, and reset to undefined afterwards.
   activeTextEditor: undefined as MockTextEditor | undefined,
   createWebviewPanel: (..._args: unknown[]) => createFakeWebviewPanel(),
+  createTreeView: (_id: string, _options: unknown) => ({
+    visible: false,
+    dispose: () => {},
+  }),
   createStatusBarItem: (..._args: unknown[]) => ({
     text: '',
     color: undefined as ThemeColor | undefined,

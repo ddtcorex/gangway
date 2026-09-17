@@ -100,6 +100,26 @@ describe('activate', () => {
     );
   });
 
+  it('creates the Remote Explorer view even with no connection bound yet', () => {
+    // Previously the whole tree-view block was inside `if (initialConnection)`,
+    // so a user creating their first connection got no explorer at all until
+    // they reloaded the window.
+    const created: string[] = [];
+    const original = vscode.window.createTreeView;
+    vscode.window.createTreeView = ((id: string, options: never) => {
+      created.push(id);
+      return original(id, options);
+    }) as typeof original;
+
+    try {
+      activate(fakeContext());
+    } finally {
+      vscode.window.createTreeView = original;
+    }
+
+    expect(created).toContain('gangway.remoteExplorer');
+  });
+
   it('registers the file commands even with no connection bound yet, so they exist as soon as one is created', () => {
     const registered: string[] = [];
     const original = vscode.commands.registerCommand;

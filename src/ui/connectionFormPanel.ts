@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import type * as vscode from 'vscode';
 import type { ConnectionManager } from '../connectionManager';
 import type { ConnectionSecretStore } from '../secretStore';
-import type { AuthMethod } from '../types';
+import type { AuthMethod, ConnectionConfig } from '../types';
 
 interface SaveConnectionPayload {
   name: string;
@@ -29,6 +29,12 @@ export class ConnectionFormPanel {
     private readonly panel: vscode.WebviewPanel,
     private readonly connectionManager: ConnectionManager,
     private readonly secrets: ConnectionSecretStore,
+    /**
+     * Invoked once a connection has been saved and bound. `activate()` uses it
+     * to refresh the Remote Explorer so a user's first connection populates
+     * the view in the same session, without a window reload.
+     */
+    private readonly onConnectionSaved: (connection: ConnectionConfig) => void = () => {},
   ) {
     this.panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(message as IncomingMessage));
   }
@@ -53,6 +59,7 @@ export class ConnectionFormPanel {
       // the connection the user just saved here is unambiguously the one this
       // workspace means.
       await this.connectionManager.setWorkspaceBinding(created.id);
+      this.onConnectionSaved(created);
     }
   }
 }

@@ -127,6 +127,29 @@ describe('ConnectionFormPanel', () => {
     expect(manager.getWorkspaceBinding()).toBe(manager.list()[0].id);
   });
 
+  it('notifies its caller after a save, so the Remote Explorer can refresh without a window reload', async () => {
+    const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+    const secrets = new ConnectionSecretStore(fakeSecretStore());
+    const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+    const onConnectionSaved = vi.fn();
+    const panel = new ConnectionFormPanel(rawPanel as never, manager, secrets, onConnectionSaved);
+
+    await (rawPanel as unknown as { __test_fireMessage: (m: unknown) => void }).__test_fireMessage({
+      nonce: panel.nonce,
+      type: 'saveConnection',
+      payload: {
+        name: 'staging',
+        host: 'example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'agent',
+      },
+    });
+
+    expect(onConnectionSaved).toHaveBeenCalledWith(expect.objectContaining({ name: 'staging', id: manager.list()[0].id }));
+  });
+
   it('never binds anything when the message nonce does not match', async () => {
     const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
     const secrets = new ConnectionSecretStore(fakeSecretStore());

@@ -40,6 +40,26 @@ describe('RemoteTreeProvider', () => {
     expect((provider.getTreeItem(symlink).iconPath as vscode.ThemeIcon)?.id).toBe('file-symlink-file');
   });
 
+  it('resolves its root lazily, so the view can exist before any connection is bound', async () => {
+    // The view used to be created only if a connection was already bound when
+    // the extension booted, which meant a brand-new user's very first
+    // connection left the Remote Explorer dead until a window reload.
+    let rootPath: string | undefined;
+    const listRemote = vi.fn(async (): Promise<RemoteEntry[]> => [
+      { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 },
+    ]);
+    const provider = new RemoteTreeProvider(() => rootPath, listRemote);
+
+    expect(await provider.getChildren()).toEqual([]);
+    expect(listRemote).not.toHaveBeenCalled();
+
+    rootPath = '/var/www';
+    const roots = await provider.getChildren();
+
+    expect(listRemote).toHaveBeenCalledWith('/var/www');
+    expect(roots[0].entry.path).toBe('/var/www/app');
+  });
+
   it('fires onDidChangeTreeData when refresh() is called', () => {
     const provider = new RemoteTreeProvider('/var/www', async () => []);
     const listener = vi.fn();

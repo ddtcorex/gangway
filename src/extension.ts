@@ -132,20 +132,39 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     },
   };
 
-  const initialConnection = getActiveConnection();
-  if (initialConnection) {
-    const treeProvider = new RemoteTreeProvider(initialConnection.remotePath, async (dirPath) => {
+  /**
+   * Created unconditionally, and resolving its root through
+   * `getActiveConnection()` on every expansion. The whole block used to sit
+   * behind `if (initialConnection)`, so a brand-new user -- who by definition
+   * has no connection bound when the extension boots -- got no Remote
+   * Explorer at all until they reloaded the window, which matches the same
+   * reasoning that already made the commands register unconditionally.
+   */
+  const treeProvider = new RemoteTreeProvider(
+    () => getActiveConnection()?.remotePath,
+    async (dirPath) => {
       const connection = requireActiveConnection();
       if (!connection) return [];
       const adapter = await getAdapter(connection);
       return mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName);
-    });
-    vscode.window.createTreeView?.('gangway.remoteExplorer', { treeDataProvider: treeProvider as never });
-    void purgeExpiredTmp(tmpRootFor(initialConnection));
+    },
+  );
+  const treeView = vscode.window.createTreeView('gangway.remoteExplorer', {
+    treeDataProvider: treeProvider as never,
+  });
+
+  /** Expired tmp entries are per connection, so this runs for whichever
+   * connection is bound: at boot, and again as soon as one is first saved. */
+  function purgeTmpFor(connection: ConnectionConfig): void {
+    void purgeExpiredTmp(tmpRootFor(connection));
   }
+
+  const initialConnection = getActiveConnection();
+  if (initialConnection) purgeTmpFor(initialConnection);
 
   context.subscriptions.push(
     output,
+    treeView,
     vscode.commands.registerCommand('gangway.downloadFile', async (node?: RemoteTreeNode) => {
       const connection = requireActiveConnection();
       if (!connection) return;
@@ -276,7 +295,12 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         vscode.ViewColumn.Active,
         { enableScripts: true, localResourceRoots: [mediaDir] },
       );
-      const panel = new ConnectionFormPanel(rawPanel, connectionManager, secrets);
+      const panel = new ConnectionFormPanel(rawPanel, connectionManager, secrets, (connection) => {
+        // The first connection a user saves is what turns the (already
+        // present, but rootless) Remote Explorer into a real tree.
+        treeProvider.refresh();
+        purgeTmpFor(connection);
+      });
       rawPanel.webview.html = buildConnectionFormHtml({
         toolkitUri: rawPanel.webview.asWebviewUri(vscode.Uri.joinPath(mediaDir, 'toolkit.min.js')).toString(),
         mainScriptUri: rawPanel.webview.asWebviewUri(vscode.Uri.joinPath(mediaDir, 'main.js')).toString(),
