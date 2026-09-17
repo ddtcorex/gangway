@@ -30,6 +30,78 @@ describe('runFolderDownload', () => {
   });
 });
 
+describe('folder transfer cancellation', () => {
+  // folderQueue.ts has had AbortSignal plumbing since Task 13, but nothing
+  // ever passed one in: "Cancel" on the progress notification did nothing at
+  // all. Cancelling mid-queue must also report exactly what already landed --
+  // this pushes to production, so "we stopped somewhere" is not good enough.
+  const tree: Record<string, RemoteEntry[]> = {
+    '/var/www': [
+      { path: '/var/www/a.php', isDirectory: false, isSymbolicLink: false, size: 10 },
+      { path: '/var/www/b.php', isDirectory: false, isSymbolicLink: false, size: 20 },
+      { path: '/var/www/c.php', isDirectory: false, isSymbolicLink: false, size: 30 },
+    ],
+  };
+
+  it('stops a folder download after the file being transferred when cancelled', async () => {
+    const controller = new AbortController();
+    const downloadFile = vi.fn().mockImplementation(async (remotePath: string) => {
+      if (remotePath === '/var/www/a.php') controller.abort();
+    });
+
+    const result = await runFolderDownload(root, listRemoteFixture(tree), downloadFile, vi.fn(), {
+      signal: controller.signal,
+    });
+
+    expect(downloadFile).toHaveBeenCalledTimes(1);
+    expect(result.downloaded).toEqual(['/var/www/a.php']);
+    expect(result.cancelled).toBe(true);
+  });
+
+  it('stops a folder upload when cancelled and still reports what actually landed', async () => {
+    const controller = new AbortController();
+    const uploadFile = vi.fn().mockImplementation(async (remotePath: string) => {
+      if (remotePath === '/var/www/a.php') controller.abort();
+    });
+
+    const result = await runFolderUpload(
+      root,
+      listRemoteFixture(tree),
+      uploadFile,
+      vi.fn().mockResolvedValue(false),
+      vi.fn(),
+      undefined,
+      { signal: controller.signal },
+    );
+
+    expect(uploadFile).toHaveBeenCalledTimes(1);
+    expect(result.uploaded).toEqual(['/var/www/a.php']);
+    expect(result.cancelled).toBe(true);
+  });
+
+  it('reports progress per uploaded file, the way folder download already did', async () => {
+    const reportProgress = vi.fn();
+
+    await runFolderUpload(
+      root,
+      listRemoteFixture(tree),
+      vi.fn().mockResolvedValue(undefined),
+      vi.fn().mockResolvedValue(false),
+      vi.fn(),
+      undefined,
+      { reportProgress },
+    );
+
+    expect(reportProgress).toHaveBeenCalledTimes(3);
+    expect(reportProgress).toHaveBeenCalledWith('/var/www/b.php');
+  });
+
+  it('is not cancelled when no signal is involved', async () => {
+    const result = await runFolderDownload(root, listRemoteFixture(tree), vi.fn(), vi.fn());
+    expect(result.cancelled).toBe(false);
+  });
+});
+
 describe('runFolderUpload', () => {
   it('uploads every non-conflicted file and reports skipped symlinks, without ever bulk-overwriting a conflict', async () => {
     const tree: Record<string, RemoteEntry[]> = {

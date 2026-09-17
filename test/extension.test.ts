@@ -256,6 +256,37 @@ describe('activate - realistic command invocation', () => {
     expect(fakeRawClient.fastGet).toHaveBeenCalledWith('/var/www/app/config.php', expect.any(String));
   });
 
+  it('runs both folder transfers inside a cancellable progress notification', async () => {
+    // folderQueue's AbortSignal plumbing existed from the start but nothing
+    // passed one in, and folder upload had no progress UI at all -- Cancel
+    // was an affordance that did nothing.
+    type ProgressOptions = { cancellable?: boolean; location?: vscode.ProgressLocation | { viewId: string } };
+    const progressOptions: ProgressOptions[] = [];
+    const original = vscode.window.withProgress;
+    vscode.window.withProgress = ((opts: ProgressOptions, task: never) => {
+      progressOptions.push(opts);
+      return original(opts as never, task);
+    }) as typeof original;
+
+    try {
+      fakeRawClient.list.mockResolvedValue([]);
+      await handlers.get('gangway.downloadFolder')!({
+        entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 },
+      });
+      await handlers.get('gangway.uploadFolder')!({
+        entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 },
+      });
+    } finally {
+      vscode.window.withProgress = original;
+    }
+
+    expect(progressOptions).toHaveLength(2);
+    for (const options of progressOptions) {
+      expect(options.cancellable).toBe(true);
+      expect(options.location).toBe(vscode.ProgressLocation.Notification);
+    }
+  });
+
   it('skips a hostile listing entry name instead of downloading outside the tmp root', async () => {
     // A compromised or spoofed server (the exact threat TOFU host-key
     // verification defends against) can put anything in a directory listing,

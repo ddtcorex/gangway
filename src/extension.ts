@@ -153,6 +153,27 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     treeDataProvider: treeProvider as never,
   });
 
+  /**
+   * One cancellable progress notification for both folder commands. The
+   * `AbortSignal` is what actually reaches the transfer queue: VS Code's
+   * cancellation token is translated once, here, so neither command has to.
+   * `location: Notification` (rather than a view id) is what makes the Cancel
+   * button exist at all.
+   */
+  function withCancellableProgress<T>(
+    title: string,
+    task: (signal: AbortSignal, reportProgress: (remotePath: string) => void) => Promise<T>,
+  ): Thenable<T> {
+    return vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title, cancellable: true },
+      (progress, token) => {
+        const controller = new AbortController();
+        token.onCancellationRequested(() => controller.abort());
+        return task(controller.signal, (remotePath) => progress.report({ message: remotePath }));
+      },
+    );
+  }
+
   /** Expired tmp entries are per connection, so this runs for whichever
    * connection is bound: at boot, and again as soon as one is first saved. */
   function purgeTmpFor(connection: ConnectionConfig): void {
@@ -322,17 +343,21 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       const remotePath = node.entry.path;
       try {
         const adapter = await getAdapter(connection);
-        await vscode.window.withProgress(
-          { location: { viewId: 'gangway.remoteExplorer' }, title: 'Downloading folder' },
-          () =>
-            runFolderDownload(
-              { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 },
-              async (dirPath) => mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName),
-              async (file) => {
-                await downloadFile(adapter, connection, file);
-              },
-              () => {},
-            ),
+        const result = await withCancellableProgress(`Downloading ${remotePath}`, (signal, reportProgress) =>
+          runFolderDownload(
+            { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 },
+            async (dirPath) => mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName),
+            async (file) => {
+              await downloadFile(adapter, connection, file);
+            },
+            reportProgress,
+            { signal },
+          ),
+        );
+        await vscode.window.showInformationMessage(
+          result.cancelled
+            ? `Cancelled after downloading ${result.downloaded.length} file(s).`
+            : `Downloaded ${result.downloaded.length} file(s).`,
         );
       } catch (err) {
         const mapped = mapSftpError(err);
@@ -355,43 +380,47 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       const localRoot = tmpFilePathFor(connection, remotePath);
       try {
         const adapter = await getAdapter(connection);
-        const result = await runFolderUpload(
-          { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 },
-          async (dirPath) => mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName),
-          async (file) => {
-            const relative = file.slice(remotePath.length);
-            const localPath = `${localRoot}${relative}`;
-            const bytes = (await import('node:fs/promises')).default.stat(localPath).then((s) => s.size);
-            await uploadFile(adapter, connection.id, localPath, file, await bytes, auditLog, (message) =>
-              output.appendLine(message),
-            );
-          },
-          async (file) => {
-            const sidecar = await readSidecar(`${localRoot}${file.slice(remotePath.length)}`);
-            if (!sidecar) return false;
-            const freshStat = await adapter.stat(file);
-            return checkConflict(sidecar, freshStat) === 'conflict';
-          },
-          async (conflictedPaths) => {
-            const choice = await vscode.window.showWarningMessage(
-              `${conflictedPaths.length} file(s) changed on the server since download.`,
-              'Review one by one',
-              'Skip conflicted',
-            );
-            return choice === 'Review one by one' ? 'reviewOneByOne' : 'skipConflicted';
-          },
-          // The per-file review. Without this argument runFolderUpload has
-          // nothing to call, so "Review one by one" silently behaved exactly
-          // like "Skip conflicted": the user was offered a choice that did
-          // nothing. Each conflicted file now gets the same diff and
-          // three-way decision as a single-file push.
-          async (file) => {
-            const localPath = `${localRoot}${file.slice(remotePath.length)}`;
-            return resolveFileConflict(adapter, connection.id, localPath, file, conflictUi);
-          },
+        const result = await withCancellableProgress(`Uploading ${remotePath}`, (signal, reportProgress) =>
+          runFolderUpload(
+            { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 },
+            async (dirPath) => mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName),
+            async (file) => {
+              const relative = file.slice(remotePath.length);
+              const localPath = `${localRoot}${relative}`;
+              const bytes = (await import('node:fs/promises')).default.stat(localPath).then((s) => s.size);
+              await uploadFile(adapter, connection.id, localPath, file, await bytes, auditLog, (message) =>
+                output.appendLine(message),
+              );
+            },
+            async (file) => {
+              const sidecar = await readSidecar(`${localRoot}${file.slice(remotePath.length)}`);
+              if (!sidecar) return false;
+              const freshStat = await adapter.stat(file);
+              return checkConflict(sidecar, freshStat) === 'conflict';
+            },
+            async (conflictedPaths) => {
+              const choice = await vscode.window.showWarningMessage(
+                `${conflictedPaths.length} file(s) changed on the server since download.`,
+                'Review one by one',
+                'Skip conflicted',
+              );
+              return choice === 'Review one by one' ? 'reviewOneByOne' : 'skipConflicted';
+            },
+            // The per-file review. Without this argument runFolderUpload has
+            // nothing to call, so "Review one by one" silently behaved exactly
+            // like "Skip conflicted": the user was offered a choice that did
+            // nothing. Each conflicted file now gets the same diff and
+            // three-way decision as a single-file push.
+            async (file) => {
+              const localPath = `${localRoot}${file.slice(remotePath.length)}`;
+              return resolveFileConflict(adapter, connection.id, localPath, file, conflictUi);
+            },
+            { signal, reportProgress },
+          ),
         );
         await vscode.window.showInformationMessage(
-          `Uploaded ${result.uploaded.length} file(s). ${result.skippedConflicted.length} skipped (conflicted), ${result.skippedSymlinks.length} skipped (symlinks).`,
+          `${result.cancelled ? 'Cancelled. ' : ''}Uploaded ${result.uploaded.length} file(s). ` +
+            `${result.skippedConflicted.length} skipped (conflicted), ${result.skippedSymlinks.length} skipped (symlinks).`,
         );
       } catch (err) {
         const mapped = mapSftpError(err);

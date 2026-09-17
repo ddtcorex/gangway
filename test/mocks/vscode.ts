@@ -62,6 +62,12 @@ export enum ViewColumn {
   One = 1,
 }
 
+export enum ProgressLocation {
+  SourceControl = 1,
+  Window = 10,
+  Notification = 15,
+}
+
 export enum StatusBarAlignment {
   Left = 1,
   Right = 2,
@@ -116,8 +122,15 @@ export const window = {
   showInformationMessage: async (_msg: string, ..._items: string[]) => undefined,
   showQuickPick: async (_items: unknown[], _opts?: unknown) => undefined,
   showTextDocument: async (_uri: unknown) => ({}),
-  withProgress: async <T>(_opts: unknown, task: (progress: { report: (v: unknown) => void }, token: unknown) => Promise<T>) =>
-    task({ report: () => {} }, {}),
+  // The token mirrors vscode.CancellationToken closely enough for the folder
+  // commands, which translate onCancellationRequested into an AbortController.
+  withProgress: async <T>(
+    _opts: unknown,
+    task: (
+      progress: { report: (v: unknown) => void },
+      token: { isCancellationRequested: boolean; onCancellationRequested: (listener: () => void) => Disposable },
+    ) => Promise<T>,
+  ) => task({ report: () => {} }, { isCancellationRequested: false, onCancellationRequested: () => new Disposable() }),
 };
 
 export const commands = {
