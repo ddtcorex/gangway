@@ -22,8 +22,17 @@ interface SaveConnectionPayload {
 
 type IncomingMessage =
   | { nonce: string; type: 'saveConnection'; payload: SaveConnectionPayload }
+  | { nonce: string; type: 'deleteConnection'; payload: { id: string } }
   | { nonce: string; type: 'browseKeyPath' };
 
+/**
+ * Backs the Manage Remotes page (src/ui/manageRemotesHtml.ts): a single
+ * webview that lists every saved connection alongside an add/edit form for
+ * whichever one is selected. ConnectionConfig itself never carries secrets
+ * (those live only in SecretStorage, keyed by connection id), so the whole
+ * list can be pushed back to the webview after any mutation with no
+ * filtering needed.
+ */
 export class ConnectionFormPanel {
   readonly nonce: string = crypto.randomUUID();
 
@@ -32,11 +41,12 @@ export class ConnectionFormPanel {
     private readonly connectionManager: ConnectionManager,
     private readonly secrets: ConnectionSecretStore,
     /**
-     * Invoked once a connection has been saved. `activate()` uses it to
-     * refresh the Gangway tree so a newly added or renamed connection shows
-     * up in the same session, without a window reload.
+     * Invoked after any add, edit, or delete. `activate()` uses it to
+     * refresh the Gangway tree (a renamed or deleted connection, or one
+     * that just lost its workspace binding, all need the tree and its
+     * selector row to reflect it in the same session).
      */
-    private readonly onConnectionSaved: (connection: ConnectionConfig) => void = () => {},
+    private readonly onConnectionsChanged: (connections: ConnectionConfig[]) => void = () => {},
     /**
      * Shows a native file picker and resolves the chosen local path, or
      * undefined if the user cancelled. Real callers pass
@@ -45,6 +55,13 @@ export class ConnectionFormPanel {
      * module here.
      */
     private readonly chooseKeyFile: () => Promise<string | undefined> = async () => undefined,
+    /**
+     * Confirms a delete before it happens (real callers show a native modal
+     * warning). Injected for the same testability reason as chooseKeyFile;
+     * defaulting to "always confirm" would make deletion un-guardable in
+     * tests that don't care about the prompt, so tests set this explicitly.
+     */
+    private readonly confirmDelete: (connection: ConnectionConfig) => Promise<boolean> = async () => true,
   ) {
     this.panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(message as IncomingMessage));
   }
@@ -85,7 +102,30 @@ export class ConnectionFormPanel {
         // typo".
         await this.connectionManager.setWorkspaceBinding(saved.id);
       }
-      this.onConnectionSaved(saved);
+
+      const connections = this.connectionManager.list();
+      this.onConnectionsChanged(connections);
+      // Tells the webview which id was just saved (so a first-time add turns
+      // into an edit for any later save in the same panel session, without
+      // reopening it) and refreshes its own sidebar list in place.
+      await this.panel.webview.postMessage({ type: 'connectionsUpdated', connections, savedId: saved.id });
+      return;
+    }
+
+    if (message.type === 'deleteConnection') {
+      const connection = this.connectionManager.list().find((c) => c.id === message.payload.id);
+      if (!connection) return;
+      const confirmed = await this.confirmDelete(connection);
+      if (!confirmed) return;
+
+      await this.connectionManager.remove(connection.id);
+      if (this.connectionManager.getWorkspaceBinding() === connection.id) {
+        await this.connectionManager.setWorkspaceBinding(undefined);
+      }
+
+      const connections = this.connectionManager.list();
+      this.onConnectionsChanged(connections);
+      await this.panel.webview.postMessage({ type: 'connectionsUpdated', connections, deletedId: connection.id });
     }
   }
 }

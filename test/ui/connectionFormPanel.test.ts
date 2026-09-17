@@ -127,12 +127,12 @@ describe('ConnectionFormPanel', () => {
     expect(manager.getWorkspaceBinding()).toBe(manager.list()[0].id);
   });
 
-  it('notifies its caller after a save, so the Remote Explorer can refresh without a window reload', async () => {
+  it('notifies its caller with the fresh list after a save, so the Gangway tree can refresh without a window reload', async () => {
     const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
     const secrets = new ConnectionSecretStore(fakeSecretStore());
     const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
-    const onConnectionSaved = vi.fn();
-    const panel = new ConnectionFormPanel(rawPanel as never, manager, secrets, onConnectionSaved);
+    const onConnectionsChanged = vi.fn();
+    const panel = new ConnectionFormPanel(rawPanel as never, manager, secrets, onConnectionsChanged);
 
     await (rawPanel as unknown as { __test_fireMessage: (m: unknown) => void }).__test_fireMessage({
       nonce: panel.nonce,
@@ -147,7 +147,28 @@ describe('ConnectionFormPanel', () => {
       },
     });
 
-    expect(onConnectionSaved).toHaveBeenCalledWith(expect.objectContaining({ name: 'staging', id: manager.list()[0].id }));
+    expect(onConnectionsChanged).toHaveBeenCalledWith([expect.objectContaining({ name: 'staging', id: manager.list()[0].id })]);
+  });
+
+  it('pushes the fresh connections list back to the webview after a save, including which id was just saved', async () => {
+    const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+    const secrets = new ConnectionSecretStore(fakeSecretStore());
+    const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+    const postMessage = vi.spyOn(rawPanel.webview, 'postMessage');
+    const panel = new ConnectionFormPanel(rawPanel as never, manager, secrets);
+
+    await (rawPanel as unknown as { __test_fireMessage: (m: unknown) => void }).__test_fireMessage({
+      nonce: panel.nonce,
+      type: 'saveConnection',
+      payload: { name: 'staging', host: 'example.com', port: 22, username: 'deploy', remotePath: '/var/www', authMethod: 'agent' },
+    });
+
+    const savedId = manager.list()[0].id;
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'connectionsUpdated',
+      connections: manager.list(),
+      savedId,
+    });
   });
 
   it('never binds anything when the message nonce does not match', async () => {
@@ -242,5 +263,75 @@ describe('ConnectionFormPanel', () => {
     });
 
     expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  describe('deleteConnection', () => {
+    async function setup(confirmDelete: (c: import('../../src/types').ConnectionConfig) => Promise<boolean>) {
+      const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+      const secrets = new ConnectionSecretStore(fakeSecretStore());
+      const target = await manager.add({
+        name: 'staging',
+        host: 'example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'password',
+      });
+      const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+      const onConnectionsChanged = vi.fn();
+      const panel = new ConnectionFormPanel(rawPanel as never, manager, secrets, onConnectionsChanged, undefined, confirmDelete);
+      return { manager, rawPanel, panel, onConnectionsChanged, target };
+    }
+
+    it('removes the connection and clears the workspace binding when it was the bound one, after confirmation', async () => {
+      const { manager, rawPanel, panel, onConnectionsChanged, target } = await setup(async () => true);
+      await manager.setWorkspaceBinding(target.id);
+      const postMessage = vi.spyOn(rawPanel.webview, 'postMessage');
+
+      await (rawPanel as unknown as { __test_fireMessage: (m: unknown) => void }).__test_fireMessage({
+        nonce: panel.nonce,
+        type: 'deleteConnection',
+        payload: { id: target.id },
+      });
+
+      expect(manager.list()).toEqual([]);
+      expect(manager.getWorkspaceBinding()).toBeUndefined();
+      expect(onConnectionsChanged).toHaveBeenCalledWith([]);
+      expect(postMessage).toHaveBeenCalledWith({ type: 'connectionsUpdated', connections: [], deletedId: target.id });
+    });
+
+    it('does nothing when the confirmation is declined', async () => {
+      const { manager, rawPanel, panel, onConnectionsChanged, target } = await setup(async () => false);
+
+      await (rawPanel as unknown as { __test_fireMessage: (m: unknown) => void }).__test_fireMessage({
+        nonce: panel.nonce,
+        type: 'deleteConnection',
+        payload: { id: target.id },
+      });
+
+      expect(manager.list()).toHaveLength(1);
+      expect(onConnectionsChanged).not.toHaveBeenCalled();
+    });
+
+    it('never rebinds a still-existing, different connection when the deleted one was not the bound one', async () => {
+      const { manager, rawPanel, panel, target } = await setup(async () => true);
+      const other = await manager.add({
+        name: 'prod',
+        host: 'prod.example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'agent',
+      });
+      await manager.setWorkspaceBinding(other.id);
+
+      await (rawPanel as unknown as { __test_fireMessage: (m: unknown) => void }).__test_fireMessage({
+        nonce: panel.nonce,
+        type: 'deleteConnection',
+        payload: { id: target.id },
+      });
+
+      expect(manager.getWorkspaceBinding()).toBe(other.id);
+    });
   });
 });

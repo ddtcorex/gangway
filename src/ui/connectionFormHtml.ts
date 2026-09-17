@@ -29,6 +29,20 @@ export interface ConnectionFormHtmlInput {
   agentSelected: string;
   passwordHint: string;
   passphraseHint: string;
+  /** Every saved connection's non-secret fields, pre-serialized (see
+   * toConnectionsJson) for the sidebar list -- literal substitution only,
+   * same as every other field here. */
+  connectionsJson: string;
+}
+
+/**
+ * ConnectionConfig never carries secrets (those live only in SecretStorage),
+ * so the whole list can be serialized for the webview's sidebar with no
+ * filtering. Escapes `<` so a connection name/host containing `</script>`
+ * can never break out of the embedding <script> tag.
+ */
+export function toConnectionsJson(connections: ConnectionFormPrefill[]): string {
+  return JSON.stringify(connections).replace(/</g, '\\u003c');
 }
 
 function escapeHtml(value: string): string {
@@ -96,8 +110,18 @@ const TEMPLATE = `<!DOCTYPE html>
   body {
     font-family: var(--vscode-font-family);
     color: var(--vscode-foreground);
-    padding: 0 20px 20px;
+    margin: 0;
+  }
+  .page {
+    display: flex;
+    align-items: flex-start;
+  }
+  .form-main {
+    flex: 1;
+    min-width: 0;
     max-width: 480px;
+    padding: 0 20px 20px;
+    box-sizing: border-box;
   }
   h2 {
     font-size: 1.1em;
@@ -150,6 +174,83 @@ const TEMPLATE = `<!DOCTYPE html>
     gap: 8px;
     margin-top: 24px;
   }
+  /* The remotes list: a right-hand sidebar next to the form, mirroring
+     PhpStorm's Deployment dialog (master list beside a detail form) -- the
+     one piece of that reference worth following, since VS Code has no
+     built-in master/detail widget of its own. */
+  .remotes-sidebar {
+    width: 240px;
+    flex-shrink: 0;
+    border-left: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+    padding: 20px 16px;
+    box-sizing: border-box;
+  }
+  .sidebar-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    gap: 8px;
+  }
+  .sidebar-header span {
+    font-weight: 600;
+    opacity: 0.85;
+  }
+  #remotesList {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .remote-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    gap: 4px;
+  }
+  .remote-row:hover {
+    background: var(--vscode-list-hoverBackground);
+  }
+  .remote-row.active {
+    background: var(--vscode-list-activeSelectionBackground);
+    color: var(--vscode-list-activeSelectionForeground);
+  }
+  .remote-row .remote-info {
+    min-width: 0;
+    overflow: hidden;
+  }
+  .remote-row .remote-name {
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .remote-row .remote-address {
+    font-size: 0.85em;
+    opacity: 0.75;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .remote-row .delete-remote {
+    opacity: 0.6;
+    background: none;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    font-size: 1em;
+    padding: 2px 4px;
+    flex-shrink: 0;
+  }
+  .remote-row .delete-remote:hover {
+    opacity: 1;
+  }
+  .empty-remotes {
+    opacity: 0.7;
+    font-size: 0.9em;
+  }
 </style>
 </head>
 <!-- data-nonce is how main.js reads the nonce. It must NOT go back to
@@ -160,7 +261,9 @@ const TEMPLATE = `<!DOCTYPE html>
      existing connection's id when editing: main.js includes it in the save
      payload so the host knows to update() rather than add(). -->
 <body data-nonce="{{NONCE}}" data-connection-id="{{CONNECTION_ID}}">
-<h2>{{HEADING}}</h2>
+<div class="page">
+<div class="form-main">
+<h2 id="formHeading">{{HEADING}}</h2>
 <form id="connectionForm">
   <div class="field">
     <label class="field-label" for="name">Connection Name</label>
@@ -224,6 +327,19 @@ const TEMPLATE = `<!DOCTYPE html>
     <vscode-button id="save">Save</vscode-button>
   </div>
 </form>
+</div>
+<div class="remotes-sidebar">
+  <div class="sidebar-header">
+    <span>Remotes</span>
+    <vscode-button id="addRemote" appearance="secondary">+ Add</vscode-button>
+  </div>
+  <div id="remotesList"></div>
+</div>
+</div>
+<!-- Every saved connection's non-secret fields, read by main.js to render
+     the sidebar list and to populate the form when a row is clicked --
+     entirely client-side, since nothing here is a secret. -->
+<script type="application/json" id="connections-data">{{CONNECTIONS_JSON}}</script>
 <script type="module" nonce="{{NONCE}}" src="{{TOOLKIT_URI}}"></script>
 <script type="module" nonce="{{NONCE}}" src="{{MAIN_URI}}"></script>
 </body>
@@ -253,5 +369,6 @@ export function buildConnectionFormHtml(input: ConnectionFormHtmlInput): string 
     .replace(/{{KEY_SELECTED}}/g, input.keySelected)
     .replace(/{{AGENT_SELECTED}}/g, input.agentSelected)
     .replace(/{{PASSWORD_BLANK_HINT}}/g, input.passwordHint)
-    .replace(/{{PASSPHRASE_BLANK_HINT}}/g, input.passphraseHint);
+    .replace(/{{PASSPHRASE_BLANK_HINT}}/g, input.passphraseHint)
+    .replace(/{{CONNECTIONS_JSON}}/g, input.connectionsJson);
 }

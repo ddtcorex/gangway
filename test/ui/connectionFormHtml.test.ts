@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { buildConnectionFormHtml, resolveConnectionFormFields } from '../../src/ui/connectionFormHtml';
+import { buildConnectionFormHtml, resolveConnectionFormFields, toConnectionsJson } from '../../src/ui/connectionFormHtml';
 
 /** Strips HTML comments and collapses whitespace, so the two hand-synced
  * copies of the form markup can be compared for real structural drift
@@ -27,6 +27,7 @@ const IDENTITY_FIELDS = {
   agentSelected: '{{AGENT_SELECTED}}',
   passwordHint: '{{PASSWORD_BLANK_HINT}}',
   passphraseHint: '{{PASSPHRASE_BLANK_HINT}}',
+  connectionsJson: '{{CONNECTIONS_JSON}}',
 };
 
 describe('buildConnectionFormHtml', () => {
@@ -153,5 +154,26 @@ describe('resolveConnectionFormFields', () => {
 
     expect(fields.heading).not.toContain('<script>');
     expect(fields.name).not.toContain('<script>');
+  });
+});
+
+describe('toConnectionsJson', () => {
+  it('serializes the connections list as parseable JSON', () => {
+    const json = toConnectionsJson([
+      { id: 'c1', name: 'staging', host: 'example.com', port: 22, username: 'deploy', remotePath: '/var/www', authMethod: 'password' },
+    ]);
+
+    expect(JSON.parse(json)).toEqual([
+      { id: 'c1', name: 'staging', host: 'example.com', port: 22, username: 'deploy', remotePath: '/var/www', authMethod: 'password' },
+    ]);
+  });
+
+  it('escapes "<" so a connection name containing </script> can never break out of the embedding script tag', () => {
+    const json = toConnectionsJson([
+      { id: 'c1', name: '</script><script>alert(1)</script>', host: 'x', port: 22, username: 'x', remotePath: '/', authMethod: 'agent' },
+    ]);
+
+    expect(json).not.toContain('</script>');
+    expect(JSON.parse(json)[0].name).toBe('</script><script>alert(1)</script>');
   });
 });
