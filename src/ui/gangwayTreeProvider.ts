@@ -2,8 +2,16 @@ import * as vscode from 'vscode';
 import type { RemoteEntry } from '../folderQueue';
 import type { ConnectionConfig } from '../types';
 
-export interface ConnectionNode {
-  connection: ConnectionConfig;
+/**
+ * Always the first root node. Its label/description mirror whichever
+ * connection is currently bound to the workspace (or a placeholder when
+ * none is), and its command opens a QuickPick to switch -- the native VS
+ * Code analogue of PhpStorm's host dropdown at the top of its Remote Host
+ * tool window: a real HTML <select> has no equivalent inside a TreeView,
+ * and a QuickPick is the idiomatic native primitive for "pick one of these".
+ */
+export interface SelectorNode {
+  kind: 'selector';
 }
 
 export interface RemoteTreeNode {
@@ -11,10 +19,10 @@ export interface RemoteTreeNode {
   entry: RemoteEntry;
 }
 
-export type GangwayTreeNode = ConnectionNode | RemoteTreeNode;
+export type GangwayTreeNode = SelectorNode | RemoteTreeNode;
 
-function isConnectionNode(node: GangwayTreeNode): node is ConnectionNode {
-  return 'connection' in node;
+function isSelectorNode(node: GangwayTreeNode): node is SelectorNode {
+  return 'kind' in node && node.kind === 'selector';
 }
 
 /** Directories first, then files, each block alphabetical -- the same
@@ -25,17 +33,12 @@ function compareEntries(a: RemoteEntry, b: RemoteEntry): number {
 }
 
 /**
- * The single view backing the Gangway activity bar tab (PhpStorm's "Remote
- * Host" tool window is the closest native analogue): every saved connection
- * is a root node, sorted by name; expanding one connects (idempotently -- the
- * underlying ConnectionPool is already keyed by connection id, so expanding
- * an already-open connection is a cache hit, not a second handshake) and
- * lists its remote root directly nested underneath, exactly like PhpStorm's
- * host row expanding into its file tree. Nothing here assumes only one
- * connection is ever open: each entry node carries its own connectionId, so
- * browsing connection B's subtree never depends on B being "the" workspace
- * binding -- only single-file keybindings (which have no tree node to read a
- * connectionId from) fall back to that binding.
+ * The single view backing the Gangway activity bar tab. Only the connection
+ * currently bound to the workspace is ever browsed here (matching PhpStorm's
+ * single active deployment target): the root is the selector row followed
+ * directly by that connection's own file tree, not a list of every saved
+ * connection -- switching which one is bound (via the selector's QuickPick,
+ * or the Manage Remotes page) is what changes what this tree shows.
  */
 export class GangwayTreeProvider implements vscode.TreeDataProvider<GangwayTreeNode> {
   private readonly changeEmitter = new vscode.EventEmitter<GangwayTreeNode | undefined>();
@@ -44,9 +47,9 @@ export class GangwayTreeProvider implements vscode.TreeDataProvider<GangwayTreeN
   constructor(
     private readonly listConnections: () => ConnectionConfig[],
     private readonly boundConnectionId: () => string | undefined,
-    /** Ensures a pooled client exists for this connection and binds it to the
-     * workspace. Expanding a connection node is how a user "connects" in
-     * this UI, mirroring PhpStorm's host-row expand gesture. */
+    /** Ensures a pooled client exists for the bound connection (the
+     * underlying ConnectionPool is already keyed by connection id, so this
+     * is a cache hit, not a second handshake, once connected). */
     private readonly connect: (connection: ConnectionConfig) => Promise<void>,
     private readonly listRemote: (connection: ConnectionConfig, dirPath: string) => Promise<RemoteEntry[]>,
     /** Maps a connection + remote path to the local file it would live at
@@ -59,18 +62,22 @@ export class GangwayTreeProvider implements vscode.TreeDataProvider<GangwayTreeN
     private readonly localUriFor: (connectionId: string, remotePath: string) => vscode.Uri,
   ) {}
 
+  private boundConnection(): ConnectionConfig | undefined {
+    const id = this.boundConnectionId();
+    return this.listConnections().find((c) => c.id === id);
+  }
+
   async getChildren(node?: GangwayTreeNode): Promise<GangwayTreeNode[]> {
     if (!node) {
-      return [...this.listConnections()]
-        .sort((a, b) => a.name.localeCompare(b.name))
-        .map((connection): ConnectionNode => ({ connection }));
+      const selector: SelectorNode = { kind: 'selector' };
+      const connection = this.boundConnection();
+      if (!connection) return [selector];
+      await this.connect(connection);
+      const entries = await this.listRemote(connection, connection.remotePath);
+      return [selector, ...this.toEntryNodes(connection.id, entries)];
     }
 
-    if (isConnectionNode(node)) {
-      await this.connect(node.connection);
-      const entries = await this.listRemote(node.connection, node.connection.remotePath);
-      return this.toEntryNodes(node.connection.id, entries);
-    }
+    if (isSelectorNode(node)) return [];
 
     const connection = this.listConnections().find((c) => c.id === node.connectionId);
     if (!connection) return [];
@@ -83,14 +90,17 @@ export class GangwayTreeProvider implements vscode.TreeDataProvider<GangwayTreeN
   }
 
   getTreeItem(node: GangwayTreeNode): vscode.TreeItem {
-    if (isConnectionNode(node)) {
-      const { connection } = node;
-      const isActive = this.boundConnectionId() === connection.id;
-      const item = new vscode.TreeItem(connection.name, vscode.TreeItemCollapsibleState.Collapsed);
-      item.description = `${connection.username}@${connection.host}:${connection.port}`;
-      item.tooltip = `${connection.remotePath} on ${connection.host}`;
-      item.iconPath = new vscode.ThemeIcon(isActive ? 'vm-active' : 'vm-outline');
-      item.contextValue = isActive ? 'gangway.connectionNode.active' : 'gangway.connectionNode';
+    if (isSelectorNode(node)) {
+      const connection = this.boundConnection();
+      const item = new vscode.TreeItem(
+        connection ? connection.name : 'Select a connection...',
+        vscode.TreeItemCollapsibleState.None,
+      );
+      item.description = connection ? `${connection.username}@${connection.host}:${connection.port}` : undefined;
+      item.tooltip = 'Click to switch the connection bound to this workspace';
+      item.iconPath = new vscode.ThemeIcon('chevron-down');
+      item.contextValue = 'gangway.selector';
+      item.command = { command: 'gangway.pickConnection', title: 'Switch Connection' };
       return item;
     }
 

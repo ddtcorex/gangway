@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import * as vscode from 'vscode';
-import { GangwayTreeProvider, type ConnectionNode, type RemoteTreeNode } from '../../src/ui/gangwayTreeProvider';
+import { GangwayTreeProvider, type SelectorNode, type RemoteTreeNode } from '../../src/ui/gangwayTreeProvider';
 import type { RemoteEntry } from '../../src/folderQueue';
 import type { ConnectionConfig } from '../../src/types';
 
@@ -21,35 +21,57 @@ function localUriFor(connectionId: string, remotePath: string): vscode.Uri {
   return vscode.Uri.file(`/tmp/gangway-test/${connectionId}${remotePath}`);
 }
 
+const SELECTOR: SelectorNode = { kind: 'selector' };
+
 describe('GangwayTreeProvider', () => {
-  it('lists saved connections at the root, sorted alphabetically by name', async () => {
-    const provider = new GangwayTreeProvider(
-      () => [connection({ id: 'c2', name: 'zeta' }), connection({ id: 'c1', name: 'alpha' })],
-      () => undefined,
-      vi.fn().mockResolvedValue(undefined),
-      vi.fn().mockResolvedValue([]),
-      localUriFor,
-    );
+  describe('root children', () => {
+    it('is just the selector row when no connection is bound', async () => {
+      const provider = new GangwayTreeProvider(
+        () => [connection()],
+        () => undefined,
+        vi.fn().mockResolvedValue(undefined),
+        vi.fn().mockResolvedValue([{ path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 }]),
+        localUriFor,
+      );
 
-    const roots = (await provider.getChildren()) as ConnectionNode[];
+      const roots = await provider.getChildren();
 
-    expect(roots.map((n) => n.connection.name)).toEqual(['alpha', 'zeta']);
+      expect(roots).toEqual([SELECTOR]);
+    });
+
+    it('connects (idempotently, via the injected connect callback) and lists the bound connection root, after the selector row', async () => {
+      const target = connection();
+      const connect = vi.fn().mockResolvedValue(undefined);
+      const listRemote = vi.fn(async (_c: ConnectionConfig, dirPath: string): Promise<RemoteEntry[]> =>
+        dirPath === '/var/www' ? [{ path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 }] : [],
+      );
+      const provider = new GangwayTreeProvider(() => [target], () => target.id, connect, listRemote, localUriFor);
+
+      const roots = (await provider.getChildren()) as Array<SelectorNode | RemoteTreeNode>;
+
+      expect(connect).toHaveBeenCalledWith(target);
+      expect(listRemote).toHaveBeenCalledWith(target, '/var/www');
+      expect(roots[0]).toEqual(SELECTOR);
+      expect((roots[1] as RemoteTreeNode).entry.path).toBe('/var/www/app');
+      expect((roots[1] as RemoteTreeNode).connectionId).toBe(target.id);
+    });
+
+    it('never calls connect/listRemote when the bound id no longer matches a saved connection', async () => {
+      const connect = vi.fn();
+      const listRemote = vi.fn();
+      const provider = new GangwayTreeProvider(() => [], () => 'deleted-id', connect, listRemote, localUriFor);
+
+      const roots = await provider.getChildren();
+
+      expect(roots).toEqual([SELECTOR]);
+      expect(connect).not.toHaveBeenCalled();
+      expect(listRemote).not.toHaveBeenCalled();
+    });
   });
 
-  it('connects (idempotently, via the injected connect callback) and lists the connection root when a connection node is expanded', async () => {
-    const target = connection();
-    const connect = vi.fn().mockResolvedValue(undefined);
-    const listRemote = vi.fn(async (_c: ConnectionConfig, dirPath: string): Promise<RemoteEntry[]> =>
-      dirPath === '/var/www' ? [{ path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 }] : [],
-    );
-    const provider = new GangwayTreeProvider(() => [target], () => undefined, connect, listRemote, localUriFor);
-
-    const children = (await provider.getChildren({ connection: target })) as RemoteTreeNode[];
-
-    expect(connect).toHaveBeenCalledWith(target);
-    expect(listRemote).toHaveBeenCalledWith(target, '/var/www');
-    expect(children[0].entry.path).toBe('/var/www/app');
-    expect(children[0].connectionId).toBe(target.id);
+  it('the selector node itself has no children', async () => {
+    const provider = new GangwayTreeProvider(() => [], () => undefined, vi.fn(), vi.fn(), localUriFor);
+    expect(await provider.getChildren(SELECTOR)).toEqual([]);
   });
 
   it('lists a nested folder using its own connection, not necessarily the currently bound one', async () => {
@@ -83,17 +105,12 @@ describe('GangwayTreeProvider', () => {
       { path: '/var/www/alpha.php', isDirectory: false, isSymbolicLink: false, size: 1 },
       { path: '/var/www/apple', isDirectory: true, isSymbolicLink: false, size: 0 },
     ]);
-    const provider = new GangwayTreeProvider(
-      () => [target],
-      () => undefined,
-      vi.fn().mockResolvedValue(undefined),
-      listRemote,
-      localUriFor,
-    );
+    const provider = new GangwayTreeProvider(() => [target], () => target.id, vi.fn().mockResolvedValue(undefined), listRemote, localUriFor);
 
-    const children = (await provider.getChildren({ connection: target })) as RemoteTreeNode[];
+    const roots = (await provider.getChildren()) as Array<SelectorNode | RemoteTreeNode>;
+    const entries = roots.slice(1) as RemoteTreeNode[];
 
-    expect(children.map((c) => c.entry.path)).toEqual([
+    expect(entries.map((c) => c.entry.path)).toEqual([
       '/var/www/apple',
       '/var/www/zoo',
       '/var/www/alpha.php',
@@ -101,40 +118,26 @@ describe('GangwayTreeProvider', () => {
     ]);
   });
 
-  describe('getTreeItem for a connection node', () => {
-    it('shows the connection name, its address as description, and an active icon only when it is the bound connection', () => {
-      const target = connection({ id: 'c1', name: 'staging', username: 'deploy', host: 'example.com', port: 22 });
-      const provider = new GangwayTreeProvider(
-        () => [target],
-        () => 'c1',
-        vi.fn(),
-        vi.fn(),
-        localUriFor,
-      );
+  describe('getTreeItem for the selector row', () => {
+    it('shows a placeholder label when no connection is bound', () => {
+      const provider = new GangwayTreeProvider(() => [], () => undefined, vi.fn(), vi.fn(), localUriFor);
 
-      const item = provider.getTreeItem({ connection: target });
+      const item = provider.getTreeItem(SELECTOR);
+
+      expect(item.label).toBe('Select a connection...');
+      expect(item.description).toBeUndefined();
+      expect(item.command).toEqual({ command: 'gangway.pickConnection', title: 'Switch Connection' });
+      expect(item.contextValue).toBe('gangway.selector');
+    });
+
+    it('shows the bound connection name and address as description', () => {
+      const target = connection({ name: 'staging', username: 'deploy', host: 'example.com', port: 22 });
+      const provider = new GangwayTreeProvider(() => [target], () => target.id, vi.fn(), vi.fn(), localUriFor);
+
+      const item = provider.getTreeItem(SELECTOR);
 
       expect(item.label).toBe('staging');
       expect(item.description).toBe('deploy@example.com:22');
-      expect(item.collapsibleState).toBe(vscode.TreeItemCollapsibleState.Collapsed);
-      expect((item.iconPath as vscode.ThemeIcon).id).toBe('vm-active');
-      expect(item.contextValue).toBe('gangway.connectionNode.active');
-    });
-
-    it('uses the inactive icon and context value for a connection that is not the bound one', () => {
-      const target = connection({ id: 'c1' });
-      const provider = new GangwayTreeProvider(
-        () => [target],
-        () => 'some-other-id',
-        vi.fn(),
-        vi.fn(),
-        localUriFor,
-      );
-
-      const item = provider.getTreeItem({ connection: target });
-
-      expect((item.iconPath as vscode.ThemeIcon).id).toBe('vm-outline');
-      expect(item.contextValue).toBe('gangway.connectionNode');
     });
   });
 
