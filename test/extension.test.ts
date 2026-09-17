@@ -95,6 +95,9 @@ describe('activate', () => {
         'gangway.downloadFile',
         'gangway.cleanupCache',
         'gangway.openConnectionForm',
+        'gangway.editConnection',
+        'gangway.deleteConnection',
+        'gangway.disconnectConnection',
         'gangway.downloadFolder',
         'gangway.uploadFolder',
       ]),
@@ -195,7 +198,7 @@ describe('activate - realistic command invocation', () => {
     fakeRawClient.stat.mockResolvedValue({ size: 5, modifyTime: 1700000000000, isDirectory: false, isSymbolicLink: false });
     const handler = handlers.get('gangway.downloadFile')!;
 
-    await handler({ entry: { path: '/var/www/app/config.php', isDirectory: false, isSymbolicLink: false, size: 5 } });
+    await handler({ connectionId: connection.id, entry: { path: '/var/www/app/config.php', isDirectory: false, isSymbolicLink: false, size: 5 } });
 
     expect(fakeRawClient.stat).toHaveBeenCalledWith('/var/www/app/config.php');
     expect(fakeRawClient.fastGet).toHaveBeenCalledWith('/var/www/app/config.php', expect.any(String));
@@ -251,7 +254,7 @@ describe('activate - realistic command invocation', () => {
     );
     const handler = handlers.get('gangway.downloadFolder')!;
 
-    await handler({ entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 } });
+    await handler({ connectionId: connection.id, entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 } });
 
     expect(fakeRawClient.list).toHaveBeenCalledWith('/var/www/app');
     expect(fakeRawClient.fastGet).toHaveBeenCalledWith('/var/www/app/config.php', expect.any(String));
@@ -272,9 +275,11 @@ describe('activate - realistic command invocation', () => {
     try {
       fakeRawClient.list.mockResolvedValue([]);
       await handlers.get('gangway.downloadFolder')!({
+        connectionId: connection.id,
         entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 },
       });
       await handlers.get('gangway.uploadFolder')!({
+        connectionId: connection.id,
         entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 },
       });
     } finally {
@@ -302,6 +307,7 @@ describe('activate - realistic command invocation', () => {
     );
 
     await handlers.get('gangway.downloadFolder')!({
+      connectionId: connection.id,
       entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 },
     });
 
@@ -333,7 +339,7 @@ describe('activate - realistic command invocation', () => {
     const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
 
     const handler = handlers.get('gangway.uploadFolder')!;
-    await handler({ entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 } });
+    await handler({ connectionId: connection.id, entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 } });
 
     expect(fakeRawClient.fastPut).toHaveBeenCalledWith(localFile, '/var/www/app/clean.php.tmp');
     expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/app/clean.php.tmp', '/var/www/app/clean.php');
@@ -349,7 +355,7 @@ describe('activate - realistic command invocation', () => {
     const errorSpy = vi.spyOn(vscode.window, 'showErrorMessage');
     const handler = handlers.get('gangway.uploadFolder')!;
 
-    await handler({ entry: { path: '/etc/passwd', isDirectory: true, isSymbolicLink: false, size: 0 } });
+    await handler({ connectionId: connection.id, entry: { path: '/etc/passwd', isDirectory: true, isSymbolicLink: false, size: 0 } });
 
     expect(errorSpy).toHaveBeenCalled();
     expect(fakeRawClient.list).not.toHaveBeenCalled();
@@ -580,6 +586,7 @@ describe('activate - realistic command invocation', () => {
       );
 
       await handlers.get('gangway.uploadFolder')!({
+        connectionId: connection.id,
         entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 },
       });
 
@@ -618,6 +625,127 @@ describe('activate - realistic command invocation', () => {
 
     expect(fakeRawClient.fastPut).toHaveBeenCalledWith(localPath, '/var/www/app/explicit.php.tmp');
     expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/app/explicit.php.tmp', '/var/www/app/explicit.php');
+  });
+
+  it('registers a FileDecorationProvider so a locally-modified tmp file shows a dirty badge', () => {
+    // Full behavior (which files actually get badged) is covered in
+    // test/dirtyState.test.ts and test/ui/dirtyDecoration.test.ts; this only
+    // confirms activate() actually wires the provider into VS Code.
+    const registerSpy = vi.spyOn(vscode.window, 'registerFileDecorationProvider');
+
+    activate(fakeContext());
+
+    expect(registerSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ provideFileDecoration: expect.any(Function) }),
+    );
+  });
+});
+
+describe('activate - connection tree commands (connect, edit, delete, disconnect)', () => {
+  let tmpHome: string;
+  let handlers: Map<string, (...args: unknown[]) => unknown>;
+  let osTmpdirSpy: ReturnType<typeof vi.spyOn>;
+  let result: ReturnType<typeof activate>;
+
+  beforeEach(async () => {
+    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'gangway-tree-cmd-test-'));
+    osTmpdirSpy = vi.spyOn(os, 'tmpdir').mockReturnValue(tmpHome);
+    resetFakeClient();
+    vscode.window.activeTextEditor = undefined;
+
+    handlers = new Map();
+    const original = vscode.commands.registerCommand;
+    vscode.commands.registerCommand = (id: string, handler: (...args: unknown[]) => unknown) => {
+      handlers.set(id, handler);
+      return original(id, handler);
+    };
+
+    result = activate(fakeContext());
+  });
+
+  afterEach(async () => {
+    osTmpdirSpy.mockRestore();
+    await fs.rm(tmpHome, { recursive: true, force: true });
+  });
+
+  it('gangway.deleteConnection removes the connection and clears the binding if it was the bound one', async () => {
+    const connection = await result.connectionManager.add({
+      name: 'staging',
+      host: 'example.com',
+      port: 22,
+      username: 'deploy',
+      remotePath: '/var/www',
+      authMethod: 'password',
+    });
+    await result.connectionManager.setWorkspaceBinding(connection.id);
+    vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue('Delete' as never);
+
+    await handlers.get('gangway.deleteConnection')!({ connection });
+
+    expect(result.connectionManager.list()).toEqual([]);
+    expect(result.connectionManager.getWorkspaceBinding()).toBeUndefined();
+  });
+
+  it('gangway.deleteConnection does nothing when the confirmation is declined', async () => {
+    const connection = await result.connectionManager.add({
+      name: 'staging',
+      host: 'example.com',
+      port: 22,
+      username: 'deploy',
+      remotePath: '/var/www',
+      authMethod: 'password',
+    });
+    vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue(undefined);
+
+    await handlers.get('gangway.deleteConnection')!({ connection });
+
+    expect(result.connectionManager.list()).toHaveLength(1);
+  });
+
+  it('gangway.disconnectConnection clears the binding only when this connection is the one bound', async () => {
+    const bound = await result.connectionManager.add({
+      name: 'staging',
+      host: 'example.com',
+      port: 22,
+      username: 'deploy',
+      remotePath: '/var/www',
+      authMethod: 'password',
+    });
+    const other = await result.connectionManager.add({
+      name: 'prod',
+      host: 'prod.example.com',
+      port: 22,
+      username: 'deploy',
+      remotePath: '/var/www',
+      authMethod: 'agent',
+    });
+    await result.connectionManager.setWorkspaceBinding(bound.id);
+
+    await handlers.get('gangway.disconnectConnection')!({ connection: other });
+    expect(result.connectionManager.getWorkspaceBinding()).toBe(bound.id);
+
+    await handlers.get('gangway.disconnectConnection')!({ connection: bound });
+    expect(result.connectionManager.getWorkspaceBinding()).toBeUndefined();
+  });
+
+  it('gangway.editConnection opens the webview panel pre-filled with the connection being edited', async () => {
+    const connection = await result.connectionManager.add({
+      name: 'staging',
+      host: 'example.com',
+      port: 22,
+      username: 'deploy',
+      remotePath: '/var/www',
+      authMethod: 'key',
+      keyPath: '/home/deploy/.ssh/id_ed25519',
+    });
+    const createPanelSpy = vi.spyOn(vscode.window, 'createWebviewPanel');
+
+    handlers.get('gangway.editConnection')!({ connection });
+
+    const rawPanel = createPanelSpy.mock.results[0]!.value as { webview: { html: string } };
+    expect(rawPanel.webview.html).toContain(`data-connection-id="${connection.id}"`);
+    expect(rawPanel.webview.html).toContain('value="staging"');
+    expect(rawPanel.webview.html).toContain('value="/home/deploy/.ssh/id_ed25519"');
   });
 });
 
@@ -658,7 +786,7 @@ describe('activate - end to end via the real connection form panel', () => {
   });
 
   it('a connection saved through the real webview panel is immediately usable by gangway.downloadFile, with no manual binding step anywhere in this test', async () => {
-    activate(fakeContext());
+    const result = activate(fakeContext());
 
     const createPanelSpy = vi.spyOn(vscode.window, 'createWebviewPanel');
     handlers.get('gangway.openConnectionForm')!();
@@ -690,8 +818,12 @@ describe('activate - end to end via the real connection form panel', () => {
       },
     });
 
+    const createdConnectionId = result.connectionManager.list()[0]!.id;
     const handler = handlers.get('gangway.downloadFile')!;
-    await handler({ entry: { path: '/var/www/app/config.php', isDirectory: false, isSymbolicLink: false, size: 5 } });
+    await handler({
+      connectionId: createdConnectionId,
+      entry: { path: '/var/www/app/config.php', isDirectory: false, isSymbolicLink: false, size: 5 },
+    });
 
     expect(fakeRawClient.fastGet).toHaveBeenCalledWith('/var/www/app/config.php', expect.any(String));
   });

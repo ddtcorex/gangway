@@ -14,9 +14,10 @@ import { purgeExpiredTmp } from './tmpRetention';
 import { tmpFilePathFor, tmpRootFor } from './tmpPath';
 import { mapSftpError, actionLabel } from './errorMapper';
 import { mapListingToEntries } from './remoteListing';
-import { RemoteTreeProvider, type RemoteTreeNode } from './ui/remoteTreeProvider';
+import { GangwayTreeProvider, type ConnectionNode, type RemoteTreeNode } from './ui/gangwayTreeProvider';
 import { createTmpStatusBarItem } from './ui/statusBar';
-import { buildConnectionFormHtml } from './ui/connectionFormHtml';
+import { DirtyDecorationProvider } from './ui/dirtyDecoration';
+import { buildConnectionFormHtml, resolveConnectionFormFields } from './ui/connectionFormHtml';
 import { ConnectionFormPanel } from './ui/connectionFormPanel';
 import { SftpClientAdapter, type RawSftpClient } from './transfer/sftpClientAdapter';
 import { runFolderDownload, runFolderUpload } from './ui/folderTransferCommands';
@@ -79,6 +80,23 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   }
 
   /**
+   * A tree node (file/folder, or a folder command invoked from one) always
+   * names its own connection: resolve THAT one, never the workspace binding,
+   * so browsing or acting on a connection other than the bound one can never
+   * silently operate against the wrong server. Only a keybinding invocation
+   * -- which has no tree node to read a connectionId from -- falls back to
+   * the single bound connection.
+   */
+  function resolveConnection(node?: RemoteTreeNode): ConnectionConfig | undefined {
+    if (!node) return requireActiveConnection();
+    const connection = connectionManager.list().find((c) => c.id === node.connectionId);
+    if (!connection) {
+      void vscode.window.showErrorMessage(`Gangway: no saved connection matches this item anymore (id ${node.connectionId}).`);
+    }
+    return connection;
+  }
+
+  /**
    * The one place the pooled client (typed only as the minimal
    * `SftpClientLike` connect/end pair) gets cast back to the real
    * `ssh2-sftp-client` shape and wrapped in `SftpClientAdapter`, which
@@ -133,24 +151,44 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   };
 
   /**
-   * Created unconditionally, and resolving its root through
-   * `getActiveConnection()` on every expansion. The whole block used to sit
-   * behind `if (initialConnection)`, so a brand-new user -- who by definition
-   * has no connection bound when the extension boots -- got no Remote
-   * Explorer at all until they reloaded the window, which matches the same
-   * reasoning that already made the commands register unconditionally.
+   * Created unconditionally: every saved connection is always listed as a
+   * root node (a brand-new user with zero connections just sees an empty
+   * tree, no special-casing needed), and expanding one connects it --
+   * mirroring PhpStorm's "Remote Host" tool window, where expanding a host
+   * row is what connects to it.
    */
-  const treeProvider = new RemoteTreeProvider(
-    () => getActiveConnection()?.remotePath,
-    async (dirPath) => {
-      const connection = requireActiveConnection();
-      if (!connection) return [];
+  const treeProvider = new GangwayTreeProvider(
+    () => connectionManager.list(),
+    () => connectionManager.getWorkspaceBinding(),
+    async (connection) => {
+      await getAdapter(connection);
+      await connectionManager.setWorkspaceBinding(connection.id);
+      purgeTmpFor(connection);
+    },
+    async (connection, dirPath) => {
       const adapter = await getAdapter(connection);
       return mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName);
+    },
+    (connectionId, remotePath) => {
+      const connection = connectionManager.list().find((c) => c.id === connectionId);
+      return vscode.Uri.file(connection ? tmpFilePathFor(connection, remotePath) : remotePath);
     },
   );
   const treeView = vscode.window.createTreeView('gangway.remoteExplorer', {
     treeDataProvider: treeProvider as never,
+  });
+
+  /**
+   * Badges a Gangway tmp file (in this tree, and in any editor tab showing
+   * it) once its local content has diverged from what last matched the
+   * server. VS Code caches decorations until told otherwise, so every path
+   * that can change dirty state (a successful download or upload makes a
+   * file clean again; a save can make it dirty) explicitly refreshes it.
+   */
+  const dirtyDecorations = new DirtyDecorationProvider();
+  const dirtyDecorationRegistration = vscode.window.registerFileDecorationProvider(dirtyDecorations);
+  const saveListener = vscode.workspace.onDidSaveTextDocument((document) => {
+    dirtyDecorations.refresh(vscode.Uri.file(document.uri.fsPath));
   });
 
   /**
@@ -183,11 +221,58 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   const initialConnection = getActiveConnection();
   if (initialConnection) purgeTmpFor(initialConnection);
 
+  /**
+   * Shared by both gangway.openConnectionForm (add) and gangway.editConnection
+   * (edit): the only difference between the two is whether an existing
+   * connection's data is baked into the initial HTML, which is what puts the
+   * form in edit mode (see connectionFormHtml.ts's data-connection-id).
+   */
+  function openConnectionFormPanel(existingConnection?: ConnectionConfig): void {
+    const mediaDir = vscode.Uri.joinPath(context.extensionUri, 'dist', 'media', 'connectionForm');
+    const rawPanel = vscode.window.createWebviewPanel(
+      'gangway.connectionForm',
+      existingConnection ? `Gangway: Edit ${existingConnection.name}` : 'Gangway: New Connection',
+      vscode.ViewColumn.Active,
+      { enableScripts: true, localResourceRoots: [mediaDir] },
+    );
+    const panel = new ConnectionFormPanel(
+      rawPanel,
+      connectionManager,
+      secrets,
+      (connection) => {
+        // A new connection turns the (already present, but empty) tree into
+        // one with a real root node; an edited one may have a new name/host,
+        // both of which the tree needs to re-render.
+        treeProvider.refresh();
+        purgeTmpFor(connection);
+      },
+      async () => {
+        const picked = await vscode.window.showOpenDialog({
+          canSelectFiles: true,
+          canSelectFolders: false,
+          canSelectMany: false,
+          title: 'Select SSH Private Key',
+          openLabel: 'Select Key',
+        });
+        return picked?.[0]?.fsPath;
+      },
+    );
+    rawPanel.webview.html = buildConnectionFormHtml({
+      toolkitUri: rawPanel.webview.asWebviewUri(vscode.Uri.joinPath(mediaDir, 'toolkit.min.js')).toString(),
+      mainScriptUri: rawPanel.webview.asWebviewUri(vscode.Uri.joinPath(mediaDir, 'main.js')).toString(),
+      cspSource: rawPanel.webview.cspSource,
+      nonce: panel.nonce,
+      ...resolveConnectionFormFields(existingConnection),
+    });
+  }
+
   context.subscriptions.push(
     output,
     treeView,
+    dirtyDecorationRegistration,
+    saveListener,
     vscode.commands.registerCommand('gangway.downloadFile', async (node?: RemoteTreeNode) => {
-      const connection = requireActiveConnection();
+      const connection = resolveConnection(node);
       if (!connection) return;
 
       let remotePath = node?.entry?.path;
@@ -230,9 +315,15 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       }
 
       try {
-        const adapter = await getAdapter(connection);
-        const { localPath } = await downloadFile(adapter, connection, remotePath);
+        const { localPath } = await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: `Gangway: downloading ${remotePath}` },
+          async () => {
+            const adapter = await getAdapter(connection);
+            return downloadFile(adapter, connection, remotePath);
+          },
+        );
         createTmpStatusBarItem(connection.name, remotePath);
+        dirtyDecorations.refresh(vscode.Uri.file(localPath));
         await vscode.window.showTextDocument(vscode.Uri.file(localPath) as never);
       } catch (err) {
         const mapped = mapSftpError(err);
@@ -299,35 +390,46 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
           }
           if (decision !== 'overwrite') return;
         }
-        const bytes = (await import('node:fs/promises')).default.stat(localPath).then((s) => s.size);
-        await uploadFile(adapter, connection.id, localPath, remotePath, await bytes, auditLog, (message) =>
-          output.appendLine(message),
+        const bytes = await (await import('node:fs/promises')).default.stat(localPath).then((s) => s.size);
+        await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: `Gangway: uploading ${remotePath}` },
+          () => uploadFile(adapter, connection.id, localPath, remotePath, bytes, auditLog, (message) => output.appendLine(message)),
         );
+        dirtyDecorations.refresh(vscode.Uri.file(localPath));
       } catch (err) {
         const mapped = mapSftpError(err);
         await vscode.window.showErrorMessage(mapped.message, ...mapped.actions.map(actionLabel));
       }
     }),
-    vscode.commands.registerCommand('gangway.openConnectionForm', () => {
-      const mediaDir = vscode.Uri.joinPath(context.extensionUri, 'dist', 'media', 'connectionForm');
-      const rawPanel = vscode.window.createWebviewPanel(
-        'gangway.connectionForm',
-        'Gangway: Connection',
-        vscode.ViewColumn.Active,
-        { enableScripts: true, localResourceRoots: [mediaDir] },
+    vscode.commands.registerCommand('gangway.openConnectionForm', () => openConnectionFormPanel()),
+    vscode.commands.registerCommand('gangway.editConnection', (node?: ConnectionNode) => {
+      if (!node?.connection) return;
+      openConnectionFormPanel(node.connection);
+    }),
+    vscode.commands.registerCommand('gangway.deleteConnection', async (node?: ConnectionNode) => {
+      if (!node?.connection) return;
+      const { connection } = node;
+      const choice = await vscode.window.showWarningMessage(
+        `Delete the saved connection "${connection.name}" (${connection.host})? This does not touch anything on the server.`,
+        { modal: true },
+        'Delete',
       );
-      const panel = new ConnectionFormPanel(rawPanel, connectionManager, secrets, (connection) => {
-        // The first connection a user saves is what turns the (already
-        // present, but rootless) Remote Explorer into a real tree.
+      if (choice !== 'Delete') return;
+      await connectionManager.remove(connection.id);
+      if (connectionManager.getWorkspaceBinding() === connection.id) {
+        await connectionManager.setWorkspaceBinding(undefined);
+      }
+      treeProvider.refresh();
+    }),
+    vscode.commands.registerCommand('gangway.disconnectConnection', async (node?: ConnectionNode) => {
+      // "Disconnect" only clears which connection keybindings (Alt+Shift+Q/W)
+      // act on -- it deliberately does not tear down the pooled SFTP client,
+      // so the connection's own subtree stays browsable in the tree.
+      if (!node?.connection) return;
+      if (connectionManager.getWorkspaceBinding() === node.connection.id) {
+        await connectionManager.setWorkspaceBinding(undefined);
         treeProvider.refresh();
-        purgeTmpFor(connection);
-      });
-      rawPanel.webview.html = buildConnectionFormHtml({
-        toolkitUri: rawPanel.webview.asWebviewUri(vscode.Uri.joinPath(mediaDir, 'toolkit.min.js')).toString(),
-        mainScriptUri: rawPanel.webview.asWebviewUri(vscode.Uri.joinPath(mediaDir, 'main.js')).toString(),
-        cspSource: rawPanel.webview.cspSource,
-        nonce: panel.nonce,
-      });
+      }
     }),
     vscode.commands.registerCommand('gangway.cleanupCache', async () => {
       // Explicit user gesture, so it intentionally bypasses the default
@@ -343,12 +445,12 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       if (connection) await purgeExpiredTmp(tmpRootFor(connection), 0);
     }),
     vscode.commands.registerCommand('gangway.downloadFolder', async (node?: RemoteTreeNode) => {
-      const connection = requireActiveConnection();
-      if (!connection) return;
       if (!node?.entry?.path) {
         await vscode.window.showWarningMessage('Select a folder in the Gangway Remote Explorer to download it.');
         return;
       }
+      const connection = resolveConnection(node);
+      if (!connection) return;
       const remotePath = node.entry.path;
       try {
         const adapter = await getAdapter(connection);
@@ -357,7 +459,8 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
             { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 },
             async (dirPath) => mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName),
             async (file) => {
-              await downloadFile(adapter, connection, file);
+              const { localPath } = await downloadFile(adapter, connection, file);
+              dirtyDecorations.refresh(vscode.Uri.file(localPath));
             },
             reportProgress,
             { signal },
@@ -374,12 +477,12 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       }
     }),
     vscode.commands.registerCommand('gangway.uploadFolder', async (node?: RemoteTreeNode) => {
-      const connection = requireActiveConnection();
-      if (!connection) return;
       if (!node?.entry?.path) {
         await vscode.window.showWarningMessage('Select a folder in the Gangway Remote Explorer to upload it.');
         return;
       }
+      const connection = resolveConnection(node);
+      if (!connection) return;
       const remotePath = node.entry.path;
       try {
         // A tree-view context-menu command only ever receives the one
@@ -403,6 +506,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
               await uploadFile(adapter, connection.id, localPath, file, await bytes, auditLog, (message) =>
                 output.appendLine(message),
               );
+              dirtyDecorations.refresh(vscode.Uri.file(localPath));
             },
             async (file) => {
               const sidecar = await readSidecar(`${localRoot}${file.slice(remotePath.length)}`);

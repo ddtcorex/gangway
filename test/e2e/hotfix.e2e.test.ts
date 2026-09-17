@@ -122,9 +122,11 @@ export async function run(): Promise<void> {
   const hostFixturePath = path.join(repoRoot(), 'test', 'fixtures', 'sftp-data', 'hotfix.php');
 
   // gangway.downloadFile reads its remote path off `node?.entry?.path` (a
-  // RemoteTreeNode), not a bare string -- see the reconciliation note above.
+  // RemoteTreeNode carrying its own connectionId), not a bare string -- see
+  // the reconciliation note above.
   log('invoking gangway.downloadFile (first connect: expect TOFU host-key prompt)');
   await vscode.commands.executeCommand('gangway.downloadFile', {
+    connectionId: connection.id,
     entry: { path: remotePath, isDirectory: false, isSymbolicLink: false, size: 0 },
   });
   log('gangway.downloadFile returned');
