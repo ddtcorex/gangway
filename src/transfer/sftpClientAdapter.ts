@@ -29,7 +29,14 @@ export interface RawSftpClient {
   stat(remotePath: string): Promise<RawSftpStat>;
   fastGet(remotePath: string, localPath: string): Promise<unknown>;
   fastPut(localPath: string, remotePath: string): Promise<unknown>;
-  rename(fromPath: string, toPath: string): Promise<unknown>;
+  /**
+   * Deliberately the `posix-rename@openssh.com` extension (OpenSSH 4.8+),
+   * not plain SFTP `rename`: standard SFTP v3 rename fails with "file
+   * already exists" when the destination is present, which is true on
+   * every real hotfix upload (verified 2026-09-17 against a real
+   * `atmoz/sftp` container in Task 19's E2E suite -- see ssh2-sftp-client.d.ts).
+   */
+  posixRename(fromPath: string, toPath: string): Promise<unknown>;
   list(remotePath: string): Promise<RawSftpListEntry[]>;
 }
 
@@ -75,8 +82,8 @@ export class SftpClientAdapter {
     return this.raw.fastPut(localPath, remotePath);
   }
 
-  rename(fromPath: string, toPath: string): Promise<unknown> {
-    return this.raw.rename(fromPath, toPath);
+  posixRename(fromPath: string, toPath: string): Promise<unknown> {
+    return this.raw.posixRename(fromPath, toPath);
   }
 
   list(remotePath: string): Promise<RawSftpListEntry[]> {

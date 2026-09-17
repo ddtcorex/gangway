@@ -3,14 +3,17 @@ import { uploadFile } from '../../src/transfer/uploadFile';
 import { AuditLog } from '../../src/auditLog';
 
 describe('uploadFile', () => {
-  it('puts to a .tmp remote path, renames over the target, and appends one audit entry', async () => {
+  it('puts to a .tmp remote path, posix-renames over the target, and appends one audit entry', async () => {
+    // posixRename (not plain rename) is required here: standard SFTP rename
+    // fails with "file already exists" when the destination is present,
+    // which is true on every real hotfix upload -- see uploadFile.ts.
     const calls: string[] = [];
     const client = {
       fastPut: vi.fn().mockImplementation(async (local: string, remote: string) => {
         calls.push(`put:${local}->${remote}`);
       }),
-      rename: vi.fn().mockImplementation(async (from: string, to: string) => {
-        calls.push(`rename:${from}->${to}`);
+      posixRename: vi.fn().mockImplementation(async (from: string, to: string) => {
+        calls.push(`posixRename:${from}->${to}`);
       }),
     };
     const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
@@ -19,7 +22,7 @@ describe('uploadFile', () => {
 
     expect(calls).toEqual([
       'put:/local/app/config.php->/var/www/app/config.php.tmp',
-      'rename:/var/www/app/config.php.tmp->/var/www/app/config.php',
+      'posixRename:/var/www/app/config.php.tmp->/var/www/app/config.php',
     ]);
     expect(auditLog.append).toHaveBeenCalledWith({
       connectionId: 'c1',

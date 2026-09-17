@@ -15,6 +15,16 @@
  * "fix" this to say `mtime` -- src/transfer/sftpClientAdapter.ts is what
  * translates `modifyTime` -> `mtime` at the one place the real client is
  * used (src/extension.ts); this declaration must keep mirroring reality.
+ *
+ * IMPORTANT -- there is deliberately no plain `rename()` here (2026-09-17,
+ * Task 19 real-server E2E finding): standard SFTP v3 `SSH_FXP_RENAME` fails
+ * with "file already exists" when the destination is already present, which
+ * is true on every real hotfix upload (the whole point is overwriting a file
+ * that already exists on the server) -- verified against a real `atmoz/sftp`
+ * container, where `rename()` onto an existing path failed while
+ * `posixRename()` (the `posix-rename@openssh.com` extension, OpenSSH 4.8+)
+ * succeeded. `uploadFile.ts`'s tmp+rename atomic upload must always use
+ * `posixRename()`.
  */
 declare module 'ssh2-sftp-client' {
   export default class Client {
@@ -24,7 +34,7 @@ declare module 'ssh2-sftp-client' {
     stat(remotePath: string): Promise<{ size: number; modifyTime: number; isDirectory: boolean; isSymbolicLink: boolean }>;
     fastGet(remotePath: string, localPath: string): Promise<string>;
     fastPut(localPath: string, remotePath: string): Promise<string>;
-    rename(fromPath: string, toPath: string): Promise<string>;
+    posixRename(fromPath: string, toPath: string): Promise<string>;
     list(remotePath: string): Promise<Array<{ name: string; type: string }>>;
   }
 }

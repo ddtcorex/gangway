@@ -9,7 +9,7 @@ import * as vscode from 'vscode';
 // bodies can reference the exact same object (assert on its vi.fn() calls,
 // reset it between tests). Its shape matches `RawSftpClient`
 // (src/transfer/sftpClientAdapter.ts): connect/end/stat/fastGet/fastPut/
-// rename/list. Real SFTP `stat()` returns `modifyTime`, never `mtime` --
+// posixRename/list. Real SFTP `stat()` returns `modifyTime`, never `mtime` --
 // `SftpClientAdapter` translates it, so this fake returns `modifyTime` too,
 // exercising the same translation path a real connection would.
 const fakeRawClient = vi.hoisted(() => ({
@@ -22,7 +22,7 @@ const fakeRawClient = vi.hoisted(() => ({
     await fs.writeFile(localPath, 'server content');
   }),
   fastPut: vi.fn().mockResolvedValue(undefined),
-  rename: vi.fn().mockResolvedValue(undefined),
+  posixRename: vi.fn().mockResolvedValue(undefined),
 }));
 
 function resetFakeClient(): void {
@@ -32,7 +32,7 @@ function resetFakeClient(): void {
   fakeRawClient.stat.mockReset().mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: false });
   fakeRawClient.fastGet.mockClear();
   fakeRawClient.fastPut.mockClear();
-  fakeRawClient.rename.mockClear();
+  fakeRawClient.posixRename.mockClear();
 }
 
 // activate() builds its own ConnectionPool internally (not injectable), and
@@ -253,7 +253,7 @@ describe('activate - realistic command invocation', () => {
     await handler({ entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 } });
 
     expect(fakeRawClient.fastPut).toHaveBeenCalledWith(localFile, '/var/www/app/clean.php.tmp');
-    expect(fakeRawClient.rename).toHaveBeenCalledWith('/var/www/app/clean.php.tmp', '/var/www/app/clean.php');
+    expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/app/clean.php.tmp', '/var/www/app/clean.php');
     expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Uploaded 1 file(s)'));
   });
 
@@ -285,7 +285,7 @@ describe('activate - realistic command invocation', () => {
 
     expect(fakeRawClient.stat).toHaveBeenCalledWith('/var/www/app/config.php');
     expect(fakeRawClient.fastPut).toHaveBeenCalledWith(localPath, '/var/www/app/config.php.tmp');
-    expect(fakeRawClient.rename).toHaveBeenCalledWith('/var/www/app/config.php.tmp', '/var/www/app/config.php');
+    expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/app/config.php.tmp', '/var/www/app/config.php');
   });
 
   it('gangway.uploadFile warns and never attempts an upload when there is no active editor', async () => {
@@ -320,6 +320,6 @@ describe('activate - realistic command invocation', () => {
     await handler(localPath, '/var/www/app/explicit.php');
 
     expect(fakeRawClient.fastPut).toHaveBeenCalledWith(localPath, '/var/www/app/explicit.php.tmp');
-    expect(fakeRawClient.rename).toHaveBeenCalledWith('/var/www/app/explicit.php.tmp', '/var/www/app/explicit.php');
+    expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/app/explicit.php.tmp', '/var/www/app/explicit.php');
   });
 });

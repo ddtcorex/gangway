@@ -9,7 +9,7 @@ function fakeRawClient(overrides: Partial<RawSftpClient> = {}): RawSftpClient {
     stat: async () => ({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: false }),
     fastGet: async () => undefined,
     fastPut: async () => undefined,
-    rename: async () => undefined,
+    posixRename: async () => undefined,
     list: async () => [],
     ...overrides,
   };
@@ -52,7 +52,7 @@ describe('SftpClientAdapter', () => {
     expect(stat.isSymbolicLink).toBe(true);
   });
 
-  it('passes through connect/end/fastGet/fastPut/rename/list to the raw client unchanged', async () => {
+  it('passes through connect/end/fastGet/fastPut/posixRename/list to the raw client unchanged', async () => {
     const calls: string[] = [];
     const listEntries: RawSftpListEntry[] = [{ name: 'a.txt', type: '-' }];
     const adapter = new SftpClientAdapter(
@@ -71,9 +71,9 @@ describe('SftpClientAdapter', () => {
           calls.push(`fastPut:${l}:${r}`);
           return 'put-result';
         },
-        rename: async (from, to) => {
-          calls.push(`rename:${from}:${to}`);
-          return 'rename-result';
+        posixRename: async (from, to) => {
+          calls.push(`posixRename:${from}:${to}`);
+          return 'posixRename-result';
         },
         list: async (p) => {
           calls.push(`list:${p}`);
@@ -86,7 +86,7 @@ describe('SftpClientAdapter', () => {
     await adapter.end();
     expect(await adapter.fastGet('/remote', '/local')).toBe('get-result');
     expect(await adapter.fastPut('/local', '/remote')).toBe('put-result');
-    expect(await adapter.rename('/a', '/b')).toBe('rename-result');
+    expect(await adapter.posixRename('/a', '/b')).toBe('posixRename-result');
     expect(await adapter.list('/dir')).toEqual(listEntries);
 
     expect(calls).toEqual([
@@ -94,7 +94,7 @@ describe('SftpClientAdapter', () => {
       'end',
       'fastGet:/remote:/local',
       'fastPut:/local:/remote',
-      'rename:/a:/b',
+      'posixRename:/a:/b',
       'list:/dir',
     ]);
   });
