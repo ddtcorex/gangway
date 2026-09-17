@@ -31,11 +31,30 @@ export async function uploadFile(
   remotePath: string,
   byteSize: number,
   auditLog: AuditLog,
+  /**
+   * Where a non-fatal problem is reported (the Output channel in production).
+   * Only used for the audit-log append below, which happens after the upload
+   * has already succeeded.
+   */
+  logWarning: (message: string) => void = () => {},
 ): Promise<void> {
   const tmpRemotePath = `${remotePath}.tmp`;
   await client.fastPut(localPath, tmpRemotePath);
   await client.posixRename(tmpRemotePath, remotePath);
-  await auditLog.append({ connectionId, remotePath, timestamp: Date.now(), byteSize });
+
+  // Everything past this line runs AFTER the hotfix has already landed on the
+  // server. Letting an audit-log problem throw reported a successful push to
+  // the user as a failure and skipped the sidecar refresh below, which then
+  // made the next upload a false-positive conflict. The audit log is a record
+  // of the push, not part of it: a failure to write it is reported on its own
+  // channel and never rewrites the outcome of the upload itself.
+  try {
+    await auditLog.append({ connectionId, remotePath, timestamp: Date.now(), byteSize });
+  } catch (err) {
+    logWarning(
+      `Uploaded ${remotePath}, but could not write the audit log entry: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 
   // Without this, the local sidecar keeps the ORIGINAL download-time
   // mtime/size forever. A second edit+upload in the same session would then

@@ -105,6 +105,7 @@ export const window = {
   createOutputChannel: (_name: string) => ({
     appendLine: (_line: string) => {},
     show: () => {},
+    dispose: () => {},
   }),
   showWarningMessage: async (_msg: string, ..._items: string[]) => undefined,
   showErrorMessage: async (_msg: string, ..._items: string[]) => undefined,

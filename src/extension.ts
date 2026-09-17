@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import path from 'node:path';
 import Client from 'ssh2-sftp-client';
 import { ConnectionManager } from './connectionManager';
 import { ConnectionSecretStore } from './secretStore';
@@ -26,7 +27,17 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   const connectionManager = new ConnectionManager(context.globalState, context.workspaceState);
   const secrets = new ConnectionSecretStore(context.secrets);
   const hostKeyStore = new HostKeyStore(context.globalState);
-  const auditLog = new AuditLog(`${context.globalState.get<string>('gangway.auditLogPath') ?? '.'}/sftp-hotfix-uploads.log`);
+  const output = vscode.window.createOutputChannel('Gangway');
+
+  /**
+   * `globalStorageUri` is the per-extension directory VS Code guarantees is
+   * writable, so the audit trail always has somewhere real to live. The
+   * previous scheme read a `gangway.auditLogPath` globalState key that
+   * nothing in the product ever wrote, so it always fell back to `.` -- the
+   * extension host's process cwd, which is neither configurable, predictable,
+   * nor guaranteed writable (a real E2E run dropped the log in the repo root).
+   */
+  const auditLog = new AuditLog(path.join(context.globalStorageUri.fsPath, 'sftp-hotfix-uploads.log'));
 
   const pool = new ConnectionPool(
     { create: () => new Client() as never },
@@ -130,6 +141,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   }
 
   context.subscriptions.push(
+    output,
     vscode.commands.registerCommand('gangway.downloadFile', async (node?: RemoteTreeNode) => {
       const connection = requireActiveConnection();
       if (!connection) return;
@@ -222,7 +234,9 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
           if (decision !== 'overwrite') return;
         }
         const bytes = (await import('node:fs/promises')).default.stat(localPath).then((s) => s.size);
-        await uploadFile(adapter, connection.id, localPath, remotePath, await bytes, auditLog);
+        await uploadFile(adapter, connection.id, localPath, remotePath, await bytes, auditLog, (message) =>
+          output.appendLine(message),
+        );
       } catch (err) {
         const mapped = mapSftpError(err);
         await vscode.window.showErrorMessage(mapped.message, ...mapped.actions.map(actionLabel));
@@ -314,7 +328,9 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
             const relative = file.slice(remotePath.length);
             const localPath = `${localRoot}${relative}`;
             const bytes = (await import('node:fs/promises')).default.stat(localPath).then((s) => s.size);
-            await uploadFile(adapter, connection.id, localPath, file, await bytes, auditLog);
+            await uploadFile(adapter, connection.id, localPath, file, await bytes, auditLog, (message) =>
+              output.appendLine(message),
+            );
           },
           async (file) => {
             const sidecar = await readSidecar(`${localRoot}${file.slice(remotePath.length)}`);

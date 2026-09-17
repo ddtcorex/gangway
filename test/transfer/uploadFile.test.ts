@@ -79,4 +79,29 @@ describe('uploadFile', () => {
       downloadedAt: expect.any(Number),
     });
   });
+
+  it('never turns a successful upload into a reported failure when the audit log cannot be written', async () => {
+    // The audit append happens AFTER posixRename has already landed the
+    // hotfix on the server. Letting it throw reported a successful push as a
+    // failure to the user AND skipped the sidecar refresh, which then made
+    // the next upload a false-positive conflict. The log failure is reported
+    // on its own channel instead.
+    const client = {
+      fastPut: vi.fn().mockResolvedValue(undefined),
+      posixRename: vi.fn().mockResolvedValue(undefined),
+      stat: vi.fn().mockResolvedValue({ mtime: 1700000999, size: 14, isDirectory: false, isSymbolicLink: false }),
+    };
+    const auditLog = {
+      append: vi.fn().mockRejectedValue(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })),
+    } as unknown as AuditLog;
+    const logWarning = vi.fn();
+
+    await expect(
+      uploadFile(client, 'c1', localPath, '/var/www/app/config.php', 14, auditLog, logWarning),
+    ).resolves.toBeUndefined();
+
+    expect(logWarning).toHaveBeenCalledWith(expect.stringContaining('audit log'));
+    // The sidecar refresh must still have happened.
+    expect((await readSidecar(localPath))!.mtime).toBe(1700000999);
+  });
 });

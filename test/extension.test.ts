@@ -52,19 +52,24 @@ import { writeSidecar } from '../src/tmpStore';
 import { tmpFilePathFor } from '../src/tmpPath';
 import type { ConnectionConfig } from '../src/types';
 
+/**
+ * `globalStorageUri` is the real, always-writable per-extension directory VS
+ * Code hands every extension; the audit log lives there now. Pointing it at
+ * the per-test tmp dir keeps every run self-contained -- the previous scheme
+ * read a `gangway.auditLogPath` globalState key that nothing in the product
+ * ever set, so a real run fell back to the extension host's process cwd and
+ * dropped `sftp-hotfix-uploads.log` into whatever directory that happened to
+ * be (the repo root, for the E2E suite).
+ */
 function fakeContext(): vscode.ExtensionContext {
   const memento = (seed?: Record<string, unknown>) => {
     const data = new Map<string, unknown>(Object.entries(seed ?? {}));
     return { get: <T>(k: string) => data.get(k) as T | undefined, update: async (k: string, v: unknown) => { data.set(k, v); } };
   };
   return {
-    // Seeds `gangway.auditLogPath` with `os.tmpdir()` so AuditLog.append()
-    // (invoked by every successful upload below) writes into the disposable
-    // per-test tmp directory instead of defaulting to `.` -- the real
-    // process cwd -- which would otherwise leave a stray
-    // `sftp-hotfix-uploads.log` in the repo working tree after every test run.
-    globalState: memento({ 'gangway.auditLogPath': os.tmpdir() }),
+    globalState: memento(),
     workspaceState: memento(),
+    globalStorageUri: { fsPath: path.join(os.tmpdir(), 'gangway-global-storage') },
     secrets: { get: async () => undefined, store: async () => {}, delete: async () => {} },
     subscriptions: [],
   } as unknown as vscode.ExtensionContext;
@@ -447,6 +452,22 @@ describe('activate - realistic command invocation', () => {
         expect.any(String),
       );
       expect(fakeRawClient.fastPut).toHaveBeenCalledWith(localFile, '/var/www/app/conflicted.php.tmp');
+    });
+  });
+
+  it('writes the upload audit log under globalStorageUri, never the extension host process cwd', async () => {
+    const localPath = path.join(tmpHome, 'audited.php');
+    await fs.writeFile(localPath, 'audited content');
+
+    await handlers.get('gangway.uploadFile')!(localPath, '/var/www/app/audited.php');
+
+    // os.tmpdir() is spied to tmpHome for this suite, so globalStorageUri
+    // resolves inside the disposable per-test directory.
+    const logPath = path.join(os.tmpdir(), 'gangway-global-storage', 'sftp-hotfix-uploads.log');
+    const contents = await fs.readFile(logPath, 'utf8');
+    expect(JSON.parse(contents.trim().split('\n').pop()!)).toMatchObject({
+      connectionId: connection.id,
+      remotePath: '/var/www/app/audited.php',
     });
   });
 

@@ -26,4 +26,17 @@ describe('AuditLog', () => {
     expect(JSON.parse(lines[0])).toEqual({ connectionId: 'c1', remotePath: '/var/www/a.php', timestamp: 1, byteSize: 10 });
     expect(JSON.parse(lines[1])).toEqual({ connectionId: 'c1', remotePath: '/var/www/b.php', timestamp: 2, byteSize: 20 });
   });
+
+  it('creates the containing directory on first write', async () => {
+    // The log now lives under `context.globalStorageUri`, which VS Code
+    // guarantees is writable but does NOT guarantee already exists: an
+    // extension that never wrote there before gets a path to a missing
+    // directory, and a bare appendFile would fail with ENOENT.
+    const nested = path.join(path.dirname(logPath), 'globalStorage', 'ddtcorex.gangway', 'uploads.log');
+    const log = new AuditLog(nested);
+
+    await log.append({ connectionId: 'c1', remotePath: '/var/www/a.php', timestamp: 1, byteSize: 10 });
+
+    await expect(fs.readFile(nested, 'utf8')).resolves.toContain('/var/www/a.php');
+  });
 });
