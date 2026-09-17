@@ -127,6 +127,26 @@ describe('ConnectionPool', () => {
     3000,
   );
 
+  it('owns the retry policy outright and allows real time for the host-key decision', async () => {
+    // ssh2-sftp-client retries internally by default (retries: 1, with a 25s
+    // minTimeout), nested inside this pool's own 3-attempt 1/2/4s backoff:
+    // two competing policies, and a worst case measured in minutes. And
+    // ssh2's default 20s readyTimeout bounds the WHOLE handshake, which is
+    // when the TOFU prompt is shown -- a user reading a fingerprint and
+    // deciding can easily take longer than that, and the connection would die
+    // underneath them.
+    const client = clientThatInvokesHostVerifier(Buffer.from('deadbeef', 'hex'));
+    const factory = { create: vi.fn().mockReturnValue(client) };
+    const prompt = { confirmNewOrChangedKey: vi.fn().mockResolvedValue('accept') };
+    const pool = new ConnectionPool(factory, hostKeyStore, prompt, secrets);
+
+    await pool.getClient(connection);
+
+    const options = client.connect.mock.calls[0][0] as { retries: number; readyTimeout: number };
+    expect(options.retries).toBe(0);
+    expect(options.readyTimeout).toBeGreaterThanOrEqual(60_000);
+  });
+
   it('retries connect with 1s/2s/4s backoff up to 3 attempts before giving up', async () => {
     vi.useFakeTimers();
     const connectMock = vi

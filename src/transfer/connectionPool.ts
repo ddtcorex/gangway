@@ -21,6 +21,25 @@ export interface HostKeyPrompt {
 const BACKOFF_MS = [1000, 2000, 4000];
 const IDLE_TIMEOUT_MS = 60_000;
 
+/**
+ * `ssh2-sftp-client` retries connect() on its own (`retries: 1` with a 25s
+ * `retry_minTimeout`, verified in node_modules/ssh2-sftp-client/src/index.js).
+ * Nested inside this pool's own 3-attempt 1/2/4s backoff that is two
+ * competing retry policies and a worst case measured in minutes, with the
+ * user staring at a frozen command. Turning the library's off leaves exactly
+ * one policy, the one this file documents and tests.
+ */
+const LIBRARY_INTERNAL_RETRIES = 0;
+
+/**
+ * ssh2's `readyTimeout` bounds the WHOLE handshake, and the TOFU host-key
+ * prompt is shown from inside it (the hostVerifier callback). The 20s default
+ * is a timeout on a human reading a fingerprint and deciding whether to trust
+ * it, which is far too short: the connection would die underneath them, and
+ * the next attempt would ask all over again.
+ */
+const READY_TIMEOUT_MS = 120_000;
+
 interface PooledEntry {
   client: SftpClientLike;
   idleTimer: NodeJS.Timeout;
@@ -128,6 +147,8 @@ export class ConnectionPool {
     const hostVerifierState: HostVerifierState = { blockedByHostKey: false };
     const connectOptions = {
       ...baseOptions,
+      retries: LIBRARY_INTERNAL_RETRIES,
+      readyTimeout: READY_TIMEOUT_MS,
       hostHash: 'sha256' as const,
       hostVerifier: createHostVerifier(
         this.hostKeyStore,
