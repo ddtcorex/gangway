@@ -55,6 +55,10 @@ export class TreeItem {
 
 export const Uri = {
   file: (fsPath: string) => ({ fsPath, scheme: 'file' }),
+  joinPath: (base: { fsPath: string }, ...segments: string[]) => ({
+    fsPath: [base.fsPath, ...segments].join('/'),
+    scheme: 'file',
+  }),
 };
 
 export enum ViewColumn {

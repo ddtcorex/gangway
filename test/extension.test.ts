@@ -72,6 +72,7 @@ function fakeContext(): vscode.ExtensionContext {
     globalState: memento(),
     workspaceState: memento(),
     globalStorageUri: { fsPath: path.join(os.tmpdir(), 'gangway-global-storage') },
+    extensionUri: { fsPath: path.join(os.tmpdir(), 'gangway-extension-root'), scheme: 'file' },
     secrets: { get: async () => undefined, store: async () => {}, delete: async () => {} },
     subscriptions: [],
   } as unknown as vscode.ExtensionContext;
@@ -617,5 +618,81 @@ describe('activate - realistic command invocation', () => {
 
     expect(fakeRawClient.fastPut).toHaveBeenCalledWith(localPath, '/var/www/app/explicit.php.tmp');
     expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/app/explicit.php.tmp', '/var/www/app/explicit.php');
+  });
+});
+
+/**
+ * Every test above pre-binds a connection directly via connectionManager.add
+ * + setWorkspaceBinding in beforeEach, bypassing gangway.openConnectionForm
+ * and its real ConnectionFormPanel entirely. That exact seam (real webview
+ * panel -> saveConnection message -> workspace binding -> a command that
+ * depends on it) is what hid three Critical, whole-branch-review-only bugs:
+ * a dead Save button, no workspace binding call anywhere in production code,
+ * and no credential fields on the form. This suite drives that seam for
+ * real, through the actual command handler activate() registers, instead of
+ * calling ConnectionManager/ConnectionFormPanel directly.
+ */
+describe('activate - end to end via the real connection form panel', () => {
+  let tmpHome: string;
+  let handlers: Map<string, (...args: unknown[]) => unknown>;
+  let osTmpdirSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'gangway-form-e2e-'));
+    osTmpdirSpy = vi.spyOn(os, 'tmpdir').mockReturnValue(tmpHome);
+    resetFakeClient();
+    vscode.window.activeTextEditor = undefined;
+
+    handlers = new Map();
+    const original = vscode.commands.registerCommand;
+    vscode.commands.registerCommand = (id: string, handler: (...args: unknown[]) => unknown) => {
+      handlers.set(id, handler);
+      return original(id, handler);
+    };
+  });
+
+  afterEach(async () => {
+    osTmpdirSpy.mockRestore();
+    vscode.window.activeTextEditor = undefined;
+    await fs.rm(tmpHome, { recursive: true, force: true });
+  });
+
+  it('a connection saved through the real webview panel is immediately usable by gangway.downloadFile, with no manual binding step anywhere in this test', async () => {
+    activate(fakeContext());
+
+    const createPanelSpy = vi.spyOn(vscode.window, 'createWebviewPanel');
+    handlers.get('gangway.openConnectionForm')!();
+    const rawPanel = createPanelSpy.mock.results[0]!.value as {
+      webview: { html: string };
+      __test_fireMessage: (message: unknown) => Promise<void>;
+    };
+    createPanelSpy.mockRestore();
+
+    // The nonce is generated per-panel inside ConnectionFormPanel and never
+    // exposed directly; the real webview only ever learns it by reading
+    // data-nonce off the HTML activate() actually set, so the test does too.
+    const nonceMatch = rawPanel.webview.html.match(/data-nonce="([^"]+)"/);
+    expect(nonceMatch).toBeTruthy();
+
+    fakeRawClient.stat.mockResolvedValue({ size: 5, modifyTime: 1700000000000, isDirectory: false, isSymbolicLink: false });
+
+    await rawPanel.__test_fireMessage({
+      nonce: nonceMatch![1],
+      type: 'saveConnection',
+      payload: {
+        name: 'staging',
+        host: 'example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'password',
+        password: 'hunter2',
+      },
+    });
+
+    const handler = handlers.get('gangway.downloadFile')!;
+    await handler({ entry: { path: '/var/www/app/config.php', isDirectory: false, isSymbolicLink: false, size: 5 } });
+
+    expect(fakeRawClient.fastGet).toHaveBeenCalledWith('/var/www/app/config.php', expect.any(String));
   });
 });
