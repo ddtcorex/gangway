@@ -1,3 +1,5 @@
+import { AuthResolutionError } from './authResolver';
+
 export type ErrorAction = 'retry' | 'openOutput' | 'disconnect';
 
 export interface MappedError {
@@ -23,6 +25,15 @@ export function actionLabel(action: ErrorAction): string {
 export function mapSftpError(err: unknown): MappedError {
   const code = codeOf(err);
   const rawMessage = err instanceof Error ? err.message : String(err);
+
+  // Auth resolution failures are already written for the user and describe a
+  // LOCAL configuration problem (missing password, unreadable key file, no
+  // agent). Their text routinely embeds the underlying fs message
+  // ("ENOENT: ...", "EACCES: permission denied"), which the server-flavoured
+  // branches below would otherwise rewrite into a server-side explanation.
+  if (err instanceof AuthResolutionError) {
+    return { message: rawMessage, actions: ['openOutput'] };
+  }
 
   if (code === 'ENOENT') {
     return { message: 'The requested path does not exist on the server.', actions: ['retry'] };

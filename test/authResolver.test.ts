@@ -50,6 +50,24 @@ describe('resolveConnectOptions', () => {
     });
   });
 
+  it('reports an unreadable key file as a local key-path problem, not a server error', async () => {
+    // A raw Node fs error used to propagate out of here untouched, straight
+    // into extension.ts's generic mapSftpError(), whose ENOENT branch says
+    // "The requested path does not exist on the server" -- badly misleading
+    // for what is actually a stale keyPath on this machine.
+    const connection: ConnectionConfig = { ...base, authMethod: 'key', keyPath: '/home/user/.ssh/missing_key' };
+    const readFile = vi.fn().mockRejectedValue(
+      Object.assign(new Error("ENOENT: no such file or directory, open '/home/user/.ssh/missing_key'"), { code: 'ENOENT' }),
+    );
+
+    const attempt = resolveConnectOptions(connection, secretStoreWith({}), readFile);
+
+    await expect(attempt).rejects.toThrow(AuthResolutionError);
+    await expect(attempt).rejects.toThrow(/\/home\/user\/\.ssh\/missing_key/);
+    await expect(attempt).rejects.toThrow(/key file/i);
+    await expect(attempt).rejects.not.toThrow(/on the server/i);
+  });
+
   it('throws AuthResolutionError for key auth when keyPath is missing', async () => {
     const connection: ConnectionConfig = { ...base, authMethod: 'key' };
     await expect(resolveConnectOptions(connection, secretStoreWith({}))).rejects.toThrow(/no key path/i);

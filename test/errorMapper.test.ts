@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { mapSftpError, actionLabel } from '../src/errorMapper';
+import { AuthResolutionError } from '../src/authResolver';
 
 describe('actionLabel', () => {
   it('never returns the raw action token as its own label', () => {
@@ -36,6 +37,22 @@ describe('mapSftpError', () => {
     const mapped = mapSftpError(err);
     expect(mapped.message).toContain('something exotic happened');
     expect(mapped.actions).toEqual(expect.arrayContaining(['retry', 'openOutput']));
+  });
+
+  it('passes an AuthResolutionError through verbatim instead of blaming the server', () => {
+    // These errors are already written for the user and describe a LOCAL
+    // configuration problem. Their text routinely embeds the underlying fs
+    // message ("ENOENT: ...", "EACCES: permission denied"), which the generic
+    // branches below would otherwise rewrite into a server-side explanation.
+    const err = new AuthResolutionError(
+      'Cannot read the SSH key file at "/home/user/.ssh/id_ed25519": EACCES: permission denied',
+    );
+
+    const mapped = mapSftpError(err);
+
+    expect(mapped.message).toBe(err.message);
+    expect(mapped.message).not.toMatch(/on the server/i);
+    expect(mapped.message).not.toMatch(/denied by the server/i);
   });
 
   it('does not misclassify incidental 3-digit numbers as permission-denied', () => {

@@ -40,7 +40,22 @@ export async function resolveConnectOptions(
           `No key path configured for connection "${connection.name}". Open the connection form and set the SSH key path.`,
         );
       }
-      const privateKey = await readFile(connection.keyPath);
+      // A raw Node fs error here used to propagate untouched all the way to
+      // extension.ts's generic mapSftpError(), whose ENOENT branch tells the
+      // user "The requested path does not exist on the server" -- badly
+      // misleading for what is actually a stale or unreadable key path on
+      // this machine. This is the only place that knows the failed read was a
+      // key file, so this is where it gets named.
+      let privateKey: Buffer;
+      try {
+        privateKey = await readFile(connection.keyPath);
+      } catch (err) {
+        throw new AuthResolutionError(
+          `Cannot read the SSH key file at "${connection.keyPath}" for connection "${connection.name}": ` +
+            `${err instanceof Error ? err.message : String(err)}. ` +
+            'This is a local key-path problem, not a server error: fix the path in the connection form.',
+        );
+      }
       const passphrase = await secrets.get(connection.id, 'keyPassphrase');
       return { ...shared, privateKey, ...(passphrase ? { passphrase } : {}) };
     }
