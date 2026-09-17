@@ -270,6 +270,9 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         );
         return choice === 'Delete';
       },
+      (message) => {
+        void vscode.window.showWarningMessage(`Gangway: ${message}`);
+      },
     );
     rawPanel.webview.html = buildConnectionFormHtml({
       toolkitUri: rawPanel.webview.asWebviewUri(vscode.Uri.joinPath(mediaDir, 'toolkit.min.js')).toString(),

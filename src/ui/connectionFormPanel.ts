@@ -3,6 +3,7 @@ import type * as vscode from 'vscode';
 import type { ConnectionManager } from '../connectionManager';
 import type { ConnectionSecretStore } from '../secretStore';
 import type { AuthMethod, ConnectionConfig } from '../types';
+import { withTimeout } from '../withTimeout';
 
 interface SaveConnectionPayload {
   /** Present only when this save is editing an existing connection. */
@@ -24,6 +25,21 @@ type IncomingMessage =
   | { nonce: string; type: 'saveConnection'; payload: SaveConnectionPayload }
   | { nonce: string; type: 'deleteConnection'; payload: { id: string } }
   | { nonce: string; type: 'browseKeyPath' };
+
+/**
+ * The OS secret store (SecretStorage's backing keyring/keychain) is a system
+ * service outside this extension's control: it can be locked, unavailable,
+ * or simply slow to respond depending on the machine's desktop session.
+ * Discovered against a real Extension Development Host (not by any unit
+ * test, since every test's fake secret store always settles instantly): an
+ * unresponsive secrets.set() call left the *whole* save silently stuck --
+ * the connection record was written, but the workspace binding, the tree
+ * refresh, and the webview's own "saved" reply all sat behind the same
+ * unresolved await, so nothing ever updated and nothing ever errored. This
+ * bounds every secret-store write so a slow or hung keyring can only ever
+ * cost a warning, never the rest of the save.
+ */
+const SECRET_STORE_TIMEOUT_MS = 5_000;
 
 /**
  * Backs the Manage Remotes page (src/ui/manageRemotesHtml.ts): a single
@@ -62,6 +78,14 @@ export class ConnectionFormPanel {
      * tests that don't care about the prompt, so tests set this explicitly.
      */
     private readonly confirmDelete: (connection: ConnectionConfig) => Promise<boolean> = async () => true,
+    /**
+     * Reports a secret that failed (or timed out) to save, after the
+     * connection record itself was already saved successfully. Never blocks
+     * or reverts the save; this is purely informational so the user knows
+     * to re-enter the credential rather than silently failing to connect
+     * later.
+     */
+    private readonly onSecretStoreError: (message: string) => void = () => {},
   ) {
     this.panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(message as IncomingMessage));
   }
@@ -84,10 +108,30 @@ export class ConnectionFormPanel {
         : await this.connectionManager.add(connectionFields);
 
       if (connectionFields.authMethod === 'password' && password) {
-        await this.secrets.set(saved.id, 'password', password);
+        try {
+          await withTimeout(
+            this.secrets.set(saved.id, 'password', password),
+            SECRET_STORE_TIMEOUT_MS,
+            'Timed out writing to the system secret store',
+          );
+        } catch (err) {
+          this.onSecretStoreError(
+            `Saved "${saved.name}", but could not store its password (${err instanceof Error ? err.message : String(err)}). Open Manage Remotes and re-enter it.`,
+          );
+        }
       }
       if (connectionFields.authMethod === 'key' && keyPassphrase) {
-        await this.secrets.set(saved.id, 'keyPassphrase', keyPassphrase);
+        try {
+          await withTimeout(
+            this.secrets.set(saved.id, 'keyPassphrase', keyPassphrase),
+            SECRET_STORE_TIMEOUT_MS,
+            'Timed out writing to the system secret store',
+          );
+        } catch (err) {
+          this.onSecretStoreError(
+            `Saved "${saved.name}", but could not store its key passphrase (${err instanceof Error ? err.message : String(err)}). Open Manage Remotes and re-enter it.`,
+          );
+        }
       }
 
       if (!id) {

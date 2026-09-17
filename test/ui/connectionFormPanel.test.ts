@@ -334,4 +334,105 @@ describe('ConnectionFormPanel', () => {
       expect(manager.getWorkspaceBinding()).toBe(other.id);
     });
   });
+
+  describe('a secret store that fails or hangs', () => {
+    // Discovered against a real Extension Development Host: an unresponsive
+    // secrets.set() call (the OS keyring locked, unavailable, or just slow)
+    // used to leave the ENTIRE save stuck behind that one unresolved await --
+    // the connection record was written, but the workspace binding, the tree
+    // refresh, and the webview's own reply never happened, with no error
+    // anywhere. Every unit test's fake secret store always settled instantly,
+    // so this gap was invisible until it was driven live.
+    it('still completes the save and notifies its caller when secrets.set() rejects', async () => {
+      const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+      const secrets = new ConnectionSecretStore({
+        get: async () => undefined,
+        store: async () => {
+          throw new Error('keyring is locked');
+        },
+        delete: async () => {},
+      });
+      const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+      const onConnectionsChanged = vi.fn();
+      const onSecretStoreError = vi.fn();
+      const postMessage = vi.spyOn(rawPanel.webview, 'postMessage');
+      const panel = new ConnectionFormPanel(
+        rawPanel as never,
+        manager,
+        secrets,
+        onConnectionsChanged,
+        undefined,
+        undefined,
+        onSecretStoreError,
+      );
+
+      await (rawPanel as unknown as { __test_fireMessage: (m: unknown) => void }).__test_fireMessage({
+        nonce: panel.nonce,
+        type: 'saveConnection',
+        payload: {
+          name: 'staging',
+          host: 'example.com',
+          port: 22,
+          username: 'deploy',
+          remotePath: '/var/www',
+          authMethod: 'password',
+          password: 'hunter2',
+        },
+      });
+
+      expect(manager.list()).toHaveLength(1);
+      expect(manager.getWorkspaceBinding()).toBe(manager.list()[0].id);
+      expect(onConnectionsChanged).toHaveBeenCalledWith(manager.list());
+      expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'connectionsUpdated' }));
+      expect(onSecretStoreError).toHaveBeenCalledWith(expect.stringContaining('keyring is locked'));
+    });
+
+    it('times out and still completes the save when secrets.set() never settles at all', async () => {
+      vi.useFakeTimers();
+      try {
+        const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+        const secrets = new ConnectionSecretStore({
+          get: async () => undefined,
+          store: () => new Promise(() => {}), // never resolves or rejects
+          delete: async () => {},
+        });
+        const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+        const onConnectionsChanged = vi.fn();
+        const onSecretStoreError = vi.fn();
+        const panel = new ConnectionFormPanel(
+          rawPanel as never,
+          manager,
+          secrets,
+          onConnectionsChanged,
+          undefined,
+          undefined,
+          onSecretStoreError,
+        );
+
+        const fired = (rawPanel as unknown as { __test_fireMessage: (m: unknown) => Promise<void> }).__test_fireMessage({
+          nonce: panel.nonce,
+          type: 'saveConnection',
+          payload: {
+            name: 'staging',
+            host: 'example.com',
+            port: 22,
+            username: 'deploy',
+            remotePath: '/var/www',
+            authMethod: 'password',
+            password: 'hunter2',
+          },
+        });
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        await fired;
+
+        expect(manager.list()).toHaveLength(1);
+        expect(manager.getWorkspaceBinding()).toBe(manager.list()[0].id);
+        expect(onConnectionsChanged).toHaveBeenCalledWith(manager.list());
+        expect(onSecretStoreError).toHaveBeenCalledWith(expect.stringContaining('Timed out'));
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });

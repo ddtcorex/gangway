@@ -97,4 +97,46 @@ describe('resolveConnectOptions', () => {
       process.env.SSH_AUTH_SOCK = originalSocket;
     }
   });
+
+  describe('a secret store that never settles (a locked or unresponsive OS keyring)', () => {
+    // Discovered against a real Extension Development Host: an unresponsive
+    // secrets.get() left a connection attempt (and the Gangway tree's root
+    // listing, which awaits it) hanging forever with no error at all. Every
+    // fake secret store elsewhere in this suite always resolves instantly,
+    // so this gap was invisible until driven live.
+    function hangingSecretStore(): ConnectionSecretStore {
+      const backing: SecretStore = {
+        get: () => new Promise(() => {}),
+        store: async () => {},
+        delete: async () => {},
+      };
+      return new ConnectionSecretStore(backing);
+    }
+
+    it('rejects with AuthResolutionError instead of hanging forever, for password auth', async () => {
+      vi.useFakeTimers();
+      try {
+        const attempt = resolveConnectOptions(base, hangingSecretStore());
+        const assertion = expect(attempt).rejects.toThrow(/local secret-store problem/i);
+        await vi.advanceTimersByTimeAsync(5_000);
+        await assertion;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('rejects with AuthResolutionError instead of hanging forever, for a key auth passphrase read', async () => {
+      vi.useFakeTimers();
+      try {
+        const connection: ConnectionConfig = { ...base, authMethod: 'key', keyPath: '/home/user/.ssh/id_ed25519' };
+        const readFile = vi.fn().mockResolvedValue(Buffer.from('PRIVATE KEY BYTES'));
+        const attempt = resolveConnectOptions(connection, hangingSecretStore(), readFile);
+        const assertion = expect(attempt).rejects.toThrow(AuthResolutionError);
+        await vi.advanceTimersByTimeAsync(5_000);
+        await assertion;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });

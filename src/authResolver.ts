@@ -2,8 +2,39 @@ import fs from 'node:fs/promises';
 import { assertNever } from './types';
 import type { ConnectionConfig } from './types';
 import type { ConnectionSecretStore } from './secretStore';
+import { withTimeout } from './withTimeout';
 
 export class AuthResolutionError extends Error {}
+
+/**
+ * The OS secret store is an external system service (keyring/keychain) that
+ * can be locked, unavailable, or unresponsive independently of anything this
+ * extension does. Discovered against a real Extension Development Host: an
+ * unresponsive secrets.get() left a connection attempt hanging forever, with
+ * no error and nothing for the caller (the Gangway tree's root listing, in
+ * particular) to catch -- every unit test's fake secret store always
+ * resolves instantly, so this never surfaced there. Bounding the read turns
+ * that silent hang into the same AuthResolutionError a genuinely missing
+ * secret already produces, which the rest of the extension already knows
+ * how to show the user.
+ */
+const SECRET_READ_TIMEOUT_MS = 5_000;
+
+async function readSecretWithTimeout(
+  secrets: ConnectionSecretStore,
+  connectionId: string,
+  key: 'password' | 'keyPassphrase',
+  connectionName: string,
+): Promise<string | undefined> {
+  try {
+    return await withTimeout(secrets.get(connectionId, key), SECRET_READ_TIMEOUT_MS, 'timed out reading from the system secret store');
+  } catch (err) {
+    throw new AuthResolutionError(
+      `Could not read the stored ${key === 'password' ? 'password' : 'key passphrase'} for connection "${connectionName}": ` +
+        `${err instanceof Error ? err.message : String(err)}. This is a local secret-store problem, not a server error.`,
+    );
+  }
+}
 
 export interface ConnectOptions {
   host: string;
@@ -26,7 +57,7 @@ export async function resolveConnectOptions(
 
   switch (connection.authMethod) {
     case 'password': {
-      const password = await secrets.get(connection.id, 'password');
+      const password = await readSecretWithTimeout(secrets, connection.id, 'password', connection.name);
       if (!password) {
         throw new AuthResolutionError(
           `No password stored for connection "${connection.name}". Open the connection form and re-enter the password.`,
@@ -56,7 +87,7 @@ export async function resolveConnectOptions(
             'This is a local key-path problem, not a server error: fix the path in the connection form.',
         );
       }
-      const passphrase = await secrets.get(connection.id, 'keyPassphrase');
+      const passphrase = await readSecretWithTimeout(secrets, connection.id, 'keyPassphrase', connection.name);
       return { ...shared, privateKey, ...(passphrase ? { passphrase } : {}) };
     }
     case 'agent': {
