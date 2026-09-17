@@ -1,0 +1,155 @@
+import { describe, it, expect } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import vm from 'node:vm';
+
+/**
+ * Executes the REAL shipped webview script (src/ui/media/connectionForm/main.js,
+ * copied verbatim into dist/media by esbuild.js) against a minimal fake DOM.
+ *
+ * Why this file exists at all: the previous version of main.js read
+ * `document.currentScript.nonce` at its very first statement. The script tag
+ * that loads it is `<script type="module">`, and per the HTML spec
+ * `document.currentScript` is ALWAYS null inside a module script -- so that
+ * line threw a TypeError before anything else ran and the Save button's click
+ * listener was never attached. The whole connection form was dead on arrival,
+ * yet every string-content assertion on the HTML template still passed,
+ * because nothing ever *executed* the script. These tests execute it.
+ */
+const MAIN_JS_PATH = path.resolve(__dirname, '../../src/ui/media/connectionForm/main.js');
+
+interface FakeElement {
+  id: string;
+  value: string;
+  hidden: boolean;
+  dataset: Record<string, string>;
+  addEventListener(type: string, listener: (event: FakeEvent) => void): void;
+  /** Test-only: fires whatever listeners the script attached for `type`. */
+  emit(type: string, event?: FakeEvent): void;
+}
+
+interface FakeEvent {
+  defaultPrevented?: boolean;
+  preventDefault(): void;
+}
+
+interface PostedMessage {
+  nonce: string;
+  type: string;
+  payload: Record<string, unknown>;
+}
+
+interface FakeDom {
+  elements: Map<string, FakeElement>;
+  posted: PostedMessage[];
+  fieldsFor(authMethod: string): FakeElement[];
+}
+
+function makeElement(id: string, value = '', dataset: Record<string, string> = {}): FakeElement {
+  const listeners = new Map<string, Array<(event: FakeEvent) => void>>();
+  return {
+    id,
+    value,
+    hidden: false,
+    dataset,
+    addEventListener(type, listener) {
+      const existing = listeners.get(type) ?? [];
+      existing.push(listener);
+      listeners.set(type, existing);
+    },
+    emit(type, event) {
+      for (const listener of listeners.get(type) ?? []) {
+        listener(event ?? { preventDefault: () => {} });
+      }
+    },
+  };
+}
+
+/**
+ * Builds the fake DOM, runs the real main.js inside a fresh vm context, and
+ * hands back the handles a test needs. Deliberately a *minimal* stand-in: it
+ * exposes only `document.body.dataset`, `getElementById`, `querySelectorAll`
+ * and `acquireVsCodeApi`, so any script that reaches for something else
+ * (`document.currentScript`, for one) fails loudly here instead of silently
+ * in a real webview where nobody sees the console.
+ */
+function runConnectionFormScript(options: { nonce: string; values?: Record<string, string> }): FakeDom {
+  const values = options.values ?? {};
+  const ids = ['name', 'host', 'port', 'username', 'remotePath', 'authMethod', 'password', 'keyPath', 'keyPassphrase', 'save'];
+  const elements = new Map<string, FakeElement>();
+  for (const id of ids) elements.set(id, makeElement(id, values[id] ?? ''));
+
+  const authFields: FakeElement[] = [
+    makeElement('wrap-password', '', { authField: 'password' }),
+    makeElement('wrap-keyPath', '', { authField: 'key' }),
+    makeElement('wrap-keyPassphrase', '', { authField: 'key' }),
+  ];
+
+  const posted: PostedMessage[] = [];
+  const context = vm.createContext({
+    acquireVsCodeApi: () => ({
+      postMessage: (message: PostedMessage) => {
+        posted.push(message);
+      },
+    }),
+    document: {
+      body: { dataset: { nonce: options.nonce } },
+      getElementById: (id: string) => elements.get(id),
+      querySelectorAll: (selector: string) => (selector === '[data-auth-field]' ? authFields : []),
+    },
+  });
+
+  vm.runInContext(fs.readFileSync(MAIN_JS_PATH, 'utf8'), context, { filename: MAIN_JS_PATH });
+
+  return {
+    elements,
+    posted,
+    fieldsFor: (authMethod: string) => authFields.filter((field) => field.dataset.authField === authMethod),
+  };
+}
+
+describe('connection form webview script', () => {
+  it('attaches a working Save click handler that posts the form with the nonce from <body data-nonce>', () => {
+    const dom = runConnectionFormScript({
+      nonce: 'nonce-from-body',
+      values: {
+        name: 'staging',
+        host: 'example.com',
+        port: '2222',
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'password',
+        password: 'hunter2',
+      },
+    });
+
+    dom.elements.get('save')!.emit('click');
+
+    expect(dom.posted).toHaveLength(1);
+    expect(dom.posted[0]).toMatchObject({
+      nonce: 'nonce-from-body',
+      type: 'saveConnection',
+      payload: {
+        name: 'staging',
+        host: 'example.com',
+        port: 2222,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'password',
+      },
+    });
+  });
+
+  it('calls preventDefault so the Save button never submits the form and reloads the webview', () => {
+    const dom = runConnectionFormScript({ nonce: 'n', values: { authMethod: 'password' } });
+    let prevented = false;
+
+    dom.elements.get('save')!.emit('click', {
+      preventDefault: () => {
+        prevented = true;
+      },
+    });
+
+    expect(prevented).toBe(true);
+  });
+});

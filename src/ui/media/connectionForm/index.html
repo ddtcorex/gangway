@@ -9,7 +9,11 @@
 <meta charset="UTF-8" />
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-{{NONCE}}'; style-src {{CSP_SOURCE}};" />
 </head>
-<body>
+<!-- data-nonce is how main.js reads the nonce. It must NOT go back to
+     document.currentScript: main.js is loaded as a module script, where
+     document.currentScript is always null (HTML spec), which made reading
+     .nonce off it throw and killed the entire script. -->
+<body data-nonce="{{NONCE}}">
 <form id="connectionForm">
   <vscode-text-field id="name" placeholder="Connection Name"></vscode-text-field>
   <vscode-text-field id="host" placeholder="Host"></vscode-text-field>

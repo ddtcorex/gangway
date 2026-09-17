@@ -1,0 +1,290 @@
+#!/usr/bin/env node
+/**
+ * Real-browser verification for the connection-form webview.
+ *
+ * Why a browser and not just a unit test: the C1 bug (Save button dead on
+ * arrival) came from `document.currentScript` being null inside a
+ * `<script type="module">`. No jsdom-class fake reproduces that -- jsdom does
+ * not execute module scripts at all -- so only a real engine can prove the
+ * form works. This script:
+ *
+ *   1. compiles the REAL src/ui/connectionFormHtml.ts and renders the REAL
+ *      template (not a copy) with the same nonce/CSP substitution production
+ *      uses;
+ *   2. serves it plus the REAL built dist/media/connectionForm/{toolkit,main}.js
+ *      over http (module scripts need a real origin; file:// fails CORS);
+ *   3. drives headless Chrome over the DevTools protocol: stubs
+ *      `acquireVsCodeApi` the way VS Code injects it, fills the fields,
+ *      clicks Save with real mouse events, and prints what was posted.
+ *
+ * Usage: node esbuild.js && node scripts/verify-webview.mjs
+ * Exits non-zero (and prints the page's console errors) if the form is dead.
+ */
+import { spawn } from 'node:child_process';
+import esbuild from 'esbuild';
+import fs from 'node:fs/promises';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const CHROME_CANDIDATES = [
+  '/opt/google/chrome/chrome',
+  '/usr/bin/google-chrome',
+  '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
+];
+
+async function firstExisting(candidates) {
+  for (const candidate of candidates) {
+    try {
+      await fs.access(candidate);
+      return candidate;
+    } catch {
+      /* keep looking */
+    }
+  }
+  return undefined;
+}
+
+/** Bundles the real TypeScript template module so this script renders exactly
+ * what ships, instead of re-implementing the substitution or reading the
+ * reference index.html copy. */
+async function loadTemplateRenderer(workDir) {
+  const outfile = path.join(workDir, 'connectionFormHtml.cjs');
+  await esbuild.build({
+    entryPoints: [path.join(repoRoot, 'src/ui/connectionFormHtml.ts')],
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    outfile,
+    logLevel: 'silent',
+  });
+  const module = await import(`file://${outfile}`);
+  return (module.default ?? module).buildConnectionFormHtml;
+}
+
+function serveDirectory(dir) {
+  const server = http.createServer(async (req, res) => {
+    const requested = path.join(dir, path.normalize(req.url.split('?')[0]).replace(/^(\.\.[/\\])+/, ''));
+    try {
+      const body = await fs.readFile(requested);
+      res.writeHead(200, { 'content-type': requested.endsWith('.js') ? 'text/javascript' : 'text/html' });
+      res.end(body);
+    } catch {
+      res.writeHead(404).end('not found');
+    }
+  });
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
+}
+
+class Cdp {
+  #socket;
+  #nextId = 1;
+  #pending = new Map();
+  events = [];
+
+  static async attach(wsUrl) {
+    const cdp = new Cdp();
+    cdp.#socket = new WebSocket(wsUrl);
+    cdp.#socket.addEventListener('message', (event) => {
+      const message = JSON.parse(event.data);
+      if (message.id !== undefined) {
+        const resolve = cdp.#pending.get(message.id);
+        cdp.#pending.delete(message.id);
+        resolve?.(message);
+      } else {
+        cdp.events.push(message);
+      }
+    });
+    await new Promise((resolve, reject) => {
+      cdp.#socket.addEventListener('open', resolve, { once: true });
+      cdp.#socket.addEventListener('error', reject, { once: true });
+    });
+    return cdp;
+  }
+
+  send(method, params = {}) {
+    const id = this.#nextId++;
+    return new Promise((resolve) => {
+      this.#pending.set(id, resolve);
+      this.#socket.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  async evaluate(expression) {
+    const response = await this.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+    if (response.result?.exceptionDetails) {
+      throw new Error(`page threw: ${JSON.stringify(response.result.exceptionDetails)}`);
+    }
+    return response.result?.result?.value;
+  }
+
+  close() {
+    this.#socket.close();
+  }
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function main() {
+  const chrome = await firstExisting(CHROME_CANDIDATES);
+  if (!chrome) throw new Error(`no Chrome/Chromium binary found (looked in: ${CHROME_CANDIDATES.join(', ')})`);
+
+  const mediaDir = path.join(repoRoot, 'dist/media/connectionForm');
+  for (const asset of ['toolkit.min.js', 'main.js']) {
+    await fs.access(path.join(mediaDir, asset)).catch(() => {
+      throw new Error(`missing ${path.join(mediaDir, asset)} -- run "node esbuild.js" first`);
+    });
+  }
+
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gangway-webview-verify-'));
+  const buildConnectionFormHtml = await loadTemplateRenderer(workDir);
+
+  const serveDir = path.join(workDir, 'www');
+  await fs.mkdir(serveDir, { recursive: true });
+  await fs.copyFile(path.join(mediaDir, 'toolkit.min.js'), path.join(serveDir, 'toolkit.min.js'));
+  await fs.copyFile(path.join(mediaDir, 'main.js'), path.join(serveDir, 'main.js'));
+  await fs.writeFile(
+    path.join(serveDir, 'index.html'),
+    buildConnectionFormHtml({
+      toolkitUri: './toolkit.min.js',
+      mainScriptUri: './main.js',
+      cspSource: "'self'",
+      nonce: 'verify-nonce-123',
+    }),
+    'utf8',
+  );
+
+  const server = await serveDirectory(serveDir);
+  const pageUrl = `http://127.0.0.1:${server.address().port}/index.html`;
+
+  const profileDir = path.join(workDir, 'chrome-profile');
+  const browser = spawn(chrome, [
+    '--headless=new',
+    '--remote-debugging-port=0',
+    `--user-data-dir=${profileDir}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-gpu',
+    'about:blank',
+  ]);
+
+  let cdp;
+  try {
+    let devtoolsPort;
+    for (let attempt = 0; attempt < 100 && !devtoolsPort; attempt++) {
+      await sleep(100);
+      devtoolsPort = await fs
+        .readFile(path.join(profileDir, 'DevToolsActivePort'), 'utf8')
+        .then((raw) => raw.split('\n')[0].trim())
+        .catch(() => undefined);
+    }
+    if (!devtoolsPort) throw new Error('Chrome never reported a DevTools port');
+
+    const targets = await fetch(`http://127.0.0.1:${devtoolsPort}/json/list`).then((r) => r.json());
+    const page = targets.find((t) => t.type === 'page');
+    cdp = await Cdp.attach(page.webSocketDebuggerUrl);
+
+    await cdp.send('Page.enable');
+    await cdp.send('Runtime.enable');
+    await cdp.send('Log.enable');
+    // Exactly what the VS Code webview host injects before any page script runs.
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `
+        window.__posted = [];
+        window.acquireVsCodeApi = () => ({
+          postMessage: (message) => window.__posted.push(message),
+          getState: () => undefined,
+          setState: () => undefined,
+        });
+      `,
+    });
+
+    await cdp.send('Page.navigate', { url: pageUrl });
+    await sleep(1500);
+
+    const scriptAlive = await cdp.evaluate('typeof window.__posted');
+    if (scriptAlive !== 'object') throw new Error('the injected acquireVsCodeApi stub never ran');
+
+    // Fill the form the way a user would: set each field's value through the
+    // real custom elements the toolkit defined.
+    await cdp.evaluate(`
+      (() => {
+        const set = (id, value) => { document.getElementById(id).value = value; };
+        set('name', 'staging');
+        set('host', 'example.com');
+        set('port', '2222');
+        set('username', 'deploy');
+        set('remotePath', '/var/www');
+        return true;
+      })()
+    `);
+
+    const authFieldsVisible = async () =>
+      cdp.evaluate(`
+        Array.from(document.querySelectorAll('[data-auth-field]')).map((el) => ({
+          field: el.dataset.authField,
+          hidden: el.hidden,
+        }))
+      `);
+
+    const beforeSwitch = await authFieldsVisible();
+
+    // Real mouse click on the Save button, not element.click().
+    const rect = await cdp.evaluate(`
+      (() => { const r = document.getElementById('save').getBoundingClientRect();
+               return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()
+    `);
+    for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
+      await cdp.send('Input.dispatchMouseEvent', {
+        type,
+        x: rect.x,
+        y: rect.y,
+        button: 'left',
+        clickCount: type === 'mouseMoved' ? 0 : 1,
+      });
+    }
+    await sleep(300);
+
+    // Optional visual evidence: GANGWAY_WEBVIEW_SCREENSHOT=/path/to.png makes
+    // the run save what the form actually looks like, so a CSP-blocked
+    // stylesheet or a collapsed layout is caught by eye, not only by asserts.
+    if (process.env.GANGWAY_WEBVIEW_SCREENSHOT) {
+      const shot = await cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
+      await fs.writeFile(process.env.GANGWAY_WEBVIEW_SCREENSHOT, Buffer.from(shot.result.data, 'base64'));
+      console.log(`--- screenshot written to ${process.env.GANGWAY_WEBVIEW_SCREENSHOT} ---`);
+    }
+
+    const posted = await cdp.evaluate('window.__posted');
+    const consoleErrors = cdp.events
+      .filter((e) => e.method === 'Log.entryAdded' && e.params.entry.level === 'error')
+      .map((e) => e.params.entry.text);
+
+    console.log('--- page console errors ---');
+    console.log(consoleErrors.length ? consoleErrors.join('\n') : '(none)');
+    console.log('--- auth-method field visibility (password selected) ---');
+    console.log(JSON.stringify(beforeSwitch));
+    console.log('--- messages posted to the extension host on Save click ---');
+    console.log(JSON.stringify(posted, null, 2));
+
+    if (!Array.isArray(posted) || posted.length !== 1) {
+      throw new Error(`expected exactly one posted message, got ${JSON.stringify(posted)}`);
+    }
+    if (posted[0].nonce !== 'verify-nonce-123' || posted[0].type !== 'saveConnection') {
+      throw new Error(`posted message has the wrong envelope: ${JSON.stringify(posted[0])}`);
+    }
+    console.log('\nOK: the Save button posts a nonce-matched saveConnection message in a real browser.');
+  } finally {
+    cdp?.close();
+    browser.kill('SIGKILL');
+    server.close();
+    await fs.rm(workDir, { recursive: true, force: true });
+  }
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
