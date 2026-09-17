@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { downloadFile } from '../../src/transfer/downloadFile';
 import { readSidecar } from '../../src/tmpStore';
+import { tmpFilePathFor } from '../../src/tmpPath';
 import type { ConnectionConfig } from '../../src/types';
 
 const connection: ConnectionConfig = {
@@ -61,7 +62,9 @@ describe('downloadFile', () => {
     const result = await downloadFile(client, connection, '/var/www/app/config.php');
 
     expect(client.stat).toHaveBeenCalledWith('/var/www/app/config.php');
-    expect(client.fastGet).toHaveBeenCalledWith('/var/www/app/config.php', result.localPath);
+    // fastGet writes to a `.gangway-downloading` sibling, not straight into
+    // result.localPath -- see the atomic-rename test below for why.
+    expect(client.fastGet).toHaveBeenCalledWith('/var/www/app/config.php', `${result.localPath}.gangway-downloading`);
     expect(await fs.readFile(result.localPath, 'utf8')).toBe('server content');
 
     const sidecar = await readSidecar(result.localPath);
@@ -73,5 +76,32 @@ describe('downloadFile', () => {
       downloadedAt: expect.any(Number),
     });
     expect(result.meta).toEqual(sidecar);
+  });
+
+  it('never truncates a previous good copy at localPath when a re-download fails partway', async () => {
+    // Re-downloading (the "discard local edits, refresh from server" gesture)
+    // targets a localPath that may already hold a perfectly good copy from an
+    // earlier download. Writing fastGet's bytes straight into that path used
+    // to leave it holding only whatever partial bytes had arrived before a
+    // crash/disconnect; the fix stages into a sibling and only renames over
+    // localPath on success.
+    const remotePath = '/var/www/app/config.php';
+    const localPath = tmpFilePathFor(connection, remotePath);
+    await fs.mkdir(path.dirname(localPath), { recursive: true });
+    await fs.writeFile(localPath, 'previous good copy');
+
+    const client = {
+      stat: vi.fn().mockResolvedValue({ mtime: 1700000000, size: 42, isDirectory: false, isSymbolicLink: false }),
+      fastGet: vi.fn().mockImplementation(async (_remote: string, local: string) => {
+        await fs.writeFile(local, 'partial garbage from a dropped connection');
+        throw new Error('ECONNRESET');
+      }),
+    };
+
+    await expect(downloadFile(client, connection, remotePath)).rejects.toThrow('ECONNRESET');
+
+    expect(await fs.readFile(localPath, 'utf8')).toBe('previous good copy');
+    // The failed attempt's staging file must not linger either.
+    await expect(fs.access(`${localPath}.gangway-downloading`)).rejects.toThrow();
   });
 });
