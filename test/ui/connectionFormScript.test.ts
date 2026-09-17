@@ -36,13 +36,15 @@ interface FakeEvent {
 interface PostedMessage {
   nonce: string;
   type: string;
-  payload: Record<string, unknown>;
+  payload?: Record<string, unknown>;
 }
 
 interface FakeDom {
   elements: Map<string, FakeElement>;
   posted: PostedMessage[];
   fieldsFor(authMethod: string): FakeElement[];
+  /** Simulates the host replying via `panel.webview.postMessage(...)`. */
+  emitWindowMessage(data: unknown): void;
 }
 
 function makeElement(id: string, value = '', dataset: Record<string, string> = {}): FakeElement {
@@ -73,9 +75,25 @@ function makeElement(id: string, value = '', dataset: Record<string, string> = {
  * (`document.currentScript`, for one) fails loudly here instead of silently
  * in a real webview where nobody sees the console.
  */
-function runConnectionFormScript(options: { nonce: string; values?: Record<string, string> }): FakeDom {
+function runConnectionFormScript(options: {
+  nonce: string;
+  connectionId?: string;
+  values?: Record<string, string>;
+}): FakeDom {
   const values = options.values ?? {};
-  const ids = ['name', 'host', 'port', 'username', 'remotePath', 'authMethod', 'password', 'keyPath', 'keyPassphrase', 'save'];
+  const ids = [
+    'name',
+    'host',
+    'port',
+    'username',
+    'remotePath',
+    'authMethod',
+    'password',
+    'keyPath',
+    'keyPassphrase',
+    'save',
+    'browseKeyPath',
+  ];
   const elements = new Map<string, FakeElement>();
   for (const id of ids) elements.set(id, makeElement(id, values[id] ?? ''));
 
@@ -86,6 +104,7 @@ function runConnectionFormScript(options: { nonce: string; values?: Record<strin
   ];
 
   const posted: PostedMessage[] = [];
+  const windowListeners = new Map<string, Array<(event: unknown) => void>>();
   const context = vm.createContext({
     acquireVsCodeApi: () => ({
       postMessage: (message: PostedMessage) => {
@@ -93,9 +112,16 @@ function runConnectionFormScript(options: { nonce: string; values?: Record<strin
       },
     }),
     document: {
-      body: { dataset: { nonce: options.nonce } },
+      body: { dataset: { nonce: options.nonce, connectionId: options.connectionId ?? '' } },
       getElementById: (id: string) => elements.get(id),
       querySelectorAll: (selector: string) => (selector === '[data-auth-field]' ? authFields : []),
+    },
+    window: {
+      addEventListener: (type: string, listener: (event: unknown) => void) => {
+        const existing = windowListeners.get(type) ?? [];
+        existing.push(listener);
+        windowListeners.set(type, existing);
+      },
     },
   });
 
@@ -105,6 +131,9 @@ function runConnectionFormScript(options: { nonce: string; values?: Record<strin
     elements,
     posted,
     fieldsFor: (authMethod: string) => authFields.filter((field) => field.dataset.authField === authMethod),
+    emitWindowMessage: (data: unknown) => {
+      for (const listener of windowListeners.get('message') ?? []) listener({ data });
+    },
   };
 }
 
@@ -229,5 +258,45 @@ describe('connection form webview script', () => {
 
     expect(dom.fieldsFor('password').every((field) => field.hidden === true)).toBe(true);
     expect(dom.fieldsFor('key').every((field) => field.hidden === true)).toBe(true);
+  });
+
+  it('includes no id when creating a new connection', () => {
+    const dom = runConnectionFormScript({ nonce: 'n', values: { authMethod: 'agent' } });
+
+    dom.elements.get('save')!.emit('click');
+
+    expect(dom.posted[0].payload).not.toHaveProperty('id');
+  });
+
+  it('includes the connection id from the host-rendered dataset when editing', () => {
+    const dom = runConnectionFormScript({ nonce: 'n', connectionId: 'c1', values: { authMethod: 'agent' } });
+
+    dom.elements.get('save')!.emit('click');
+
+    expect(dom.posted[0].payload).toMatchObject({ id: 'c1' });
+  });
+
+  it('asks the host to browse for a key file when the Browse button is clicked', () => {
+    const dom = runConnectionFormScript({ nonce: 'browse-nonce', values: { authMethod: 'key' } });
+
+    dom.elements.get('browseKeyPath')!.emit('click');
+
+    expect(dom.posted).toEqual([{ nonce: 'browse-nonce', type: 'browseKeyPath' }]);
+  });
+
+  it('fills the key path field when the host replies with a chosen path', () => {
+    const dom = runConnectionFormScript({ nonce: 'n', values: { authMethod: 'key', keyPath: '' } });
+
+    dom.emitWindowMessage({ type: 'keyPathSelected', path: '/home/deploy/.ssh/id_ed25519' });
+
+    expect(dom.elements.get('keyPath')!.value).toBe('/home/deploy/.ssh/id_ed25519');
+  });
+
+  it('ignores an unrelated message posted to the window', () => {
+    const dom = runConnectionFormScript({ nonce: 'n', values: { authMethod: 'key', keyPath: 'unchanged' } });
+
+    dom.emitWindowMessage({ type: 'somethingElse', path: '/should/not/apply' });
+
+    expect(dom.elements.get('keyPath')!.value).toBe('unchanged');
   });
 });

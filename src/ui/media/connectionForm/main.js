@@ -10,6 +10,11 @@
 // same way regardless of classic-vs-module script semantics.
 const vscodeApi = acquireVsCodeApi();
 const nonce = document.body.dataset.nonce;
+// Empty string (not undefined) when creating a new connection: the host
+// renders it with `{{CONNECTION_ID}}` -> '' for that case (see
+// resolveConnectionFormFields), so an empty dataset value is the "add" mode,
+// not a bug.
+const connectionId = document.body.dataset.connectionId || undefined;
 
 function fieldValue(id) {
   const element = document.getElementById(id);
@@ -37,6 +42,7 @@ function applyAuthVisibility() {
 function buildPayload() {
   const authMethod = fieldValue('authMethod');
   const payload = {
+    ...(connectionId ? { id: connectionId } : {}),
     name: fieldValue('name'),
     host: fieldValue('host'),
     port: Number(fieldValue('port')),
@@ -66,6 +72,21 @@ document.getElementById('authMethod').addEventListener('change', applyAuthVisibi
 document.getElementById('save').addEventListener('click', (event) => {
   event.preventDefault();
   vscodeApi.postMessage({ nonce, type: 'saveConnection', payload: buildPayload() });
+});
+
+document.getElementById('browseKeyPath').addEventListener('click', (event) => {
+  event.preventDefault();
+  vscodeApi.postMessage({ nonce, type: 'browseKeyPath' });
+});
+
+// The host replies asynchronously once the native file picker resolves
+// (see ConnectionFormPanel.handleMessage's 'browseKeyPath' branch); it never
+// posts back at all if the user cancels the dialog, so the field is simply
+// left as it was.
+window.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'keyPathSelected') {
+    document.getElementById('keyPath').value = event.data.path;
+  }
 });
 
 applyAuthVisibility();

@@ -164,4 +164,83 @@ describe('ConnectionFormPanel', () => {
 
     expect(manager.getWorkspaceBinding()).toBeUndefined();
   });
+
+  it('updates an existing connection in place when the payload carries its id, and never touches the workspace binding', async () => {
+    const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+    const secrets = new ConnectionSecretStore(fakeSecretStore());
+    const existing = await manager.add({
+      name: 'staging',
+      host: 'old-host.example.com',
+      port: 22,
+      username: 'deploy',
+      remotePath: '/var/www',
+      authMethod: 'password',
+    });
+    // A different connection is the one actually bound right now -- editing
+    // "staging" must not silently switch the active connection out from
+    // under the user.
+    const otherBound = await manager.add({
+      name: 'prod',
+      host: 'prod.example.com',
+      port: 22,
+      username: 'deploy',
+      remotePath: '/var/www',
+      authMethod: 'agent',
+    });
+    await manager.setWorkspaceBinding(otherBound.id);
+
+    const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+    const panel = new ConnectionFormPanel(rawPanel as never, manager, secrets);
+
+    await (rawPanel as unknown as { __test_fireMessage: (m: unknown) => void }).__test_fireMessage({
+      nonce: panel.nonce,
+      type: 'saveConnection',
+      payload: {
+        id: existing.id,
+        name: 'staging-renamed',
+        host: 'new-host.example.com',
+        port: 2222,
+        username: 'deploy',
+        remotePath: '/var/www/html',
+        authMethod: 'password',
+        password: 'new-password',
+      },
+    });
+
+    expect(manager.list()).toHaveLength(2);
+    const updated = manager.list().find((c) => c.id === existing.id)!;
+    expect(updated).toMatchObject({ name: 'staging-renamed', host: 'new-host.example.com', port: 2222, remotePath: '/var/www/html' });
+    await expect(secrets.get(existing.id, 'password')).resolves.toBe('new-password');
+    expect(manager.getWorkspaceBinding()).toBe(otherBound.id);
+  });
+
+  it('replies with the chosen path when the webview asks to browse for a key file', async () => {
+    const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+    const secrets = new ConnectionSecretStore(fakeSecretStore());
+    const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+    const postMessage = vi.spyOn(rawPanel.webview, 'postMessage');
+    const panel = new ConnectionFormPanel(rawPanel as never, manager, secrets, undefined, async () => '/home/deploy/.ssh/id_ed25519');
+
+    await (rawPanel as unknown as { __test_fireMessage: (m: unknown) => void }).__test_fireMessage({
+      nonce: panel.nonce,
+      type: 'browseKeyPath',
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({ type: 'keyPathSelected', path: '/home/deploy/.ssh/id_ed25519' });
+  });
+
+  it('sends no message back when the user cancels the file picker', async () => {
+    const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+    const secrets = new ConnectionSecretStore(fakeSecretStore());
+    const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+    const postMessage = vi.spyOn(rawPanel.webview, 'postMessage');
+    const panel = new ConnectionFormPanel(rawPanel as never, manager, secrets, undefined, async () => undefined);
+
+    await (rawPanel as unknown as { __test_fireMessage: (m: unknown) => void }).__test_fireMessage({
+      nonce: panel.nonce,
+      type: 'browseKeyPath',
+    });
+
+    expect(postMessage).not.toHaveBeenCalled();
+  });
 });
