@@ -16,18 +16,56 @@ function fieldValue(id) {
   return element && element.value ? element.value : '';
 }
 
+/**
+ * Shows only the credential inputs that belong to the selected auth method.
+ * Toggling the `hidden` property on the plain wrapper `<div>`s (never an
+ * inline `style` attribute) keeps this working under the form's strict CSP,
+ * which allows no inline styles.
+ */
+function applyAuthVisibility() {
+  const authMethod = fieldValue('authMethod');
+  for (const field of document.querySelectorAll('[data-auth-field]')) {
+    field.hidden = field.dataset.authField !== authMethod;
+  }
+}
+
+/**
+ * Only ever sends the credentials that belong to the selected auth method, so
+ * a value left behind in a hidden input can never be stored as a secret for a
+ * connection that does not use it.
+ */
+function buildPayload() {
+  const authMethod = fieldValue('authMethod');
+  const payload = {
+    name: fieldValue('name'),
+    host: fieldValue('host'),
+    port: Number(fieldValue('port')),
+    username: fieldValue('username'),
+    remotePath: fieldValue('remotePath'),
+    authMethod,
+  };
+
+  if (authMethod === 'password') {
+    const password = fieldValue('password');
+    if (password) payload.password = password;
+  }
+
+  if (authMethod === 'key') {
+    payload.keyPath = fieldValue('keyPath');
+    const keyPassphrase = fieldValue('keyPassphrase');
+    // Optional: an unencrypted key has no passphrase, and storing an empty
+    // string would make authResolver hand ssh2 a bogus `passphrase` option.
+    if (keyPassphrase) payload.keyPassphrase = keyPassphrase;
+  }
+
+  return payload;
+}
+
+document.getElementById('authMethod').addEventListener('change', applyAuthVisibility);
+
 document.getElementById('save').addEventListener('click', (event) => {
   event.preventDefault();
-  vscodeApi.postMessage({
-    nonce,
-    type: 'saveConnection',
-    payload: {
-      name: fieldValue('name'),
-      host: fieldValue('host'),
-      port: Number(fieldValue('port')),
-      username: fieldValue('username'),
-      remotePath: fieldValue('remotePath'),
-      authMethod: fieldValue('authMethod'),
-    },
-  });
+  vscodeApi.postMessage({ nonce, type: 'saveConnection', payload: buildPayload() });
 });
+
+applyAuthVisibility();

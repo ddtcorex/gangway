@@ -67,4 +67,35 @@ describe('ConnectionFormPanel', () => {
     expect(manager.list()[0].name).toBe('staging');
     await expect(secrets.get(manager.list()[0].id, 'password')).resolves.toBe('hunter2');
   });
+
+  it('stores the key path on the connection and the passphrase in the secret store for key auth', async () => {
+    // Only the password path was ever covered, even though the form now has
+    // key fields and `keyPath` is what authResolver reads to load the private
+    // key: a key-auth connection saved without it can never connect.
+    const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+    const secrets = new ConnectionSecretStore(fakeSecretStore());
+    const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+    const panel = new ConnectionFormPanel(rawPanel as never, manager, secrets);
+
+    await (rawPanel as unknown as { __test_fireMessage: (m: unknown) => void }).__test_fireMessage({
+      nonce: panel.nonce,
+      type: 'saveConnection',
+      payload: {
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'key',
+        keyPath: '/home/deploy/.ssh/id_ed25519',
+        keyPassphrase: 'phrase',
+      },
+    });
+
+    const created = manager.list()[0];
+    expect(created.keyPath).toBe('/home/deploy/.ssh/id_ed25519');
+    await expect(secrets.get(created.id, 'keyPassphrase')).resolves.toBe('phrase');
+    // The key material itself must never reach the connection record.
+    expect(JSON.stringify(created)).not.toContain('phrase');
+  });
 });

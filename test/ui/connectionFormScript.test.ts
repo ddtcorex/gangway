@@ -152,4 +152,82 @@ describe('connection form webview script', () => {
 
     expect(prevented).toBe(true);
   });
+
+  it('sends the typed password for password auth, and no key fields', () => {
+    const dom = runConnectionFormScript({
+      nonce: 'n',
+      values: { authMethod: 'password', password: 'hunter2', keyPath: '/leftover/path' },
+    });
+
+    dom.elements.get('save')!.emit('click');
+
+    expect(dom.posted[0].payload).toMatchObject({ authMethod: 'password', password: 'hunter2' });
+    expect(dom.posted[0].payload).not.toHaveProperty('keyPath');
+    expect(dom.posted[0].payload).not.toHaveProperty('keyPassphrase');
+  });
+
+  it('sends keyPath and keyPassphrase for key auth, and no password', () => {
+    const dom = runConnectionFormScript({
+      nonce: 'n',
+      values: {
+        authMethod: 'key',
+        password: 'leftover-password',
+        keyPath: '/home/deploy/.ssh/id_ed25519',
+        keyPassphrase: 'phrase',
+      },
+    });
+
+    dom.elements.get('save')!.emit('click');
+
+    expect(dom.posted[0].payload).toMatchObject({
+      authMethod: 'key',
+      keyPath: '/home/deploy/.ssh/id_ed25519',
+      keyPassphrase: 'phrase',
+    });
+    expect(dom.posted[0].payload).not.toHaveProperty('password');
+  });
+
+  it('omits the optional passphrase when the user left it blank', () => {
+    const dom = runConnectionFormScript({
+      nonce: 'n',
+      values: { authMethod: 'key', keyPath: '/home/deploy/.ssh/id_ed25519', keyPassphrase: '' },
+    });
+
+    dom.elements.get('save')!.emit('click');
+
+    expect(dom.posted[0].payload).toMatchObject({ keyPath: '/home/deploy/.ssh/id_ed25519' });
+    expect(dom.posted[0].payload).not.toHaveProperty('keyPassphrase');
+  });
+
+  it('sends no credential fields at all for agent auth', () => {
+    const dom = runConnectionFormScript({
+      nonce: 'n',
+      values: { authMethod: 'agent', password: 'leftover', keyPath: '/leftover' },
+    });
+
+    dom.elements.get('save')!.emit('click');
+
+    expect(dom.posted[0].payload).not.toHaveProperty('password');
+    expect(dom.posted[0].payload).not.toHaveProperty('keyPath');
+    expect(dom.posted[0].payload).not.toHaveProperty('keyPassphrase');
+  });
+
+  it('shows only the fields belonging to the selected auth method, on load and on every change', () => {
+    const dom = runConnectionFormScript({ nonce: 'n', values: { authMethod: 'password' } });
+
+    expect(dom.fieldsFor('password').every((field) => field.hidden === false)).toBe(true);
+    expect(dom.fieldsFor('key').every((field) => field.hidden === true)).toBe(true);
+
+    dom.elements.get('authMethod')!.value = 'key';
+    dom.elements.get('authMethod')!.emit('change');
+
+    expect(dom.fieldsFor('password').every((field) => field.hidden === true)).toBe(true);
+    expect(dom.fieldsFor('key').every((field) => field.hidden === false)).toBe(true);
+
+    dom.elements.get('authMethod')!.value = 'agent';
+    dom.elements.get('authMethod')!.emit('change');
+
+    expect(dom.fieldsFor('password').every((field) => field.hidden === true)).toBe(true);
+    expect(dom.fieldsFor('key').every((field) => field.hidden === true)).toBe(true);
+  });
 });

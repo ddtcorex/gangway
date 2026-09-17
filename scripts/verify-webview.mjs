@@ -218,6 +218,7 @@ async function main() {
         set('port', '2222');
         set('username', 'deploy');
         set('remotePath', '/var/www');
+        set('password', 'hunter2');
         return true;
       })()
     `);
@@ -233,20 +234,39 @@ async function main() {
     const beforeSwitch = await authFieldsVisible();
 
     // Real mouse click on the Save button, not element.click().
-    const rect = await cdp.evaluate(`
-      (() => { const r = document.getElementById('save').getBoundingClientRect();
-               return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()
+    const clickSave = async () => {
+      const rect = await cdp.evaluate(`
+        (() => { const r = document.getElementById('save').getBoundingClientRect();
+                 return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()
+      `);
+      for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
+        await cdp.send('Input.dispatchMouseEvent', {
+          type,
+          x: rect.x,
+          y: rect.y,
+          button: 'left',
+          clickCount: type === 'mouseMoved' ? 0 : 1,
+        });
+      }
+      await sleep(300);
+    };
+
+    await clickSave();
+
+    // Switch to SSH-key auth exactly as the dropdown does, then fill and save
+    // again: proves the key fields exist, become visible, and reach the host.
+    await cdp.evaluate(`
+      (() => {
+        const dropdown = document.getElementById('authMethod');
+        dropdown.value = 'key';
+        dropdown.dispatchEvent(new Event('change'));
+        document.getElementById('keyPath').value = '/home/deploy/.ssh/id_ed25519';
+        document.getElementById('keyPassphrase').value = 'phrase';
+        return true;
+      })()
     `);
-    for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
-      await cdp.send('Input.dispatchMouseEvent', {
-        type,
-        x: rect.x,
-        y: rect.y,
-        button: 'left',
-        clickCount: type === 'mouseMoved' ? 0 : 1,
-      });
-    }
-    await sleep(300);
+    const afterSwitch = await authFieldsVisible();
+    await clickSave();
 
     // Optional visual evidence: GANGWAY_WEBVIEW_SCREENSHOT=/path/to.png makes
     // the run save what the form actually looks like, so a CSP-blocked
@@ -266,21 +286,38 @@ async function main() {
     console.log(consoleErrors.length ? consoleErrors.join('\n') : '(none)');
     console.log('--- auth-method field visibility (password selected) ---');
     console.log(JSON.stringify(beforeSwitch));
-    console.log('--- messages posted to the extension host on Save click ---');
+    console.log('--- auth-method field visibility (SSH key selected) ---');
+    console.log(JSON.stringify(afterSwitch));
+    console.log('--- messages posted to the extension host on each Save click ---');
     console.log(JSON.stringify(posted, null, 2));
 
-    if (!Array.isArray(posted) || posted.length !== 1) {
-      throw new Error(`expected exactly one posted message, got ${JSON.stringify(posted)}`);
+    if (!Array.isArray(posted) || posted.length !== 2) {
+      throw new Error(`expected exactly two posted messages, got ${JSON.stringify(posted)}`);
     }
-    if (posted[0].nonce !== 'verify-nonce-123' || posted[0].type !== 'saveConnection') {
-      throw new Error(`posted message has the wrong envelope: ${JSON.stringify(posted[0])}`);
+    for (const message of posted) {
+      if (message.nonce !== 'verify-nonce-123' || message.type !== 'saveConnection') {
+        throw new Error(`posted message has the wrong envelope: ${JSON.stringify(message)}`);
+      }
     }
-    console.log('\nOK: the Save button posts a nonce-matched saveConnection message in a real browser.');
+    if (posted[0].payload.password !== 'hunter2' || 'keyPath' in posted[0].payload) {
+      throw new Error(`password-auth payload is wrong: ${JSON.stringify(posted[0].payload)}`);
+    }
+    if (posted[1].payload.keyPath !== '/home/deploy/.ssh/id_ed25519' || posted[1].payload.keyPassphrase !== 'phrase') {
+      throw new Error(`key-auth payload is wrong: ${JSON.stringify(posted[1].payload)}`);
+    }
+    if ('password' in posted[1].payload) {
+      throw new Error('key-auth payload must not carry the password field');
+    }
+    console.log('\nOK: Save posts nonce-matched saveConnection messages for both password and key auth.');
   } finally {
     cdp?.close();
     browser.kill('SIGKILL');
     server.close();
-    await fs.rm(workDir, { recursive: true, force: true });
+    // Chrome flushes its profile asynchronously after SIGKILL; a rm that races
+    // it fails with ENOTEMPTY. This is throwaway scratch state either way, so
+    // a failed cleanup must never fail the verification itself.
+    await sleep(300);
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 

@@ -1,5 +1,7 @@
-<!-- src/ui/media/connectionForm/index.html -->
-<!-- Template only: {{TOOLKIT_URI}}/{{MAIN_URI}}/{{CSP_SOURCE}}/{{NONCE}} are substituted by
+<!-- src/ui/media/connectionForm/index.html
+     Reference copy of the markup inlined as TEMPLATE in src/ui/connectionFormHtml.ts.
+     The two are hand-synced and a test (test/ui/connectionFormHtml.test.ts) fails on drift.
+     {{TOOLKIT_URI}}/{{MAIN_URI}}/{{CSP_SOURCE}}/{{NONCE}} are substituted by
      buildConnectionFormHtml() with real vscode-webview-resource:// URIs. Nothing here is ever
      fetched from the network: both scripts are bundled into dist/media/ at build time
      (see esbuild.js) and loaded strictly through Webview.asWebviewUri, never a CDN. -->
@@ -15,17 +17,33 @@
      .nonce off it throw and killed the entire script. -->
 <body data-nonce="{{NONCE}}">
 <form id="connectionForm">
-  <vscode-text-field id="name" placeholder="Connection Name"></vscode-text-field>
-  <vscode-text-field id="host" placeholder="Host"></vscode-text-field>
-  <vscode-text-field id="port" placeholder="Port" value="22"></vscode-text-field>
-  <vscode-text-field id="username" placeholder="Username"></vscode-text-field>
-  <vscode-dropdown id="authMethod">
-    <vscode-option value="password">Password</vscode-option>
-    <vscode-option value="key">SSH Key</vscode-option>
-    <vscode-option value="agent">Agent</vscode-option>
-  </vscode-dropdown>
-  <vscode-text-field id="remotePath" placeholder="Remote Path"></vscode-text-field>
-  <vscode-button id="save">Save</vscode-button>
+  <div><vscode-text-field id="name" placeholder="staging">Connection Name</vscode-text-field></div>
+  <div><vscode-text-field id="host" placeholder="example.com">Host</vscode-text-field></div>
+  <div><vscode-text-field id="port" value="22">Port</vscode-text-field></div>
+  <div><vscode-text-field id="username" placeholder="deploy">Username</vscode-text-field></div>
+  <div>
+    <label for="authMethod">Auth Method</label>
+    <vscode-dropdown id="authMethod">
+      <vscode-option value="password">Password</vscode-option>
+      <vscode-option value="key">SSH Key</vscode-option>
+      <vscode-option value="agent">Agent</vscode-option>
+    </vscode-dropdown>
+  </div>
+  <!-- Credential inputs. main.js toggles each wrapper's `hidden` property from
+       the Auth Method dropdown and only ever posts the fields belonging to the
+       selected method. The key PATH is a plain text input on purpose: it is a
+       filesystem path, not a secret, and only the path is ever persisted. -->
+  <div data-auth-field="password">
+    <vscode-text-field id="password" type="password">Password</vscode-text-field>
+  </div>
+  <div data-auth-field="key" hidden>
+    <vscode-text-field id="keyPath" placeholder="/home/you/.ssh/id_ed25519">SSH Key Path</vscode-text-field>
+  </div>
+  <div data-auth-field="key" hidden>
+    <vscode-text-field id="keyPassphrase" type="password">Key Passphrase (optional)</vscode-text-field>
+  </div>
+  <div><vscode-text-field id="remotePath" placeholder="/var/www">Remote Path</vscode-text-field></div>
+  <div><vscode-button id="save">Save</vscode-button></div>
 </form>
 <script type="module" nonce="{{NONCE}}" src="{{TOOLKIT_URI}}"></script>
 <script type="module" nonce="{{NONCE}}" src="{{MAIN_URI}}"></script>
