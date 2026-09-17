@@ -37,6 +37,16 @@ const LIBRARY_INTERNAL_RETRIES = 0;
  * is a timeout on a human reading a fingerprint and deciding whether to trust
  * it, which is far too short: the connection would die underneath them, and
  * the next attempt would ask all over again.
+ *
+ * Disclosed trade-off (V1, deliberate): combined with BACKOFF_MS.length (3)
+ * attempts, a genuinely black-holed host (firewall drop, not a fast refusal)
+ * can leave a single-file command blocking for up to ~6 minutes
+ * (3 x 120s + the 1s/2s/4s backoff between attempts) with no progress
+ * indicator or cancel affordance -- unlike the folder commands, which run
+ * inside a cancellable `withProgress` notification. Shortening either number
+ * would also shorten the time a real, slow-but-alive handshake (a loaded
+ * host, a distant TOFU prompt) gets to complete, so this is a deliberate
+ * worst case accepted for V1, not an oversight.
  */
 const READY_TIMEOUT_MS = 120_000;
 
