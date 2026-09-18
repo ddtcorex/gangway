@@ -4,6 +4,10 @@
   "description": "PhpStorm-style single-file SFTP hotfix editing for VS Code.",
   "version": "0.1.0",
   "publisher": "ddtcorex",
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:ddtcorex/gangway.git"
+  },
   "engines": { "vscode": "^1.90.0" },
   "categories": ["Other"],
   "main": "./dist/extension.js",
@@ -42,6 +46,7 @@
   "scripts": {
     "build": "node esbuild.js",
     "watch": "node esbuild.js --watch",
+    "verify": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

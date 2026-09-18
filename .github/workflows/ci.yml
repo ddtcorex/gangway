@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    # Reusable harness gate: frozen install -> esbuild -> vitest.
+    # require-lib-index is off: this repo ships dist/extension.js (vsce),
+    # not a Cordis lib/index.js. No packageManager pin in the manifest, so
+    # the pnpm version must be passed explicitly here.
+    uses: ddtcorex/dsh-maestro-ci/.github/workflows/node-plugin.yml@7acac89da2ba99457f8b4edfc683ce621ecacc21
+    with:
+      pnpm-version: "11"
+      node-version: "22"
+      run-build: true
+      require-lib-index: false
+
+  e2e:
+    runs-on: ubuntu-latest
+    # Backstop for the runner watchdog (GANGWAY_E2E_TIMEOUT_MS, 15 min):
+    # the watchdog cannot reap the spawned VS Code process, so the job
+    # itself must die first. See docs/qa.md rule 1.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build extension + e2e
+        run: pnpm run build && pnpm run build:e2e
+
+      - name: Start SFTP fixture
+        working-directory: test/fixtures
+        run: docker compose -f docker-compose.sftp.yml up -d --wait
+
+      - name: Run e2e (headless)
+        run: xvfb-run -a node ./out/test/runE2e.js
+
+      - name: Stop SFTP fixture
+        if: always()
+        working-directory: test/fixtures
+        run: docker compose -f docker-compose.sftp.yml down -v
