@@ -78,6 +78,21 @@ describe('purgeExpiredTmp', () => {
     await expect(fs.access(orphanPath)).resolves.toBeUndefined();
   });
 
+  it('leaves symlinks alone: they are never Gangway downloads, and a link to a directory must not be unlinked as a file', async () => {
+    const now = Date.parse('2026-09-16T00:00:00Z');
+    const target = path.join(tmpRoot, 'real-dir');
+    await fs.mkdir(target, { recursive: true });
+    await fs.writeFile(path.join(target, 'old.php'), 'content');
+    const linkPath = path.join(tmpRoot, 'linked-dir');
+    await fs.symlink(target, linkPath);
+
+    const purged = await purgeExpiredTmp(tmpRoot, 7, now);
+
+    expect(purged).toEqual([]);
+    await expect(fs.access(linkPath)).resolves.toBeUndefined();
+    await expect(fs.access(path.join(target, 'old.php'))).resolves.toBeUndefined();
+  });
+
   it('returns an empty array when tmpRoot does not exist at all', async () => {
     const missingRoot = path.join(tmpRoot, 'does-not-exist');
     const purged = await purgeExpiredTmp(missingRoot, 7, Date.now());

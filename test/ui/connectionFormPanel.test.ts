@@ -313,6 +313,37 @@ describe('ConnectionFormPanel', () => {
       expect(onConnectionsChanged).not.toHaveBeenCalled();
     });
 
+    it('still completes the delete and warns when the keychain refuses the secret cleanup', async () => {
+      const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+      const secrets = new ConnectionSecretStore({
+        get: async () => undefined,
+        store: async () => {},
+        delete: async () => {
+          throw new Error('keyring is locked');
+        },
+      });
+      const target = await manager.add({
+        name: 'staging',
+        host: 'example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'password',
+      });
+      const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+      const onSecretStoreError = vi.fn();
+      const panel = new ConnectionFormPanel(rawPanel as never, manager, secrets, () => {}, undefined, async () => true, onSecretStoreError);
+
+      await (rawPanel as unknown as { __test_fireMessage: (m: unknown) => void }).__test_fireMessage({
+        nonce: panel.nonce,
+        type: 'deleteConnection',
+        payload: { id: target.id },
+      });
+
+      expect(manager.list()).toEqual([]);
+      expect(onSecretStoreError).toHaveBeenCalledWith(expect.stringContaining('keyring is locked'));
+    });
+
     it('never rebinds a still-existing, different connection when the deleted one was not the bound one', async () => {
       const { manager, rawPanel, panel, target } = await setup(async () => true);
       const other = await manager.add({
