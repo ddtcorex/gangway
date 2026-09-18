@@ -10,6 +10,7 @@ defines what "tested" means here.
 | Unit | `vitest run` (`pnpm test`) | `test/**/*.test.ts` mirroring `src/`; `vscode` resolves to `test/mocks/vscode.ts` (see `vitest.config.ts`) | CI `verify` job, must be green |
 | Docker-integration | `vitest run` + `test/fixtures/docker-compose.sftp.yml` (`atmoz/sftp`, port 2223) | Real `ssh2-sftp-client` semantics the mocks cannot express (rename-exists, partial `fastGet`, `stat` sizes) | Required locally for transfer changes; e2e job in CI |
 | E2E | `pnpm run build:e2e && pnpm run test:e2e` (`@vscode/test-electron`, needs display — `xvfb-run` in CI) | Full hotfix flow: form → connect → download → edit → `Alt+Shift+Q` → verify bytes; conflict path with out-of-band server edit | CI `e2e` job, must be green |
+| Webview (real browser) | `node scripts/verify-webview.mjs` (headless Chrome over CDP, needs `Emulation.setDeviceMetricsOverride` before any real-click test or `Input.dispatchMouseEvent` silently lands on the wrong pixel) | The Save button actually posts, for both password and key auth, driven with real mouse events against the shipped `dist/media` bundle — jsdom cannot execute a `<script type="module">` at all | CI `e2e` job (separate step), must be green |
 
 `test/e2e/**` and `out/**` are excluded from the unit runner by config —
 never fight that with CLI flags; extend the exclude list if a new
@@ -54,6 +55,21 @@ host-only dir appears.
    computed-but-unconsumed flags are dead code with passing tests.
 6. **No test may depend on execution order or wall-clock dates**, except the
    retention tests which inject "now".
+7. **A CDP coordinate-based click needs `Emulation.setDeviceMetricsOverride`
+   set before `Page.navigate`, every time.** Without it, headless Chrome's
+   default viewport does not line up with the coordinates
+   `getBoundingClientRect()` reports, so `Input.dispatchMouseEvent` silently
+   lands on the wrong pixel and the click never reaches anything -- no error,
+   no console warning, just zero effect. `verify-webview.mjs` had this
+   exact bug (found 2026-09-18: a plain `element.click()` worked, the real
+   mouse click posted nothing) alongside a second, unrelated one --
+   `buildConnectionFormHtml()` was called with only 4 of its ~17 required
+   fields, and `{{TOKEN}}.replace()` coerces the missing ones to the literal
+   string `"undefined"`, which corrupted the embedded `connections-data`
+   JSON script tag and crashed `main.js` at `JSON.parse()` before the Save
+   listener was ever attached. Both bugs predated this repo's CI entirely
+   (the script was never wired into anything, so nobody ran it) -- it is now
+   gated in CI's `e2e` job specifically so that stops happening again.
 
 ## 3. Coverage expectations
 
@@ -64,14 +80,16 @@ host-only dir appears.
 - Transfer/queue/guard changes: docker-integration or e2e evidence, not
   mocks alone — mocks encode the author's assumptions about SFTP, which is
   exactly what these tests must check.
-- Webview changes: `scripts/verify-webview.mjs` (CSP/nonce) must pass;
-  jsdom tests cover logic, not module/CSP behavior.
+- Webview changes: `scripts/verify-webview.mjs` (CSP/nonce/real-click Save
+  flow) must pass -- gated in CI's `e2e` job, not just a local habit;
+  jsdom tests cover logic, not module/CSP/real-click behavior.
 
 ## 4. Pre-push checklist (also the merge requirement)
 
 ```sh
 pnpm verify   # tsc --noEmit, clean
-pnpm test     # 195+ unit tests, green (count grows; never shrinks silently)
+pnpm test     # every unit test green (count grows; never shrinks silently --
+              # don't hardcode the number here, it rots on the next PR)
 pnpm build    # dist/extension.js rebuilds without errors
 ```
 

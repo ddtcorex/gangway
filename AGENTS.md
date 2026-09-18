@@ -30,22 +30,28 @@ artifact is `dist/extension.js` (esbuild) via `vsce`.
 - `src/` transfer plumbing — `remoteListing.ts`, `folderQueue.ts` (recursive
   walk, abortable), `tmpPath.ts` (slug + containment), `tmpStore.ts`
   (sidecar), `tmpRetention.ts` (7-day auto-purge), `connectionManager.ts`
-  (globalState library + workspaceState binding), `secretStore.ts`
-  (SecretStorage only), `authResolver.ts` (exact selected method, no
-  fallback), `hostKeyStore.ts` (TOFU), `conflictGuard.ts` (stat-compare, no
-  bulk overwrite by design), `dirtyState.ts`, `errorMapper.ts` (human
-  messages + actions), `auditLog.ts` (append-only upload log),
-  `withTimeout.ts` (bounds on secret-store calls).
-- `src/ui/` — `gangwayTreeProvider.ts` (lazy explorer),
-  `connectionFormPanel.ts` + `connectionFormHtml.ts` +
+  (connections split across globalState/workspaceState by scope --
+  'global' vs 'workspace', see `types.ts`'s `ConnectionScope` -- plus the
+  workspace binding key), `govardImport.ts` (`.govard.yml` remote import,
+  defaults to workspace scope), `editSession.ts` (cross-window edit-lock:
+  warns before opening a file another live Gangway session already has
+  open), `secretStore.ts` (SecretStorage only), `authResolver.ts` (exact
+  selected method, no fallback), `hostKeyStore.ts` (TOFU), `conflictGuard.ts`
+  (stat-compare, no bulk overwrite by design), `dirtyState.ts`,
+  `errorMapper.ts` (human messages + actions), `auditLog.ts` (append-only
+  upload log), `withTimeout.ts` (bounds on secret-store calls).
+- `src/ui/` — `gangwayTreeProvider.ts` (lazy explorer, double-click to
+  open), `connectionFormPanel.ts` + `connectionFormHtml.ts` +
   `media/connectionForm/` (Webview UI Toolkit form), `conflictResolution.ts`
   (fresh-copy diff flow), `folderTransferCommands.ts`,
-  `dirtyDecoration.ts`, `statusBar.ts`.
+  `dirtyDecoration.ts`, `statusBar.ts`, `cancellable.ts` (races a task
+  against a VS Code cancellation token).
 - `test/` — vitest suites mirroring `src/` (+ `mocks/vscode.ts`, aliased as
   `vscode` in `vitest.config.ts`); `test/e2e/` runs only inside a real
   extension host (excluded from vitest); `test/fixtures/` holds the docker
   sftp fixture (gitignored seed data, reset per run).
-- `scripts/verify-webview.mjs` — manual CSP/nonce check for the form.
+- `scripts/verify-webview.mjs` — real-browser CSP/nonce/Save-flow check for
+  the form, gated in CI's `e2e` job (see `docs/testing.md`).
 - `esbuild.js` → `dist/extension.js` (shipped). `tsc` → `out/` (e2e only).
 
 ## Commands
