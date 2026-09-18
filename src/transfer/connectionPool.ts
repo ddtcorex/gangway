@@ -134,6 +134,16 @@ export class ConnectionPool {
    * idle timer. Cleared on settle; success moves the client to `entries`.
    */
   private readonly pending = new Map<string, Promise<SftpClientLike>>();
+  /**
+   * Connection ids invalidated/disposed while their connect was still in
+   * `pending`. invalidate() and dispose() cannot remove an entry that does
+   * not exist in `entries` yet, so they record the intent here instead; once
+   * the in-flight connect settles, getClient()'s own resolution handler
+   * checks this set and tears the just-pooled client back down immediately
+   * -- otherwise a cancelled-while-connecting client would land in the pool
+   * anyway and get silently reused by the next command.
+   */
+  private readonly cancelledWhilePending = new Set<string>();
 
   constructor(
     private readonly clientFactory: SftpClientFactory,
@@ -175,8 +185,18 @@ export class ConnectionPool {
     // derived promise must settle successfully either way, or a failed
     // connect surfaces as a second, unhandled rejection from this line.
     result.then(
-      () => this.pending.delete(connection.id),
-      () => this.pending.delete(connection.id),
+      () => {
+        this.pending.delete(connection.id);
+        // The connect succeeded after invalidate()/dispose() already ran
+        // while it was still in-flight: entries.set() above just pooled it
+        // regardless, so undo that now instead of leaving a "cancelled"
+        // client live and reusable.
+        if (this.cancelledWhilePending.delete(connection.id)) this.invalidate(connection.id);
+      },
+      () => {
+        this.pending.delete(connection.id);
+        this.cancelledWhilePending.delete(connection.id);
+      },
     );
     return result;
   }
@@ -188,8 +208,14 @@ export class ConnectionPool {
    * one-command event -- the next getClient() reconnects instead of reusing
    * the dead socket. Sync API by design (it is called from catch blocks);
    * the end() runs detached and can never throw here.
+   *
+   * A connect still in `pending` for this id has no entry to remove yet --
+   * record the intent in `cancelledWhilePending` so getClient()'s own
+   * resolution handler tears it down the moment it lands instead of
+   * silently pooling a client this call meant to discard.
    */
   invalidate(connectionId: string): void {
+    if (this.pending.has(connectionId)) this.cancelledWhilePending.add(connectionId);
     const entry = this.entries.get(connectionId);
     if (!entry) return;
     this.entries.delete(connectionId);
@@ -197,9 +223,20 @@ export class ConnectionPool {
     void entry.client.end().catch(() => {});
   }
 
+  /** True once a client for this connection is actually pooled and ready to
+   * reuse -- a cache hit, not merely "a connect is in flight". Callers use
+   * this to skip showing connect-progress UI for what will be an instant
+   * getClient() resolution. */
+  hasClient(connectionId: string): boolean {
+    return this.entries.has(connectionId);
+  }
+
   private async connectWithRetry(connection: ConnectionConfig): Promise<SftpClientLike> {
-    const client = this.clientFactory.create();
+    // Resolved before the client is created: a locked/slow keyring throwing
+    // here (see authResolver's timeout) must not leak a live client/socket
+    // that nothing would ever .end().
     const baseOptions = await resolveConnectOptions(connection, this.secrets);
+    const client = this.clientFactory.create();
     const hostVerifierState: HostVerifierState = { blockedByHostKey: false };
     const connectOptions = {
       ...baseOptions,
@@ -263,6 +300,12 @@ export class ConnectionPool {
   }
 
   async dispose(): Promise<void> {
+    // A connect still in-flight at deactivation must not be allowed to land
+    // in the pool afterward: mark it cancelled first, same as invalidate(),
+    // then wait for it to settle -- getClient()'s own resolution handler
+    // ends it via invalidate() once it does.
+    for (const connectionId of this.pending.keys()) this.cancelledWhilePending.add(connectionId);
+    const pendingSettled = Promise.allSettled([...this.pending.values()]);
     const closings = [...this.entries.values()].map(async (entry) => {
       clearTimeout(entry.idleTimer);
       // One already-dead client must never strand the rest: each close is
@@ -274,7 +317,7 @@ export class ConnectionPool {
       }
     });
     this.entries.clear();
-    await Promise.all(closings);
+    await Promise.all([...closings, pendingSettled]);
   }
 }
 
