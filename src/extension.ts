@@ -14,7 +14,7 @@ import { purgeExpiredTmp, sweepUnknownTmpRoots } from './tmpRetention';
 import { tmpFilePathFor, tmpRootFor, connectionSlug } from './tmpPath';
 import { mapSftpError, actionLabel, isConnectionError } from './errorMapper';
 import { mapListingToEntries } from './remoteListing';
-import { GangwayTreeProvider, type RemoteTreeNode } from './ui/gangwayTreeProvider';
+import { GangwayTreeProvider, isSelectorNode, type RemoteTreeNode, type GangwayTreeNode } from './ui/gangwayTreeProvider';
 import { TmpStatusBar } from './ui/statusBar';
 import { AUTO_OPEN_PROMPT_THRESHOLD_BYTES, isProbablyBinary } from './folderQueue';
 import { DirtyDecorationProvider } from './ui/dirtyDecoration';
@@ -26,6 +26,7 @@ import { parseGovardYaml, mapGovardRemote, filterNewRemotes, type MappedRemote, 
 import { raceWithCancellation } from './ui/cancellable';
 import { TransferCancelledError } from './folderQueue';
 import { resolveFileConflict, type ConflictResolutionUi } from './ui/conflictResolution';
+import { checkEditSession, acquireEditSession, releaseEditSession } from './editSession';
 import type { FileConflictDecision } from './conflictGuard';
 import type { ConnectionConfig } from './types';
 
@@ -109,6 +110,16 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
    * this instead of casting ad-hoc at each call site.
    */
   async function getAdapter(connection: ConnectionConfig): Promise<SftpClientAdapter> {
+    // A cache hit (the common case: a command right after a download, or
+    // any second command against the same connection) resolves getClient()
+    // in the same tick. Wrapping that in withProgress used to still flash a
+    // "connecting..." notification alongside whatever progress the command
+    // itself shows next (e.g. "uploading...") -- two notifications for one
+    // action. Skip the wrapper entirely when there is nothing to wait for.
+    if (pool.hasClient(connection.id)) {
+      const client = await pool.getClient(connection);
+      return new SftpClientAdapter(client as unknown as RawSftpClient);
+    }
     // A black-holed host can otherwise block a single-file command for ~6
     // minutes (3 x 120s readyTimeout + backoff) behind a frozen UI. The
     // progress is cancellable; cancelling drops the wait, not the pool --
@@ -207,6 +218,31 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   }
 
   /**
+   * Opens a downloaded tmp file for editing, unless another still-running
+   * Gangway session (another VS Code window, on this machine) already has
+   * it open -- editing the same deterministic local path in two windows at
+   * once means whichever uploads last silently wins over the other's
+   * changes. The user decides whether to open here anyway; either way the
+   * file was already downloaded/refreshed by the caller before this runs.
+   */
+  async function openForEditing(localPath: string): Promise<void> {
+    const check = await checkEditSession(localPath);
+    if (check.status === 'ownedByAnotherLiveSession') {
+      const startedAt = new Date(check.owner.startedAt).toLocaleTimeString();
+      const choice = await vscode.window.showWarningMessage(
+        `This file is already open for editing in another Gangway session (started at ${startedAt}). ` +
+          'Editing it here too can cause one session\'s changes to silently overwrite the other\'s. ' +
+          'Switch to that session instead, or open it here anyway?',
+        { modal: true },
+        'Open here anyway',
+      );
+      if (choice !== 'Open here anyway') return;
+    }
+    await acquireEditSession(localPath);
+    await vscode.window.showTextDocument(vscode.Uri.file(localPath) as never);
+  }
+
+  /**
    * Spec §2.3: a download always proceeds, but a file over 5MB or one that
    * looks binary does not auto-open in the editor unasked. Small text files
    * keep the old instant-open behavior.
@@ -297,6 +333,34 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   });
 
   /**
+   * TreeItem has no native double-click event, and a single click used to
+   * carry a `command` that downloaded and opened the file immediately --
+   * every click re-ran the whole download workflow. File nodes no longer
+   * set `command` (see gangwayTreeProvider.ts); opening one now requires
+   * selecting the same file node twice within DOUBLE_CLICK_THRESHOLD_MS, the
+   * same pattern VS Code's own Explorer preview mode implements natively.
+   */
+  const DOUBLE_CLICK_THRESHOLD_MS = 500;
+  let lastSelectedKey: string | undefined;
+  let lastSelectedAt = 0;
+  const selectionListener = treeView.onDidChangeSelection((event) => {
+    const node = event.selection[0] as GangwayTreeNode | undefined;
+    if (!node || isSelectorNode(node) || node.entry.isDirectory) {
+      lastSelectedKey = undefined;
+      return;
+    }
+    const key = `${node.connectionId}:${node.entry.path}`;
+    const now = Date.now();
+    if (lastSelectedKey === key && now - lastSelectedAt < DOUBLE_CLICK_THRESHOLD_MS) {
+      lastSelectedKey = undefined;
+      void runDownloadFileCommand(node);
+      return;
+    }
+    lastSelectedKey = key;
+    lastSelectedAt = now;
+  });
+
+  /**
    * Badges a Gangway tmp file (in this tree, and in any editor tab showing
    * it) once its local content has diverged from what last matched the
    * server. VS Code caches decorations until told otherwise, so every path
@@ -318,6 +382,17 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   const tmpStatusBar = new TmpStatusBar();
   const editorSwitchListener = vscode.window.onDidChangeActiveTextEditor((editor) => {
     tmpStatusBar.handleActiveEditorChanged(editor?.document.uri.fsPath);
+  });
+
+  /**
+   * Releases this window's edit-session claim (see openForEditing above)
+   * the moment its tab closes, so a genuinely finished edit never keeps
+   * blocking a different window from opening the same file. Fires for
+   * every closed document, Gangway-managed or not; releaseEditSession is a
+   * no-op (ENOENT, swallowed) for anything that was never claimed.
+   */
+  const sessionReleaseListener = vscode.workspace.onDidCloseTextDocument((document) => {
+    void releaseEditSession(document.uri.fsPath).catch(() => {});
   });
 
   /**
@@ -467,7 +542,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       tmpStatusBar.showFor(connection.name, remotePath, localPath);
       dirtyDecorations.refresh(vscode.Uri.file(localPath));
       if (await shouldAutoOpen(localPath, remotePath, meta.size)) {
-        await vscode.window.showTextDocument(vscode.Uri.file(localPath) as never);
+        await openForEditing(localPath);
       }
     } catch (err) {
       await showCommandError(err, { retry: () => runDownloadFileCommand(node), connection });
@@ -956,10 +1031,12 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   context.subscriptions.push(
     output,
     treeView,
+    selectionListener,
     dirtyDecorationRegistration,
     saveListener,
     tmpStatusBar,
     editorSwitchListener,
+    sessionReleaseListener,
     // Pooled sockets and idle timers are extension-host resources: dropping
     // them here keeps a window reload from orphaning live connections.
     { dispose: () => void pool.dispose() },

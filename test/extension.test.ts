@@ -50,6 +50,11 @@ vi.mock('../src/transfer/connectionPool', () => ({
     getClient: vi.fn().mockResolvedValue(fakeRawClient),
     invalidate: vi.fn(),
     dispose: vi.fn().mockResolvedValue(undefined),
+    // false by default so every existing test keeps exercising the
+    // connecting-progress path (see "runs both folder transfers inside a
+    // cancellable progress notification" and the getAdapter unit tests in
+    // connectionPool.test.ts for the true/cache-hit path).
+    hasClient: vi.fn().mockReturnValue(false),
   })),
 }));
 
@@ -158,6 +163,7 @@ describe('activate - realistic command invocation', () => {
   let handlers: Map<string, (...args: unknown[]) => unknown>;
   let connection: ConnectionConfig;
   let osTmpdirSpy: ReturnType<typeof vi.spyOn>;
+  let capturedTreeView: { __test_fireDidChangeSelection: (node: unknown) => void } | undefined;
 
   beforeEach(async () => {
     tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'gangway-ext-test-'));
@@ -178,6 +184,13 @@ describe('activate - realistic command invocation', () => {
       handlers.set(id, handler);
       return original(id, handler);
     };
+
+    const originalCreateTreeView = vscode.window.createTreeView;
+    vscode.window.createTreeView = ((id: string, options: never) => {
+      const view = originalCreateTreeView(id, options);
+      capturedTreeView = view as unknown as { __test_fireDidChangeSelection: (node: unknown) => void };
+      return view;
+    }) as typeof originalCreateTreeView;
 
     const result = activate(fakeContext());
     connection = await result.connectionManager.add({
@@ -1182,6 +1195,116 @@ describe('activate - realistic command invocation', () => {
       expect(infoSpy).toHaveBeenCalledWith('Cancelled.');
       expect(errorSpy).not.toHaveBeenCalled();
       expect(fakeRawClient.stat).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('tree view: double click opens, single click only selects', () => {
+    function nodeFor(remotePath: string, isDirectory = false) {
+      return {
+        connectionId: connection.id,
+        entry: { path: remotePath, isDirectory, isSymbolicLink: false, size: 0 },
+      };
+    }
+
+    it('a single selection does not download or open the file', () => {
+      capturedTreeView!.__test_fireDidChangeSelection(nodeFor('/var/www/app/config.php'));
+
+      expect(fakeRawClient.stat).not.toHaveBeenCalled();
+    });
+
+    it('selecting the same file node twice in quick succession downloads and opens it (double click)', async () => {
+      const node = nodeFor('/var/www/app/config.php');
+      capturedTreeView!.__test_fireDidChangeSelection(node);
+      capturedTreeView!.__test_fireDidChangeSelection(node);
+      // The handler is fired synchronously but runs async; let it settle.
+      await vi.waitFor(() => expect(fakeRawClient.stat).toHaveBeenCalled());
+
+      expect(fakeRawClient.stat).toHaveBeenCalledWith('/var/www/app/config.php');
+      expect(fakeRawClient.fastGet).toHaveBeenCalledWith('/var/www/app/config.php', expect.any(String));
+    });
+
+    it('selecting two different file nodes in a row does not count as a double click on either', async () => {
+      capturedTreeView!.__test_fireDidChangeSelection(nodeFor('/var/www/app/a.php'));
+      capturedTreeView!.__test_fireDidChangeSelection(nodeFor('/var/www/app/b.php'));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(fakeRawClient.stat).not.toHaveBeenCalled();
+    });
+
+    it('selecting a folder node never triggers a download, even twice in a row', async () => {
+      const folder = nodeFor('/var/www/app', true);
+      capturedTreeView!.__test_fireDidChangeSelection(folder);
+      capturedTreeView!.__test_fireDidChangeSelection(folder);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(fakeRawClient.stat).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('edit session: warns instead of silently opening a file another live session owns', () => {
+    function nodeFor(remotePath: string, isDirectory = false) {
+      return {
+        connectionId: connection.id,
+        entry: { path: remotePath, isDirectory, isSymbolicLink: false, size: 0 },
+      };
+    }
+
+    it('opens normally when no other session has the file', async () => {
+      fakeRawClient.stat.mockResolvedValue({ size: 5, modifyTime: 1700000000000, isDirectory: false, isSymbolicLink: false });
+      const showDocSpy = vi.spyOn(vscode.window, 'showTextDocument');
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      try {
+        await handlers.get('gangway.downloadFile')!(nodeFor('/var/www/app/config.php'));
+        expect(showDocSpy).toHaveBeenCalledTimes(1);
+        expect(warnSpy).not.toHaveBeenCalled();
+      } finally {
+        showDocSpy.mockRestore();
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('warns, and does not open, when another live process already holds the edit session for this file', async () => {
+      fakeRawClient.stat.mockResolvedValue({ size: 5, modifyTime: 1700000000000, isDirectory: false, isSymbolicLink: false });
+      const localPath = tmpFilePathFor(connection, '/var/www/app/config.php');
+      await fs.mkdir(path.dirname(localPath), { recursive: true });
+      // A different, still-running pid than this test process.
+      const foreignPid = process.pid === 1 ? 2 : 1;
+      await fs.writeFile(
+        `${localPath}.gangway-session.json`,
+        JSON.stringify({ pid: foreignPid, startedAt: Date.now() }),
+        'utf8',
+      );
+      const showDocSpy = vi.spyOn(vscode.window, 'showTextDocument');
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue(undefined as never);
+      try {
+        await handlers.get('gangway.downloadFile')!(nodeFor('/var/www/app/config.php'));
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('already open for editing in another Gangway session'), expect.anything(), 'Open here anyway');
+        expect(showDocSpy).not.toHaveBeenCalled();
+      } finally {
+        showDocSpy.mockRestore();
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('opens anyway once the user confirms past the other-session warning', async () => {
+      fakeRawClient.stat.mockResolvedValue({ size: 5, modifyTime: 1700000000000, isDirectory: false, isSymbolicLink: false });
+      const localPath = tmpFilePathFor(connection, '/var/www/app/config.php');
+      await fs.mkdir(path.dirname(localPath), { recursive: true });
+      const foreignPid = process.pid === 1 ? 2 : 1;
+      await fs.writeFile(
+        `${localPath}.gangway-session.json`,
+        JSON.stringify({ pid: foreignPid, startedAt: Date.now() }),
+        'utf8',
+      );
+      const showDocSpy = vi.spyOn(vscode.window, 'showTextDocument');
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue('Open here anyway' as never);
+      try {
+        await handlers.get('gangway.downloadFile')!(nodeFor('/var/www/app/config.php'));
+        expect(showDocSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        showDocSpy.mockRestore();
+        warnSpy.mockRestore();
+      }
     });
   });
 });
