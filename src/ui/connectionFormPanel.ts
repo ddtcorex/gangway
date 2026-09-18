@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import type * as vscode from 'vscode';
 import type { ConnectionManager } from '../connectionManager';
-import type { ConnectionSecretStore } from '../secretStore';
+import type { ConnectionSecretStore, SecretKind } from '../secretStore';
 import type { AuthMethod, ConnectionConfig } from '../types';
 import { withTimeout } from '../withTimeout';
 
@@ -83,11 +83,35 @@ export class ConnectionFormPanel {
      * connection record itself was already saved successfully. Never blocks
      * or reverts the save; this is purely informational so the user knows
      * to re-enter the credential rather than silently failing to connect
-     * later.
+     * later. Also used when a secret could not be *deleted* (connection
+     * remove or auth-method switch): a lingering keychain entry the user
+     * believes is gone is worse than a warning.
      */
     private readonly onSecretStoreError: (message: string) => void = () => {},
   ) {
     this.panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(message as IncomingMessage));
+  }
+
+  /**
+   * Best-effort secret cleanup, bounded like every other keychain call: a
+   * locked or hung system store must never wedge a delete or a save. The
+   * connection record is already gone (or already switched) by the time
+   * this runs, so a failure here is reported, never thrown.
+   */
+  private async deleteSecrets(connectionId: string, kinds: readonly SecretKind[], context: 'deleted connection' | 'auth-method switch'): Promise<void> {
+    for (const kind of kinds) {
+      try {
+        await withTimeout(
+          this.secrets.delete(connectionId, kind),
+          SECRET_STORE_TIMEOUT_MS,
+          'Timed out writing to the system secret store',
+        );
+      } catch (err) {
+        this.onSecretStoreError(
+          `Removed the ${context}, but could not delete its stored ${kind === 'password' ? 'password' : 'key passphrase'} (${err instanceof Error ? err.message : String(err)}). Remove it from the OS keychain manually.`,
+        );
+      }
+    }
   }
 
   private async handleMessage(message: IncomingMessage): Promise<void> {
@@ -103,6 +127,11 @@ export class ConnectionFormPanel {
 
     if (message.type === 'saveConnection') {
       const { id, password, keyPassphrase, ...connectionFields } = message.payload;
+      // Read before the update: an auth-method switch orphans the previous
+      // method's secret, and after the write there is no "previous" left.
+      const previousMethod = id
+        ? this.connectionManager.list().find((c) => c.id === id)?.authMethod
+        : undefined;
       const saved = id
         ? await this.connectionManager.update(id, connectionFields)
         : await this.connectionManager.add(connectionFields);
@@ -132,6 +161,19 @@ export class ConnectionFormPanel {
             `Saved "${saved.name}", but could not store its key passphrase (${err instanceof Error ? err.message : String(err)}). Open Manage Remotes and re-enter it.`,
           );
         }
+      }
+
+      // Stale-method cleanup: deletes only the PREVIOUS method's secret kind,
+      // so a just-stored secret for the new method is never touched. A switch
+      // with a blank new-secret field leaves that method credential-less --
+      // the next connect fails with a clear auth error rather than silently
+      // using the previous method's leftover secret.
+      if (previousMethod && previousMethod !== connectionFields.authMethod) {
+        await this.deleteSecrets(
+          saved.id,
+          [previousMethod === 'password' ? 'password' : 'keyPassphrase'],
+          'auth-method switch',
+        );
       }
 
       if (!id) {
@@ -166,6 +208,9 @@ export class ConnectionFormPanel {
       if (this.connectionManager.getWorkspaceBinding() === connection.id) {
         await this.connectionManager.setWorkspaceBinding(undefined);
       }
+      // The record is gone: its keychain entries must go too, or a deleted
+      // connection's password lingers in the OS store indefinitely.
+      await this.deleteSecrets(connection.id, ['password', 'keyPassphrase'], 'deleted connection');
 
       const connections = this.connectionManager.list();
       this.onConnectionsChanged(connections);

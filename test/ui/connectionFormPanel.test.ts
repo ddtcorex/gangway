@@ -333,6 +333,84 @@ describe('ConnectionFormPanel', () => {
 
       expect(manager.getWorkspaceBinding()).toBe(other.id);
     });
+
+    it('deletes both kinds of stored secrets so nothing lingers in the keychain', async () => {
+      const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+      const backing = fakeSecretStore();
+      const secrets = new ConnectionSecretStore(backing);
+      const target = await manager.add({
+        name: 'staging',
+        host: 'example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'password',
+      });
+      await secrets.set(target.id, 'password', 'hunter2');
+      await secrets.set(target.id, 'keyPassphrase', 'old-phrase');
+      const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+      const panel = new ConnectionFormPanel(rawPanel as never, manager, secrets, () => {}, undefined, async () => true);
+
+      await (rawPanel as unknown as { __test_fireMessage: (m: unknown) => void }).__test_fireMessage({
+        nonce: panel.nonce,
+        type: 'deleteConnection',
+        payload: { id: target.id },
+      });
+
+      await expect(secrets.get(target.id, 'password')).resolves.toBeUndefined();
+      await expect(secrets.get(target.id, 'keyPassphrase')).resolves.toBeUndefined();
+    });
+  });
+
+  describe('auth-method switch', () => {
+    async function setupSwitch() {
+      const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+      const secrets = new ConnectionSecretStore(fakeSecretStore());
+      const target = await manager.add({
+        name: 'staging',
+        host: 'example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'password',
+      });
+      await secrets.set(target.id, 'password', 'hunter2');
+      const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+      const panel = new ConnectionFormPanel(rawPanel as never, manager, secrets);
+      const fire = (payload: unknown) =>
+        (rawPanel as unknown as { __test_fireMessage: (m: unknown) => Promise<void> }).__test_fireMessage({
+          nonce: panel.nonce,
+          type: 'saveConnection',
+          payload,
+        });
+      return { manager, secrets, target, fire };
+    }
+
+    it('drops the password secret when switching from password to key auth', async () => {
+      const { secrets, target, fire } = await setupSwitch();
+      await fire({ id: target.id, name: 'staging', host: 'example.com', port: 22, username: 'deploy', remotePath: '/var/www', authMethod: 'key', keyPath: '/home/deploy/.ssh/id_ed25519', keyPassphrase: 'new-phrase' });
+
+      await expect(secrets.get(target.id, 'password')).resolves.toBeUndefined();
+      await expect(secrets.get(target.id, 'keyPassphrase')).resolves.toBe('new-phrase');
+    });
+
+    it('drops the key passphrase when switching from key to password auth', async () => {
+      const { manager, secrets, fire } = await setupSwitch();
+      const keyed = await manager.add({
+        name: 'keyed',
+        host: 'example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'key',
+      });
+      await secrets.set(keyed.id, 'keyPassphrase', 'old-phrase');
+
+      await fire({ id: keyed.id, name: 'keyed', host: 'example.com', port: 22, username: 'deploy', remotePath: '/var/www', authMethod: 'password', password: 'fresh' });
+
+      await expect(secrets.get(keyed.id, 'keyPassphrase')).resolves.toBeUndefined();
+      await expect(secrets.get(keyed.id, 'password')).resolves.toBe('fresh');
+    });
   });
 
   describe('a secret store that fails or hangs', () => {
