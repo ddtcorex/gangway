@@ -22,6 +22,8 @@ import { buildConnectionFormHtml, resolveConnectionFormFields, toConnectionsJson
 import { ConnectionFormPanel } from './ui/connectionFormPanel';
 import { SftpClientAdapter, type RawSftpClient } from './transfer/sftpClientAdapter';
 import { runFolderDownload, runFolderUpload } from './ui/folderTransferCommands';
+import { raceWithCancellation } from './ui/cancellable';
+import { TransferCancelledError } from './folderQueue';
 import { resolveFileConflict, type ConflictResolutionUi } from './ui/conflictResolution';
 import type { FileConflictDecision } from './conflictGuard';
 import type { ConnectionConfig } from './types';
@@ -106,7 +108,20 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
    * this instead of casting ad-hoc at each call site.
    */
   async function getAdapter(connection: ConnectionConfig): Promise<SftpClientAdapter> {
-    const client = await pool.getClient(connection);
+    // A black-holed host can otherwise block a single-file command for ~6
+    // minutes (3 x 120s readyTimeout + backoff) behind a frozen UI. The
+    // progress is cancellable; cancelling drops the wait, not the pool --
+    // an in-flight handshake that later succeeds still lands a healthy
+    // client, and a Retry reconnects through the same path.
+    const client = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `Gangway: connecting to ${connection.host}`,
+        cancellable: true,
+      },
+      (_progress, token) =>
+        raceWithCancellation(pool.getClient(connection), token, () => pool.invalidate(connection.id)),
+    );
     return new SftpClientAdapter(client as unknown as RawSftpClient);
   }
 
@@ -168,6 +183,12 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     options: { retry?: () => Promise<void>; connection?: ConnectionConfig } = {},
   ): Promise<void> {
     const { retry, connection } = options;
+    // A cancellation is the user answering "stop", not a failure: report it
+    // plainly with no Retry buttons (which would just re-ask the question).
+    if (err instanceof TransferCancelledError) {
+      await vscode.window.showInformationMessage('Cancelled.');
+      return;
+    }
     if (connection && isConnectionError(err)) pool.invalidate(connection.id);
     const mapped = mapSftpError(err);
     const available = mapped.actions.filter((action) =>

@@ -267,7 +267,14 @@ describe('activate - realistic command invocation', () => {
     // folderQueue's AbortSignal plumbing existed from the start but nothing
     // passed one in, and folder upload had no progress UI at all -- Cancel
     // was an affordance that did nothing.
-    type ProgressOptions = { cancellable?: boolean; location?: vscode.ProgressLocation | { viewId: string } };
+    // Note: connecting itself now shows its own cancellable notification
+    // (see the connect-progress test below), so this filters to the two
+    // transfer notifications by title instead of counting every call.
+    type ProgressOptions = {
+      cancellable?: boolean;
+      location?: vscode.ProgressLocation | { viewId: string };
+      title?: string;
+    };
     const progressOptions: ProgressOptions[] = [];
     const original = vscode.window.withProgress;
     vscode.window.withProgress = ((opts: ProgressOptions, task: never) => {
@@ -289,8 +296,11 @@ describe('activate - realistic command invocation', () => {
       vscode.window.withProgress = original;
     }
 
-    expect(progressOptions).toHaveLength(2);
-    for (const options of progressOptions) {
+    const transfers = progressOptions.filter(
+      (options) => options.title?.startsWith('Downloading ') || options.title?.startsWith('Uploading '),
+    );
+    expect(transfers).toHaveLength(2);
+    for (const options of transfers) {
       expect(options.cancellable).toBe(true);
       expect(options.location).toBe(vscode.ProgressLocation.Notification);
     }
@@ -667,10 +677,11 @@ describe('activate - realistic command invocation', () => {
       };
     }
 
-    function poolInstance(): { invalidate: ReturnType<typeof vi.fn> } {
+    function poolInstance(): { invalidate: ReturnType<typeof vi.fn>; getClient: ReturnType<typeof vi.fn> } {
       const mocked = vi.mocked(ConnectionPool);
       return mocked.mock.results[mocked.mock.results.length - 1].value as {
         invalidate: ReturnType<typeof vi.fn>;
+        getClient: ReturnType<typeof vi.fn>;
       };
     }
 
@@ -916,6 +927,59 @@ describe('activate - realistic command invocation', () => {
 
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('plain files'));
       expect(infoSpy).not.toHaveBeenCalled();
+    });
+
+    it('connects behind a cancellable progress notification naming the host', async () => {
+      const seen: unknown[] = [];
+      const originalWithProgress = vscode.window.withProgress;
+      vscode.window.withProgress = ((opts: unknown, task: never) => {
+        seen.push(opts);
+        return originalWithProgress(opts as never, task);
+      }) as typeof originalWithProgress;
+      try {
+        await handlers.get('gangway.downloadFile')!(nodeFor('/var/www/app/config.php'));
+      } finally {
+        vscode.window.withProgress = originalWithProgress;
+      }
+
+      expect(seen).toContainEqual(
+        expect.objectContaining({ cancellable: true, title: expect.stringContaining('example.com') }),
+      );
+    });
+
+    it('cancelling the connect progress aborts with a plain Cancelled notice, never an error dialog', async () => {
+      poolInstance().getClient.mockImplementationOnce(() => new Promise(() => {}));
+      const listeners: Array<() => void> = [];
+      const originalWithProgress = vscode.window.withProgress;
+      type ProgressTask = (
+        progress: { report: (value: unknown) => void },
+        token: { isCancellationRequested: boolean; onCancellationRequested: (listener: () => void) => { dispose: () => void } },
+      ) => Promise<unknown>;
+      vscode.window.withProgress = ((_opts: never, task: ProgressTask) => {
+        const pending = task(
+          { report: () => {} },
+          {
+            isCancellationRequested: false,
+            onCancellationRequested: (listener: () => void) => {
+              listeners.push(listener);
+              return { dispose: () => {} };
+            },
+          },
+        );
+        for (const listener of listeners) listener();
+        return pending;
+      }) as unknown as typeof originalWithProgress;
+      const infoSpy = track(vi.spyOn(vscode.window, 'showInformationMessage'));
+      const errorSpy = track(vi.spyOn(vscode.window, 'showErrorMessage'));
+      try {
+        await handlers.get('gangway.downloadFile')!(nodeFor('/var/www/app/config.php'));
+      } finally {
+        vscode.window.withProgress = originalWithProgress;
+      }
+
+      expect(infoSpy).toHaveBeenCalledWith('Cancelled.');
+      expect(errorSpy).not.toHaveBeenCalled();
+      expect(fakeRawClient.stat).not.toHaveBeenCalled();
     });
   });
 });
