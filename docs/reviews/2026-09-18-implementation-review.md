@@ -119,3 +119,17 @@ without redesign.
   here: `feat/<topic>` branches + PR + green CI before merge (see AGENTS.md).
 - No `AGENTS.md`, README, CHANGELOG, or CI existed at review time — added on
   `feat/harness-standards` with this report.
+
+## Addendum — build non-determinism (found by CI rehearsal, fixed same day)
+
+- Wiring CI exposed a latent build bug: `esbuild.js` externalized only
+  `cpu-features`, not `sshcrypto.node`. The build passed on the dev machine
+  (ssh2 postinstall never produced the binary, so the unresolvable require
+  was left as-is) but failed on any fresh `pnpm install` where the binary
+  exists (`No loader is configured for .node files`). Fixed by externalizing
+  `*.node` via a small esbuild plugin; ssh2 loads both bindings inside
+  try/catch with pure-JS fallback, so the runtime behavior is now identical
+  in both environments. Proven by rebuilding the clean-room sim green.
+- Lesson (same class as the harness `pnpm add @github` pitfall): never trust
+  "build passes here" — rehearse the exact CI path (fresh lockfile install
+  in a clean dir) before claiming CI is wired.
