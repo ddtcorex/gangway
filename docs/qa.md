@@ -26,6 +26,11 @@ host-only dir appears.
 2. **Fixture seed data is gitignored and reset per run** (`resetFixture` in
    `test/runE2e.ts`). Tests mutate the fixture in place; a committed or
    stale fixture drifts after the first run and poisons every later one.
+   Bind-mount gotcha: once the sftp container is up,
+   `test/fixtures/sftp-data/` belongs to the container's user and a
+   host-side write fails with EACCES — locally run
+   `sudo chown -R $(id -u):$(id -g) test/fixtures/sftp-data`
+   after `docker compose up` (CI does this automatically).
 3. **Every user-visible error action is tested.** A `showErrorMessage`
    button whose choice is discarded shipped once (§5 review) — assert the
    branch taken per choice (retry command / output reveal / pool evict),

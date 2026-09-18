@@ -53,6 +53,12 @@ jobs:
         working-directory: test/fixtures
         run: docker compose -f docker-compose.sftp.yml up -d --wait
 
+      # The fixture dir is a bind-mount: once the container is up it is
+      # owned by the container's user, and resetFixture()'s host-side seed
+      # write would fail with EACCES without this (red e2e, 2026-09-18).
+      - name: Take back fixture ownership
+        run: sudo chown -R $(id -u):$(id -g) test/fixtures/sftp-data
+
       - name: Run e2e (headless)
         run: xvfb-run -a node ./out/test/runE2e.js
 
