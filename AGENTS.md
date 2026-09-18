@@ -80,14 +80,14 @@ pnpm run build:e2e && pnpm run test:e2e   # needs docker sftp + display (xvfb in
 - **Webview** — Toolkit components only (no hand-rolled CSS theme), CSP +
   nonce on every load, validate incoming messages, never prefill secrets.
 - **Tests live with the code** — `test/<area>/<file>.test.ts` mirrors
-  `src/`; a fix without a regression test is incomplete (see `docs/qa.md`).
+  `src/`; a fix without a regression test is incomplete (see `docs/testing.md`).
 - **Superpowers workflow** for non-trivial changes: `brainstorming` →
   `writing-plans` → `executing-plans` (strict TDD: RED → GREEN per task,
   one commit per task).
 
 ## QA & CI
 
-- QA standard: `docs/qa.md` (unit / docker-integration / e2e policy, E2E
+- QA standard: `docs/testing.md` (unit / docker-integration / e2e policy, E2E
   timeout rule, secret-leak tests).
 - CI: `.github/workflows/ci.yml` (reusable `ddtcorex/dsh-maestro-ci`
   `node-plugin.yml` pin + dedicated e2e job). Green CI is a merge
