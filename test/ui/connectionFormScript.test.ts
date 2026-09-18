@@ -321,7 +321,7 @@ describe('connection form webview script', () => {
   it('fills the key path field when the host replies with a chosen path', () => {
     const dom = runConnectionFormScript({ nonce: 'n', values: { authMethod: 'key', keyPath: '' } });
 
-    dom.emitWindowMessage({ type: 'keyPathSelected', path: '/home/deploy/.ssh/id_ed25519' });
+    dom.emitWindowMessage({ nonce: 'n', type: 'keyPathSelected', path: '/home/deploy/.ssh/id_ed25519' });
 
     expect(dom.elements.get('keyPath')!.value).toBe('/home/deploy/.ssh/id_ed25519');
   });
@@ -329,9 +329,17 @@ describe('connection form webview script', () => {
   it('ignores an unrelated message posted to the window', () => {
     const dom = runConnectionFormScript({ nonce: 'n', values: { authMethod: 'key', keyPath: 'unchanged' } });
 
-    dom.emitWindowMessage({ type: 'somethingElse', path: '/should/not/apply' });
+    dom.emitWindowMessage({ nonce: 'n', type: 'somethingElse', path: '/should/not/apply' });
 
     expect(dom.elements.get('keyPath')!.value).toBe('unchanged');
+  });
+
+  it('ignores a well-formed host reply carrying the wrong nonce', () => {
+    const dom = runConnectionFormScript({ nonce: 'n', values: { authMethod: 'key', keyPath: '' } });
+
+    dom.emitWindowMessage({ nonce: 'attacker-nonce', type: 'keyPathSelected', path: '/evil/key' });
+
+    expect(dom.elements.get('keyPath')!.value).toBe('');
   });
 
   describe('the remotes sidebar', () => {
@@ -423,6 +431,7 @@ describe('connection form webview script', () => {
       const dom = runConnectionFormScript({ nonce: 'n', connections: [] });
 
       dom.emitWindowMessage({
+        nonce: 'n',
         type: 'connectionsUpdated',
         connections: [staging],
         savedId: 'c1',
@@ -436,7 +445,7 @@ describe('connection form webview script', () => {
     it('clears the form when the connection currently being edited is deleted elsewhere', () => {
       const dom = runConnectionFormScript({ nonce: 'n', connectionId: 'c1', connections: [staging] });
 
-      dom.emitWindowMessage({ type: 'connectionsUpdated', connections: [], deletedId: 'c1' });
+      dom.emitWindowMessage({ nonce: 'n', type: 'connectionsUpdated', connections: [], deletedId: 'c1' });
 
       expect(dom.elements.get('formHeading')!.textContent).toBe('New Connection');
       expect(dom.remoteRows()[0].className).toBe('empty-remotes');
@@ -446,7 +455,7 @@ describe('connection form webview script', () => {
       const dom = runConnectionFormScript({ nonce: 'n', connectionId: 'c1', connections: [staging, prod] });
       dom.remoteRows().find((r) => r.children[0].children[0].textContent === 'staging')!.emit('click');
 
-      dom.emitWindowMessage({ type: 'connectionsUpdated', connections: [staging], deletedId: 'c2' });
+      dom.emitWindowMessage({ nonce: 'n', type: 'connectionsUpdated', connections: [staging], deletedId: 'c2' });
 
       expect(dom.elements.get('formHeading')!.textContent).toBe('Edit Connection: staging');
       expect(dom.remoteRows()).toHaveLength(1);

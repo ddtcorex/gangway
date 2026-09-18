@@ -165,6 +165,7 @@ describe('ConnectionFormPanel', () => {
 
     const savedId = manager.list()[0].id;
     expect(postMessage).toHaveBeenCalledWith({
+      nonce: panel.nonce,
       type: 'connectionsUpdated',
       connections: manager.list(),
       savedId,
@@ -247,7 +248,7 @@ describe('ConnectionFormPanel', () => {
       type: 'browseKeyPath',
     });
 
-    expect(postMessage).toHaveBeenCalledWith({ type: 'keyPathSelected', path: '/home/deploy/.ssh/id_ed25519' });
+    expect(postMessage).toHaveBeenCalledWith({ nonce: panel.nonce, type: 'keyPathSelected', path: '/home/deploy/.ssh/id_ed25519' });
   });
 
   it('sends no message back when the user cancels the file picker', async () => {
@@ -297,7 +298,7 @@ describe('ConnectionFormPanel', () => {
       expect(manager.list()).toEqual([]);
       expect(manager.getWorkspaceBinding()).toBeUndefined();
       expect(onConnectionsChanged).toHaveBeenCalledWith([]);
-      expect(postMessage).toHaveBeenCalledWith({ type: 'connectionsUpdated', connections: [], deletedId: target.id });
+      expect(postMessage).toHaveBeenCalledWith({ nonce: panel.nonce, type: 'connectionsUpdated', connections: [], deletedId: target.id });
     });
 
     it('does nothing when the confirmation is declined', async () => {

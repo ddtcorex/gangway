@@ -120,7 +120,7 @@ export class ConnectionFormPanel {
     if (message.type === 'browseKeyPath') {
       const chosen = await this.chooseKeyFile();
       if (chosen) {
-        await this.panel.webview.postMessage({ type: 'keyPathSelected', path: chosen });
+        await this.panel.webview.postMessage({ nonce: this.nonce, type: 'keyPathSelected', path: chosen });
       }
       return;
     }
@@ -194,7 +194,7 @@ export class ConnectionFormPanel {
       // Tells the webview which id was just saved (so a first-time add turns
       // into an edit for any later save in the same panel session, without
       // reopening it) and refreshes its own sidebar list in place.
-      await this.panel.webview.postMessage({ type: 'connectionsUpdated', connections, savedId: saved.id });
+      await this.panel.webview.postMessage({ nonce: this.nonce, type: 'connectionsUpdated', connections, savedId: saved.id });
       return;
     }
 
@@ -214,7 +214,7 @@ export class ConnectionFormPanel {
 
       const connections = this.connectionManager.list();
       this.onConnectionsChanged(connections);
-      await this.panel.webview.postMessage({ type: 'connectionsUpdated', connections, deletedId: connection.id });
+      await this.panel.webview.postMessage({ nonce: this.nonce, type: 'connectionsUpdated', connections, deletedId: connection.id });
     }
   }
 }
