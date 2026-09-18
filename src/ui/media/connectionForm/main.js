@@ -189,7 +189,12 @@ document.getElementById('browseKeyPath').addEventListener('click', (event) => {
 // as it was.
 window.addEventListener('message', (event) => {
   const data = event.data;
-  if (!data) return;
+  // The host echoes the same per-panel nonce on every reply (see
+  // ConnectionFormPanel): a message without it is not from this panel's
+  // host side and must not drive the form. There is no origin to check
+  // against (VS Code's onDidReceiveMessage/postMessage channel exposes
+  // none), so the nonce is the entire gate in this direction too.
+  if (!data || data.nonce !== nonce) return;
 
   if (data.type === 'keyPathSelected') {
     setFieldValue('keyPath', data.path);
