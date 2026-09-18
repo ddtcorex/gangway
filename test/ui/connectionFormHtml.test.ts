@@ -115,6 +115,19 @@ describe('resolveConnectionFormFields', () => {
     expect(fields.passphraseHint).toBe('');
   });
 
+  it('defaults a brand-new connection to workspace scope, checked', () => {
+    expect(resolveConnectionFormFields().workspaceScopeChecked).toBe(' checked');
+  });
+
+  it('reflects the actual stored scope when editing, regardless of the new-connection default', () => {
+    const base = {
+      id: 'c1', name: 'staging', host: 'example.com', port: 22, username: 'deploy',
+      remotePath: '/var/www', authMethod: 'password' as const,
+    };
+    expect(resolveConnectionFormFields({ ...base, scope: 'global' }).workspaceScopeChecked).toBe('');
+    expect(resolveConnectionFormFields({ ...base, scope: 'workspace' }).workspaceScopeChecked).toBe(' checked');
+  });
+
   it('pre-fills every field and marks the stored auth method selected when editing', () => {
     const fields = resolveConnectionFormFields({
       id: 'c1',
