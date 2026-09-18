@@ -8,44 +8,123 @@
     "type": "git",
     "url": "git@github.com:ddtcorex/gangway.git"
   },
-  "engines": { "vscode": "^1.90.0" },
-  "categories": ["Other"],
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
   "main": "./dist/extension.js",
-  "activationEvents": ["onStartupFinished"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "contributes": {
     "commands": [
-      { "command": "gangway.pickConnection", "title": "Gangway: Switch Connection" },
-      { "command": "gangway.manageRemotes", "title": "Gangway: Manage Remotes", "icon": "$(ellipsis)" },
-      { "command": "gangway.downloadFile", "title": "Gangway: Download File" },
-      { "command": "gangway.uploadFile", "title": "Gangway: Upload File" },
-      { "command": "gangway.cleanupCache", "title": "Gangway: Cleanup Cache (Remove All Local Tmp Files for This Connection)" },
-      { "command": "gangway.downloadFolder", "title": "Gangway: Download Folder" },
-      { "command": "gangway.uploadFolder", "title": "Gangway: Upload Folder" },
-      { "command": "gangway.compareFile", "title": "Gangway: Compare File with Server" },
-      { "command": "gangway.refreshExplorer", "title": "Gangway: Refresh Explorer", "icon": "$(refresh)" }
+      {
+        "command": "gangway.pickConnection",
+        "title": "Gangway: Switch Connection"
+      },
+      {
+        "command": "gangway.manageRemotes",
+        "title": "Gangway: Manage Remotes",
+        "icon": "$(ellipsis)"
+      },
+      {
+        "command": "gangway.downloadFile",
+        "title": "Gangway: Download File"
+      },
+      {
+        "command": "gangway.uploadFile",
+        "title": "Gangway: Upload File"
+      },
+      {
+        "command": "gangway.cleanupCache",
+        "title": "Gangway: Cleanup Cache (Remove All Local Tmp Files for This Connection)"
+      },
+      {
+        "command": "gangway.downloadFolder",
+        "title": "Gangway: Download Folder"
+      },
+      {
+        "command": "gangway.uploadFolder",
+        "title": "Gangway: Upload Folder"
+      },
+      {
+        "command": "gangway.compareFile",
+        "title": "Gangway: Compare File with Server"
+      },
+      {
+        "command": "gangway.refreshExplorer",
+        "title": "Gangway: Refresh Explorer",
+        "icon": "$(refresh)"
+      }
     ],
     "keybindings": [
-      { "command": "gangway.uploadFile", "key": "alt+shift+q", "mac": "option+shift+q", "when": "editorTextFocus && resourceScheme == file" },
-      { "command": "gangway.downloadFile", "key": "alt+shift+w", "mac": "option+shift+w", "when": "editorTextFocus && resourceScheme == file" }
+      {
+        "command": "gangway.uploadFile",
+        "key": "alt+shift+q",
+        "mac": "option+shift+q",
+        "when": "editorTextFocus && resourceScheme == file"
+      },
+      {
+        "command": "gangway.downloadFile",
+        "key": "alt+shift+w",
+        "mac": "option+shift+w",
+        "when": "editorTextFocus && resourceScheme == file"
+      }
     ],
     "menus": {
       "view/title": [
-        { "command": "gangway.manageRemotes", "when": "view == gangway.remoteExplorer", "group": "navigation" },
-        { "command": "gangway.refreshExplorer", "when": "view == gangway.remoteExplorer", "group": "navigation" }
+        {
+          "command": "gangway.manageRemotes",
+          "when": "view == gangway.remoteExplorer",
+          "group": "navigation"
+        },
+        {
+          "command": "gangway.refreshExplorer",
+          "when": "view == gangway.remoteExplorer",
+          "group": "navigation"
+        }
       ],
       "view/item/context": [
-        { "command": "gangway.downloadFolder", "when": "view == gangway.remoteExplorer && viewItem == gangway.folder" },
-        { "command": "gangway.uploadFolder", "when": "view == gangway.remoteExplorer && viewItem == gangway.folder" },
-        { "command": "gangway.downloadFile", "when": "view == gangway.remoteExplorer && viewItem == gangway.file" },
-        { "command": "gangway.uploadFile", "when": "view == gangway.remoteExplorer && viewItem == gangway.file" },
-        { "command": "gangway.compareFile", "when": "view == gangway.remoteExplorer && viewItem == gangway.file" }
+        {
+          "command": "gangway.downloadFolder",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
+        },
+        {
+          "command": "gangway.uploadFolder",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
+        },
+        {
+          "command": "gangway.downloadFile",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file"
+        },
+        {
+          "command": "gangway.uploadFile",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file"
+        },
+        {
+          "command": "gangway.compareFile",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file"
+        }
       ]
     },
     "views": {
-      "gangway": [{ "id": "gangway.remoteExplorer", "name": "Remote Hosts" }]
+      "gangway": [
+        {
+          "id": "gangway.remoteExplorer",
+          "name": "Remote Hosts"
+        }
+      ]
     },
     "viewsContainers": {
-      "activitybar": [{ "id": "gangway", "title": "Gangway", "icon": "$(cloud)" }]
+      "activitybar": [
+        {
+          "id": "gangway",
+          "title": "Gangway",
+          "icon": "$(cloud)"
+        }
+      ]
     }
   },
   "scripts": {
@@ -59,16 +138,17 @@
     "test:e2e": "pnpm run build && pnpm run build:e2e && node ./out/test/runE2e.js"
   },
   "dependencies": {
+    "@vscode/webview-ui-toolkit": "^1.4.0",
     "ssh2-sftp-client": "^11.0.0",
-    "@vscode/webview-ui-toolkit": "^1.4.0"
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
-    "typescript": "^5.5.0",
-    "esbuild": "^0.23.0",
-    "vitest": "^2.0.0",
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.90.0",
     "@vscode/test-cli": "^0.0.10",
-    "@vscode/test-electron": "^2.4.0"
+    "@vscode/test-electron": "^2.4.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
   }
 }
