@@ -5,7 +5,7 @@
 
 ## Purpose
 
-VS Code extension (`gangway`, publisher `ddtcorex`) for PhpStorm-style
+VS Code extension (`gangway`, publisher `ddtcorex`) for
 **single-file SFTP hotfix editing**: browse the server, download one file to
 `os.tmpdir()`, edit locally, push explicitly with `Alt+Shift+Q`. Manual push
 only — never auto-upload. Design spec lives at the workspace meta root:

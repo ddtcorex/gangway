@@ -204,10 +204,9 @@ const TEMPLATE = `<!DOCTYPE html>
     gap: 8px;
     margin-top: 24px;
   }
-  /* The remotes list: a left-hand sidebar beside the form, mirroring
-     PhpStorm's Deployment dialog (master list beside a detail form) -- the
-     one piece of that reference worth following, since VS Code has no
-     built-in master/detail widget of its own. */
+  /* The remotes list: a left-hand sidebar beside the form, a master list
+     beside a detail form -- VS Code has no built-in master/detail widget
+     of its own, so this lays it out by hand. */
   .remotes-sidebar {
     width: 260px;
     flex-shrink: 0;
