@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     # Backstop for the runner watchdog (GANGWAY_E2E_TIMEOUT_MS, 15 min):
     # the watchdog cannot reap the spawned VS Code process, so the job
-    # itself must die first. See docs/qa.md rule 1.
+    # itself must die first. See docs/testing.md rule 1.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4

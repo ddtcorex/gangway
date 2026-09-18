@@ -8,7 +8,7 @@ defines what "tested" means here.
 | Layer | Runner | Scope | Gate |
 |---|---|---|---|
 | Unit | `vitest run` (`pnpm test`) | `test/**/*.test.ts` mirroring `src/`; `vscode` resolves to `test/mocks/vscode.ts` (see `vitest.config.ts`) | CI `verify` job, must be green |
-| Docker-integration | `vitest run` + `test/fixtures/docker-compose.sftp.yml` (`atmoz/sftp`, port 2222) | Real `ssh2-sftp-client` semantics the mocks cannot express (rename-exists, partial `fastGet`, `stat` sizes) | Required locally for transfer changes; e2e job in CI |
+| Docker-integration | `vitest run` + `test/fixtures/docker-compose.sftp.yml` (`atmoz/sftp`, port 2223) | Real `ssh2-sftp-client` semantics the mocks cannot express (rename-exists, partial `fastGet`, `stat` sizes) | Required locally for transfer changes; e2e job in CI |
 | E2E | `pnpm run build:e2e && pnpm run test:e2e` (`@vscode/test-electron`, needs display — `xvfb-run` in CI) | Full hotfix flow: form → connect → download → edit → `Alt+Shift+Q` → verify bytes; conflict path with out-of-band server edit | CI `e2e` job, must be green |
 
 `test/e2e/**` and `out/**` are excluded from the unit runner by config —
