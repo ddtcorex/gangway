@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildDownloadPlan, buildUploadPlan, TransferCancelledError } from '../src/folderQueue';
+import { buildDownloadPlan, buildUploadPlan, TransferCancelledError, isProbablyBinary, AUTO_OPEN_PROMPT_THRESHOLD_BYTES } from '../src/folderQueue';
 import type { RemoteEntry } from '../src/folderQueue';
 
 function listRemoteFixture(tree: Record<string, RemoteEntry[]>) {
@@ -151,5 +151,27 @@ describe('buildUploadPlan', () => {
       listRemoteFixture(tree),
     );
     expect(dirs.sort()).toEqual(['/var/www', '/var/www/app']);
+  });
+});
+
+describe('isProbablyBinary', () => {
+  it('treats a NUL byte in the head sample as binary', () => {
+    expect(isProbablyBinary(new Uint8Array([0x3c, 0x3f, 0x70, 0x00, 0x68, 0x70]))).toBe(true);
+  });
+
+  it('treats plain text and empty samples as text', () => {
+    expect(isProbablyBinary(new TextEncoder().encode("<?php echo 'hi';"))).toBe(false);
+    expect(isProbablyBinary(new Uint8Array(0))).toBe(false);
+  });
+
+  it('only scans the first 8KB', () => {
+    const sample = new Uint8Array(9000);
+    sample.fill(0x41);
+    sample[8999] = 0;
+    expect(isProbablyBinary(sample)).toBe(false);
+  });
+
+  it('exports a 5MB auto-open prompt threshold', () => {
+    expect(AUTO_OPEN_PROMPT_THRESHOLD_BYTES).toBe(5 * 1024 * 1024);
   });
 });

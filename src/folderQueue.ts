@@ -1,4 +1,20 @@
-const AUTO_OPEN_PROMPT_THRESHOLD_BYTES = 5 * 1024 * 1024;
+export const AUTO_OPEN_PROMPT_THRESHOLD_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Binary sniff for the auto-open prompt (spec §2.3: files >5MB *or binary*
+ * prompt before auto-open; the download itself always proceeds). A NUL byte
+ * in the first 8KB is the standard binary tell for source-ish payloads; an
+ * empty sample is text by definition. Conservative on purpose: a false
+ * "binary" only costs the user one prompt, while a false "text" opens a
+ * 200MB minified bundle or a keystore in the editor.
+ */
+export function isProbablyBinary(sample: Uint8Array): boolean {
+  const limit = Math.min(sample.length, 8192);
+  for (let i = 0; i < limit; i++) {
+    if (sample[i] === 0) return true;
+  }
+  return false;
+}
 
 export interface RemoteEntry {
   path: string;

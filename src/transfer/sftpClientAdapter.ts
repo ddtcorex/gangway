@@ -20,6 +20,12 @@ export interface RawSftpStat {
 export interface RawSftpListEntry {
   name: string;
   type: string;
+  /**
+   * Real entries always carry this (verified: the lib maps
+   * `item.attrs.size`). Optional only because older test fixtures predate
+   * it; `remoteListing.ts` treats a missing size as 0.
+   */
+  size?: number;
 }
 
 /** The subset of the real `ssh2-sftp-client` instance this adapter wraps. */
@@ -29,6 +35,13 @@ export interface RawSftpClient {
   stat(remotePath: string): Promise<RawSftpStat>;
   fastGet(remotePath: string, localPath: string): Promise<unknown>;
   fastPut(localPath: string, remotePath: string): Promise<unknown>;
+  /**
+   * Recursive mkdir (`ssh2-sftp-client` `mkdir(path, recursive)`): safe to
+   * call on an existing directory (reports "already exists", throws only on
+   * real problems). Used best-effort before uploads so a locally-created
+   * directory that never existed remotely does not fail the put.
+   */
+  mkdir(remotePath: string, recursive: boolean): Promise<unknown>;
   /**
    * Deliberately the `posix-rename@openssh.com` extension (OpenSSH 4.8+),
    * not plain SFTP `rename`: standard SFTP v3 rename fails with "file
@@ -82,6 +95,10 @@ export class SftpClientAdapter {
 
   fastPut(localPath: string, remotePath: string): Promise<unknown> {
     return this.raw.fastPut(localPath, remotePath);
+  }
+
+  mkdir(remotePath: string, recursive: boolean): Promise<unknown> {
+    return this.raw.mkdir(remotePath, recursive);
   }
 
   posixRename(fromPath: string, toPath: string): Promise<unknown> {

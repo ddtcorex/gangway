@@ -9,7 +9,7 @@ import * as vscode from 'vscode';
 // bodies can reference the exact same object (assert on its vi.fn() calls,
 // reset it between tests). Its shape matches `RawSftpClient`
 // (src/transfer/sftpClientAdapter.ts): connect/end/stat/fastGet/fastPut/
-// posixRename/list. Real SFTP `stat()` returns `modifyTime`, never `mtime` --
+// posixRename/delete/mkdir/list. Real SFTP `stat()` returns `modifyTime`, never `mtime` --
 // `SftpClientAdapter` translates it, so this fake returns `modifyTime` too,
 // exercising the same translation path a real connection would.
 const fakeRawClient = vi.hoisted(() => ({
@@ -24,6 +24,7 @@ const fakeRawClient = vi.hoisted(() => ({
   fastPut: vi.fn().mockResolvedValue(undefined),
   posixRename: vi.fn().mockResolvedValue(undefined),
   delete: vi.fn().mockResolvedValue(undefined),
+  mkdir: vi.fn().mockResolvedValue(undefined),
 }));
 
 function resetFakeClient(): void {
@@ -35,6 +36,7 @@ function resetFakeClient(): void {
   fakeRawClient.fastPut.mockClear();
   fakeRawClient.posixRename.mockClear();
   fakeRawClient.delete.mockClear();
+  fakeRawClient.mkdir.mockClear();
 }
 
 // activate() builds its own ConnectionPool internally (not injectable), and

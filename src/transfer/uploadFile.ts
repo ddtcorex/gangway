@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import type { AuditLog } from '../auditLog';
 import { writeSidecar } from '../tmpStore';
 import type { RemoteStat } from '../types';
@@ -24,8 +25,15 @@ export interface UploadClient {
    */
   stat(remotePath: string): Promise<RemoteStat>;
   /**
+   * Recursive remote mkdir. Called best-effort on the target's parent before
+   * every put: a locally-created directory that never existed on the server
+   * must not fail the upload. Swallowed deliberately -- if the directory
+   * genuinely cannot be created, the put right below fails with the real,
+   * actionable error, so masking here loses nothing.
+   */
+  mkdir(remotePath: string, recursive: boolean): Promise<unknown>;
+  /**
    * `delete(remotePath, notFoundOK?)` on the real `ssh2-sftp-client`
-   * (verified against node_modules/ssh2-sftp-client/src/index.js, 2026-09-17:
    * there is no `unlink`). Used only to clean up our own orphaned `.tmp`
    * upload below, never to remove a file the user asked to keep.
    */
@@ -46,6 +54,11 @@ export async function uploadFile(
    */
   logWarning: (message: string) => void = () => {},
 ): Promise<void> {
+  // The parent may never have existed remotely (a locally-created folder
+  // pushed for the first time). Recursive mkdir is idempotent on the lib
+  // ("already exists" is not an error), and anything it cannot fix surfaces
+  // as the put's own error below -- so this is best-effort by design.
+  await client.mkdir(path.posix.dirname(remotePath), true).catch(() => {});
   const tmpRemotePath = `${remotePath}.tmp`;
   await client.fastPut(localPath, tmpRemotePath);
 

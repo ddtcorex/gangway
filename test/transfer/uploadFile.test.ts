@@ -36,6 +36,7 @@ describe('uploadFile', () => {
         calls.push(`posixRename:${from}->${to}`);
       }),
       delete: vi.fn().mockResolvedValue(undefined),
+      mkdir: vi.fn().mockResolvedValue(undefined),
       stat: vi.fn().mockResolvedValue({ mtime: 1700000999, size: 14, isDirectory: false, isSymbolicLink: false }),
     };
     const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
@@ -46,6 +47,12 @@ describe('uploadFile', () => {
       `put:${localPath}->/var/www/app/config.php.tmp`,
       'posixRename:/var/www/app/config.php.tmp->/var/www/app/config.php',
     ]);
+    // The parent is ensured (recursively) before the put, so a locally
+    // created folder that never existed remotely does not fail the upload.
+    expect(client.mkdir).toHaveBeenCalledWith('/var/www/app', true);
+    expect(client.mkdir.mock.invocationCallOrder[0]).toBeLessThan(
+      (client.fastPut as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0],
+    );
     expect(auditLog.append).toHaveBeenCalledWith({
       connectionId: 'c1',
       remotePath: '/var/www/app/config.php',
@@ -65,6 +72,7 @@ describe('uploadFile', () => {
       fastPut: vi.fn().mockResolvedValue(undefined),
       posixRename: vi.fn().mockResolvedValue(undefined),
       delete: vi.fn().mockResolvedValue(undefined),
+      mkdir: vi.fn().mockResolvedValue(undefined),
       stat: vi.fn().mockResolvedValue({ mtime: 1700000999, size: 14, isDirectory: false, isSymbolicLink: false }),
     };
     const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
@@ -92,6 +100,7 @@ describe('uploadFile', () => {
       fastPut: vi.fn().mockResolvedValue(undefined),
       posixRename: vi.fn().mockRejectedValue(renameFailure),
       delete: vi.fn().mockResolvedValue(undefined),
+      mkdir: vi.fn().mockResolvedValue(undefined),
       stat: vi.fn().mockResolvedValue({ mtime: 1700000999, size: 14, isDirectory: false, isSymbolicLink: false }),
     };
     const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
@@ -109,6 +118,7 @@ describe('uploadFile', () => {
       fastPut: vi.fn().mockResolvedValue(undefined),
       posixRename: vi.fn().mockRejectedValue(renameFailure),
       delete: vi.fn().mockRejectedValue(new Error('cleanup also failed')),
+      mkdir: vi.fn().mockResolvedValue(undefined),
       stat: vi.fn().mockResolvedValue({ mtime: 1700000999, size: 14, isDirectory: false, isSymbolicLink: false }),
     };
     const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
@@ -126,6 +136,7 @@ describe('uploadFile', () => {
       fastPut: vi.fn().mockResolvedValue(undefined),
       posixRename: vi.fn().mockResolvedValue(undefined),
       delete: vi.fn().mockResolvedValue(undefined),
+      mkdir: vi.fn().mockResolvedValue(undefined),
       stat: vi.fn().mockResolvedValue({ mtime: 1700000999, size: 14, isDirectory: false, isSymbolicLink: false }),
     };
     const auditLog = {
@@ -140,5 +151,20 @@ describe('uploadFile', () => {
     expect(logWarning).toHaveBeenCalledWith(expect.stringContaining('audit log'));
     // The sidecar refresh must still have happened.
     expect((await readSidecar(localPath))!.mtime).toBe(1700000999);
+  });
+
+  it('still attempts the put when the best-effort parent mkdir fails, surfacing the put error instead', async () => {
+    const putFailure = new Error('fastPut: Permission denied');
+    const client = {
+      fastPut: vi.fn().mockRejectedValue(putFailure),
+      posixRename: vi.fn().mockResolvedValue(undefined),
+      delete: vi.fn().mockResolvedValue(undefined),
+      mkdir: vi.fn().mockRejectedValue(new Error('mkdir: Permission denied')),
+      stat: vi.fn().mockResolvedValue({ mtime: 1700000999, size: 14, isDirectory: false, isSymbolicLink: false }),
+    };
+    const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
+
+    await expect(uploadFile(client, 'c1', localPath, '/var/www/app/config.php', 14, auditLog)).rejects.toBe(putFailure);
+    expect(client.fastPut).toHaveBeenCalledTimes(1);
   });
 });
