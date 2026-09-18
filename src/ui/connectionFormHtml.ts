@@ -115,13 +115,22 @@ const TEMPLATE = `<!DOCTYPE html>
   .page {
     display: flex;
     align-items: flex-start;
+    width: 100%;
+    box-sizing: border-box;
   }
   .form-main {
     flex: 1;
     min-width: 0;
-    max-width: 480px;
-    padding: 0 20px 20px;
+    padding: 0 24px 24px;
     box-sizing: border-box;
+  }
+  /* The form itself stays a comfortable reading width even though
+     .form-main now flexes to fill the rest of the page: an unconstrained
+     vscode-text-field would otherwise stretch edge to edge on a wide
+     window, which reads worse than the previous fixed-width dialog, not
+     better. */
+  #connectionForm {
+    max-width: 560px;
   }
   h2 {
     font-size: 1.1em;
@@ -174,14 +183,14 @@ const TEMPLATE = `<!DOCTYPE html>
     gap: 8px;
     margin-top: 24px;
   }
-  /* The remotes list: a right-hand sidebar next to the form, mirroring
+  /* The remotes list: a left-hand sidebar beside the form, mirroring
      PhpStorm's Deployment dialog (master list beside a detail form) -- the
      one piece of that reference worth following, since VS Code has no
      built-in master/detail widget of its own. */
   .remotes-sidebar {
-    width: 240px;
+    width: 260px;
     flex-shrink: 0;
-    border-left: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+    border-right: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
     padding: 20px 16px;
     box-sizing: border-box;
   }
@@ -262,6 +271,13 @@ const TEMPLATE = `<!DOCTYPE html>
      payload so the host knows to update() rather than add(). -->
 <body data-nonce="{{NONCE}}" data-connection-id="{{CONNECTION_ID}}">
 <div class="page">
+<div class="remotes-sidebar">
+  <div class="sidebar-header">
+    <span>Remotes</span>
+    <vscode-button id="addRemote" appearance="secondary">+ Add</vscode-button>
+  </div>
+  <div id="remotesList"></div>
+</div>
 <div class="form-main">
 <h2 id="formHeading">{{HEADING}}</h2>
 <form id="connectionForm">
@@ -327,13 +343,6 @@ const TEMPLATE = `<!DOCTYPE html>
     <vscode-button id="save">Save</vscode-button>
   </div>
 </form>
-</div>
-<div class="remotes-sidebar">
-  <div class="sidebar-header">
-    <span>Remotes</span>
-    <vscode-button id="addRemote" appearance="secondary">+ Add</vscode-button>
-  </div>
-  <div id="remotesList"></div>
 </div>
 </div>
 <!-- Every saved connection's non-secret fields, read by main.js to render
