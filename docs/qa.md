@@ -30,7 +30,12 @@ host-only dir appears.
    `test/fixtures/sftp-data/` belongs to the container's user and a
    host-side write fails with EACCES — locally run
    `sudo chown -R $(id -u):$(id -g) test/fixtures/sftp-data`
-   after `docker compose up` (CI does this automatically).
+   after `docker compose up` (CI does this automatically). Deeper: the
+   container user must share YOUR uid or one side always loses write
+   access (host seed EACCES vs container upload Permission denied) — the
+   compose file parameterizes this via `E2E_SFTP_UID/GID` (default 1000);
+   if your uid differs, start the fixture with
+   `E2E_SFTP_UID=$(id -u) E2E_SFTP_GID=$(id -g) docker compose up`.
 3. **Every user-visible error action is tested.** A `showErrorMessage`
    button whose choice is discarded shipped once (§5 review) — assert the
    branch taken per choice (retry command / output reveal / pool evict),

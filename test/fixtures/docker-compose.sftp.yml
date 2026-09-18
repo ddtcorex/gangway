@@ -3,7 +3,14 @@ services:
     image: atmoz/sftp:latest
     ports:
       - "2222:22"
-    command: testuser:testpass:::var/www
+    # atmoz/sftp user spec is user:pass:uid:gid:dirs. The fixture dir is a
+    # HOST bind-mount, so the container user must share the host user's uid
+    # or one side loses write access: seed writes from the host fail with
+    # EACCES, uploads from the container fail with "Permission denied"
+    # (both seen in CI 2026-09-18, runner uid 1001 vs image default 1000).
+    # CI exports E2E_SFTP_UID/GID=$(id -u)/$(id -g); local default 1000 fits
+    # a typical single-user Linux box, otherwise export the same way.
+    command: testuser:testpass:${E2E_SFTP_UID:-1000}:${E2E_SFTP_GID:-1000}:var/www
     volumes:
       - ./sftp-data:/home/testuser/var/www
     healthcheck:
