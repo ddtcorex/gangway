@@ -134,11 +134,16 @@ export class GangwayTreeProvider implements vscode.TreeDataProvider<GangwayTreeN
       item.iconPath = new vscode.ThemeIcon('file-symlink-file');
     }
     item.contextValue = node.entry.isDirectory ? 'gangway.folder' : 'gangway.file';
-    // No `command` here: a single click on a file used to download and open
-    // it immediately, so every click re-ran the whole download workflow.
-    // extension.ts now drives opening from the tree view's own selection
-    // events instead (a second selection of the same node within a short
-    // window = double click), so a click here only selects.
+    if (!node.entry.isDirectory) {
+      // TreeItem.command fires on every click, including a click that
+      // reselects the already-selected item -- unlike
+      // TreeView.onDidChangeSelection, which VS Code only fires when the
+      // selection actually changes, so it never sees the second half of a
+      // real double click on the same node (that bug shipped once: see
+      // extension.ts's gangway.internalFileClick handler for the timing
+      // logic this depends on).
+      item.command = { command: 'gangway.internalFileClick', title: 'Open File', arguments: [node] };
+    }
     return item;
   }
 

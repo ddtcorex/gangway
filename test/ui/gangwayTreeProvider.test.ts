@@ -193,13 +193,17 @@ describe('GangwayTreeProvider', () => {
       expect(provider.getTreeItem(file).resourceUri?.fsPath).toBe('/tmp/gangway-test/c1/var/www/app/config.php');
     });
 
-    it('attaches no click command to any entry -- opening a file is driven by the tree view\'s own selection events (double click), not TreeItem.command', () => {
+    it('attaches an internalFileClick command to a file entry, none to a folder -- TreeItem.command fires on every click (unlike TreeView.onDidChangeSelection, which VS Code skips for a click that reselects the already-selected item), so the double-click timing lives in that command\'s handler, not a selection listener', () => {
       const provider = new GangwayTreeProvider(() => [], () => undefined, vi.fn(), vi.fn(), localUriFor);
       const folder: RemoteTreeNode = { connectionId: 'c1', entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 } };
       const file: RemoteTreeNode = { connectionId: 'c1', entry: { path: '/var/www/config.php', isDirectory: false, isSymbolicLink: false, size: 1 } };
 
       expect(provider.getTreeItem(folder).command).toBeUndefined();
-      expect(provider.getTreeItem(file).command).toBeUndefined();
+      expect(provider.getTreeItem(file).command).toEqual({
+        command: 'gangway.internalFileClick',
+        title: 'Open File',
+        arguments: [file],
+      });
     });
   });
 
