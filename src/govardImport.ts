@@ -82,6 +82,11 @@ export function mapGovardRemote(projectName: string, remoteName: string, remote:
       remotePath: remote.path,
       authMethod,
       keyPath,
+      // A remote read out of THIS project's .govard.yml is specific to the
+      // workspace it was imported from: defaulting to 'workspace' keeps a
+      // project's staging/prod entries out of every other project's remote
+      // list. The user can still promote it to 'global' from the form.
+      scope: 'workspace',
     },
   };
 }

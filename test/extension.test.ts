@@ -774,6 +774,19 @@ describe('activate - realistic command invocation', () => {
       expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Imported 2'));
     });
 
+    it('imports remotes with workspace scope, not global, so they only show up in this project', async () => {
+      openProject(tmpHome);
+      await writeGovardFixture(tmpHome);
+      track(vi.spyOn(vscode.window, 'showInformationMessage').mockResolvedValue('Import all (2)' as never));
+
+      const second = activate(fakeContext());
+      await settleScan();
+
+      for (const c of second.connectionManager.list()) {
+        expect(c.scope).toBe('workspace');
+      }
+    });
+
     it('stays silent when every govard hostname already exists as a connection', async () => {
       openProject(tmpHome);
       await writeGovardFixture(tmpHome);
