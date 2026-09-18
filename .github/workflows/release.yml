@@ -43,5 +43,16 @@ jobs:
       # locally while wiring this workflow -- npm reports dozens of
       # "missing" peer/dev deps of transitive packages that pnpm never
       # installs because they're irrelevant to this build).
-      - name: Publish to Marketplace
-        run: pnpm dlx --allow-build=@vscode/vsce-sign @vscode/vsce publish --no-dependencies -p ${{ secrets.VSCE_PAT }}
+      - name: Package
+        run: pnpm dlx --allow-build=@vscode/vsce-sign @vscode/vsce package --no-dependencies -o gangway.vsix
+
+      # Publishing to the VS Code Marketplace needs an Azure DevOps
+      # publisher account, which needs a card on file for identity
+      # verification -- not available here (see the design spec's
+      # "Amendment" section). Open VSX (open-vsx.org, used by VSCodium/
+      # Gitpod/Theia) authenticates via GitHub only. Re-adding the
+      # Marketplace as a second target later just needs one more step
+      # here (`vsce publish --packagePath gangway.vsix -p $VSCE_PAT`,
+      # reusing this same .vsix) plus a VSCE_PAT secret.
+      - name: Publish to Open VSX
+        run: pnpm dlx --allow-build=@vscode/vsce-sign --allow-build=keytar ovsx publish gangway.vsix -p ${{ secrets.OVSX_PAT }}
