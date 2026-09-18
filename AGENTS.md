@@ -92,4 +92,3 @@ pnpm run build:e2e && pnpm run test:e2e   # needs docker sftp + display (xvfb in
 - CI: `.github/workflows/ci.yml` (reusable `ddtcorex/dsh-maestro-ci`
   `node-plugin.yml` pin + dedicated e2e job). Green CI is a merge
   requirement, not a suggestion.
-- Review record: `docs/reviews/2026-09-18-implementation-review.md`.

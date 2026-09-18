@@ -2,7 +2,7 @@ services:
   sftp:
     image: atmoz/sftp:latest
     ports:
-      - "2222:22"
+      - "2223:22"
     # atmoz/sftp user spec is user:pass:uid:gid:dirs. The fixture dir is a
     # HOST bind-mount, so the container user must share the host user's uid
     # or one side loses write access: seed writes from the host fail with

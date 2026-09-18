@@ -106,7 +106,7 @@ export async function run(): Promise<void> {
   const connection = await api.connectionManager.add({
     name: 'e2e',
     host: '127.0.0.1',
-    port: 2222,
+    port: 2223,
     username: 'testuser',
     remotePath: '/var/www',
     authMethod: 'password',
