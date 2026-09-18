@@ -82,4 +82,16 @@ describe('tmpStore', () => {
 
     await expect(readSidecar(file)).resolves.toBeUndefined();
   });
+
+  it('reads a sidecar missing downloadedAt as missing, so a malformed sidecar can never defeat retention', async () => {
+    const file = path.join(tmpDir, 'no-downloaded-at.php');
+    await fs.writeFile(file, 'content');
+    await fs.writeFile(
+      `${file}.meta.json`,
+      JSON.stringify({ connectionId: 'c1', remotePath: '/x', mtime: 1, size: 1 }),
+      'utf8',
+    );
+
+    await expect(readSidecar(file)).resolves.toBeUndefined();
+  });
 });

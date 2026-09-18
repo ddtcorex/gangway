@@ -345,10 +345,18 @@ describe('activate - realistic command invocation', () => {
     fakeRawClient.list.mockImplementation(async (dirPath: string) =>
       dirPath === '/var/www/app' ? [{ name: 'clean.php', type: '-' }] : [],
     );
-    // Simulates the file already having been downloaded before this edit/upload.
+    // Simulates the file already having been downloaded before this edit/upload
+    // (a real download always writes both the tmp file and its sidecar).
     const localFile = tmpFilePathFor(connection, '/var/www/app/clean.php');
     await fs.mkdir(path.dirname(localFile), { recursive: true });
     await fs.writeFile(localFile, 'clean content');
+    await writeSidecar(localFile, {
+      connectionId: connection.id,
+      remotePath: '/var/www/app/clean.php',
+      mtime: 0,
+      size: 0,
+      downloadedAt: Date.now(),
+    });
     const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
 
     const handler = handlers.get('gangway.uploadFolder')!;
@@ -517,6 +525,32 @@ describe('activate - realistic command invocation', () => {
       return localPath;
     }
 
+    it('forces the same review flow, instead of an unconditional overwrite, when the sidecar is missing/corrupt for a file that demonstrably exists locally', async () => {
+      // No writeSidecar() call here: a torn write or a foreign file left the
+      // tmp file without a usable sidecar, so there is no baseline to prove
+      // the server hasn't changed since. This must fail closed into review,
+      // never fall through to a silent overwrite. Invoked via a tree node
+      // (not the no-args keybinding form) so remotePath comes from the node,
+      // not from the very sidecar this test omits.
+      const remotePath = '/var/www/app/no-sidecar.php';
+      const localPath = tmpFilePathFor(connection, remotePath);
+      await fs.mkdir(path.dirname(localPath), { recursive: true });
+      await fs.writeFile(localPath, 'local edit with no baseline');
+      const execSpy = track(vi.spyOn(vscode.commands, 'executeCommand'));
+      track(
+        vi.spyOn(vscode.window, 'showWarningMessage').mockImplementation((async (_msg: string, ...items: string[]) =>
+          items.find((item) => /overwrite/i.test(item))) as never),
+      );
+
+      await handlers.get('gangway.uploadFile')!({
+        connectionId: connection.id,
+        entry: { path: remotePath, isDirectory: false, isSymbolicLink: false, size: 0 },
+      });
+
+      expect(execSpy).toHaveBeenCalledWith('vscode.diff', expect.anything(), expect.anything(), expect.any(String));
+      expect(fakeRawClient.fastPut).toHaveBeenCalledWith(localPath, `${remotePath}.tmp`);
+    });
+
     it('opens the native diff between the local file and a fresh server copy, then blocks the push on Cancel', async () => {
       const localPath = await seedConflictedFile();
       const execSpy = track(vi.spyOn(vscode.commands, 'executeCommand'));
@@ -616,6 +650,13 @@ describe('activate - realistic command invocation', () => {
   it('writes the upload audit log under globalStorageUri, never the extension host process cwd', async () => {
     const localPath = path.join(tmpHome, 'audited.php');
     await fs.writeFile(localPath, 'audited content');
+    await writeSidecar(localPath, {
+      connectionId: connection.id,
+      remotePath: '/var/www/app/audited.php',
+      mtime: 0,
+      size: 0,
+      downloadedAt: Date.now(),
+    });
 
     await handlers.get('gangway.uploadFile')!(localPath, '/var/www/app/audited.php');
 
@@ -632,6 +673,13 @@ describe('activate - realistic command invocation', () => {
   it('gangway.uploadFile still accepts explicit localPath/remotePath arguments (Task 19 E2E contract)', async () => {
     const localPath = path.join(tmpHome, 'explicit.php');
     await fs.writeFile(localPath, 'explicit content');
+    await writeSidecar(localPath, {
+      connectionId: connection.id,
+      remotePath: '/var/www/app/explicit.php',
+      mtime: 0,
+      size: 0,
+      downloadedAt: Date.now(),
+    });
 
     const handler = handlers.get('gangway.uploadFile')!;
     await handler(localPath, '/var/www/app/explicit.php');

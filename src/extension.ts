@@ -564,7 +564,15 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         return;
       }
       const freshStat = await adapter.stat(remotePath);
-      if (sidecar && checkConflict(sidecar, freshStat) === 'conflict') {
+      // The local file was proven to exist by the byteSize stat above (a
+      // never-downloaded file already returned "no local copy yet" before
+      // this point), yet its sidecar is missing or unreadable (a torn write,
+      // disk full, or a foreign/corrupt file). There is no baseline left to
+      // compare against, so this must be treated as an unverifiable
+      // conflict -- fail closed into the same review flow a real conflict
+      // gets -- rather than silently falling through to an unconditional
+      // overwrite.
+      if (!sidecar || checkConflict(sidecar, freshStat) === 'conflict') {
         const decision = await resolveFileConflict(adapter, connection.id, localPath, remotePath, conflictUi);
         if (decision === 'keepServer') {
           dirtyDecorations.refresh(vscode.Uri.file(localPath));
@@ -665,7 +673,22 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       // String concatenation here used to break on Windows separators and
       // bypass the tmpPath containment check -- path.posix.relative keeps
       // the remote semantics, path.join builds the local path.
-      const toLocal = (file: string): string => path.join(localRoot, path.posix.relative(remotePath, file));
+      // Re-applies tmpFilePathFor's own containment check (tmpPath.ts) to
+      // every per-file mapping, not just the folder root computed above:
+      // without it, an escaping `file` path would silently resolve outside
+      // localRoot instead of failing loudly the way every single-file path
+      // through tmpFilePathFor does. Not reachable today (remoteListing.ts's
+      // mapListingToEntries already rejects any unsafe listing-entry name
+      // before a `file` path is built), but this stays the belt to that
+      // suspenders rather than a second, weaker path relying on the caller
+      // never changing.
+      const toLocal = (file: string): string => {
+        const resolved = path.join(localRoot, path.posix.relative(remotePath, file));
+        if (resolved !== localRoot && !resolved.startsWith(localRoot + path.sep)) {
+          throw new Error(`Refusing to map remote path "${file}": it resolves outside this connection's tmp root.`);
+        }
+        return resolved;
+      };
       const adapter = await getAdapter(connection);
       const result = await withCancellableProgress(`Uploading ${remotePath}`, (signal, reportProgress) =>
         runFolderUpload(
@@ -685,8 +708,24 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
             dirtyDecorations.refresh(vscode.Uri.file(localPath));
           },
           async (file) => {
-            const sidecar = await readSidecar(toLocal(file));
-            if (!sidecar) return false;
+            const localPath = toLocal(file);
+            const sidecar = await readSidecar(localPath);
+            if (!sidecar) {
+              // No baseline recorded. A file never downloaded has no local
+              // mirror at all and fails later at the per-file "no local
+              // copy" check regardless of this verdict, so it is not a
+              // conflict. A file that WAS downloaded but lost its sidecar
+              // (torn write, disk full) has no way to prove it hasn't
+              // changed on the server since -- fail closed into the same
+              // review flow a real conflict gets, rather than silently
+              // skipping the guard.
+              try {
+                await fs.stat(localPath);
+              } catch {
+                return false;
+              }
+              return true;
+            }
             const freshStat = await adapter.stat(file);
             return checkConflict(sidecar, freshStat) === 'conflict';
           },

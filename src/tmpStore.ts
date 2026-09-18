@@ -39,7 +39,8 @@ export async function readSidecar(tmpFilePath: string): Promise<SidecarMeta | un
     typeof (parsed as SidecarMeta).mtime !== 'number' ||
     typeof (parsed as SidecarMeta).size !== 'number' ||
     typeof (parsed as SidecarMeta).remotePath !== 'string' ||
-    typeof (parsed as SidecarMeta).connectionId !== 'string'
+    typeof (parsed as SidecarMeta).connectionId !== 'string' ||
+    typeof (parsed as SidecarMeta).downloadedAt !== 'number'
   ) {
     return undefined;
   }
