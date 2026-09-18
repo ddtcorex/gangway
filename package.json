@@ -4,10 +4,22 @@
   "description": "PhpStorm-style single-file SFTP hotfix editing for VS Code.",
   "version": "0.1.0",
   "publisher": "ddtcorex",
+  "license": "MIT",
+  "icon": "media/icon.png",
   "repository": {
     "type": "git",
     "url": "git@github.com:ddtcorex/gangway.git"
   },
+  "bugs": {
+    "url": "https://github.com/ddtcorex/gangway/issues"
+  },
+  "keywords": [
+    "sftp",
+    "ssh",
+    "remote",
+    "hotfix",
+    "deployment"
+  ],
   "engines": {
     "vscode": "^1.90.0"
   },
