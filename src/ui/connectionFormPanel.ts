@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import type * as vscode from 'vscode';
 import type { ConnectionManager } from '../connectionManager';
 import type { ConnectionSecretStore, SecretKind } from '../secretStore';
-import type { AuthMethod, ConnectionConfig } from '../types';
+import type { AuthMethod, ConnectionConfig, ConnectionScope } from '../types';
 import { withTimeout } from '../withTimeout';
 
 interface SaveConnectionPayload {
@@ -19,6 +19,10 @@ interface SaveConnectionPayload {
   password?: string;
   keyPath?: string;
   keyPassphrase?: string;
+  /** Absent from an old client bundle mid-upgrade; ConnectionManager.add()
+   * already defaults a missing scope to 'global', so no fallback is needed
+   * here too. */
+  scope?: ConnectionScope;
 }
 
 type IncomingMessage =

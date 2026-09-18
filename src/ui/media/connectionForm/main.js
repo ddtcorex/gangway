@@ -36,6 +36,16 @@ function setFieldValue(id, value) {
   document.getElementById(id).value = value || '';
 }
 
+/** vscode-checkbox mirrors the native <input type="checkbox"> `.checked`
+ * boolean property, unlike vscode-text-field's `.value`. */
+function checkboxChecked(id) {
+  return Boolean(document.getElementById(id).checked);
+}
+
+function setCheckboxChecked(id, checked) {
+  document.getElementById(id).checked = Boolean(checked);
+}
+
 /**
  * Shows only the credential inputs that belong to the selected auth method.
  * Toggling the `hidden` property on the plain wrapper `<div>`s (never an
@@ -64,6 +74,7 @@ function buildPayload() {
     username: fieldValue('username'),
     remotePath: fieldValue('remotePath'),
     authMethod,
+    scope: checkboxChecked('workspaceScope') ? 'workspace' : 'global',
   };
 
   if (authMethod === 'password') {
@@ -97,6 +108,7 @@ function loadConnectionIntoForm(connection) {
   setFieldValue('keyPath', connection.keyPath || '');
   setFieldValue('keyPassphrase', '');
   document.getElementById('authMethod').value = connection.authMethod;
+  setCheckboxChecked('workspaceScope', connection.scope === 'workspace');
   applyAuthVisibility();
   renderRemotesList();
 }
@@ -115,6 +127,9 @@ function clearForm() {
   setFieldValue('keyPath', '');
   setFieldValue('keyPassphrase', '');
   document.getElementById('authMethod').value = 'password';
+  // Global (unchecked) is the default for a brand-new connection -- the
+  // historical, only behavior.
+  setCheckboxChecked('workspaceScope', false);
   applyAuthVisibility();
   renderRemotesList();
 }
@@ -143,6 +158,14 @@ function renderRemotesList() {
     const name = document.createElement('div');
     name.className = 'remote-name';
     name.textContent = connection.name;
+    // Global is the familiar default and stays unlabeled to avoid visual
+    // noise; only the less-common workspace scope gets a badge.
+    if (connection.scope === 'workspace') {
+      const badge = document.createElement('span');
+      badge.className = 'scope-badge';
+      badge.textContent = 'Workspace';
+      name.appendChild(badge);
+    }
     const address = document.createElement('div');
     address.className = 'remote-address';
     address.textContent = `${connection.username}@${connection.host}:${connection.port}`;

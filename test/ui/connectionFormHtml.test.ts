@@ -27,6 +27,7 @@ const IDENTITY_FIELDS = {
   agentSelected: '{{AGENT_SELECTED}}',
   passwordHint: '{{PASSWORD_BLANK_HINT}}',
   passphraseHint: '{{PASSPHRASE_BLANK_HINT}}',
+  workspaceScopeChecked: '{{WORKSPACE_SCOPE_CHECKED}}',
   connectionsJson: '{{CONNECTIONS_JSON}}',
 };
 

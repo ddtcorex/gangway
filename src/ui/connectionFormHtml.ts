@@ -1,4 +1,4 @@
-import type { AuthMethod } from '../types';
+import type { AuthMethod, ConnectionScope } from '../types';
 
 export interface ConnectionFormPrefill {
   id: string;
@@ -9,6 +9,7 @@ export interface ConnectionFormPrefill {
   remotePath: string;
   authMethod: AuthMethod;
   keyPath?: string;
+  scope?: ConnectionScope;
 }
 
 export interface ConnectionFormHtmlInput {
@@ -29,6 +30,10 @@ export interface ConnectionFormHtmlInput {
   agentSelected: string;
   passwordHint: string;
   passphraseHint: string;
+  /** ` checked` when the connection being edited (or the form's default for
+   * a brand-new one) is workspace-scoped, else `''` -- same literal-token
+   * pattern as passwordSelected/keySelected/agentSelected above. */
+  workspaceScopeChecked: string;
   /** Every saved connection's non-secret fields, pre-serialized (see
    * toConnectionsJson) for the sidebar list -- literal substitution only,
    * same as every other field here. */
@@ -79,6 +84,7 @@ export function resolveConnectionFormFields(
   | 'agentSelected'
   | 'passwordHint'
   | 'passphraseHint'
+  | 'workspaceScopeChecked'
 > {
   const c = existingConnection;
   const authMethod = c?.authMethod ?? 'password';
@@ -98,6 +104,9 @@ export function resolveConnectionFormFields(
     agentSelected: selected('agent'),
     passwordHint: blankHint,
     passphraseHint: blankHint,
+    // A brand-new connection (c undefined) defaults to global, unchecked --
+    // the historical, only behavior, and the common case.
+    workspaceScopeChecked: c?.scope === 'workspace' ? ' checked' : '',
   };
 }
 
@@ -177,6 +186,15 @@ const TEMPLATE = `<!DOCTYPE html>
   .two-up .field {
     flex: 1;
   }
+  .field-checkbox {
+    margin-bottom: 12px;
+  }
+  .field-checkbox .field-hint {
+    display: block;
+    font-size: 0.85em;
+    opacity: 0.7;
+    margin: 2px 0 0 22px;
+  }
   .actions {
     display: flex;
     justify-content: flex-end;
@@ -236,6 +254,16 @@ const TEMPLATE = `<!DOCTYPE html>
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .scope-badge {
+    font-weight: 400;
+    font-size: 0.75em;
+    opacity: 0.75;
+    border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+    border-radius: 3px;
+    padding: 0 4px;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
   .remote-row .remote-address {
     font-size: 0.85em;
     opacity: 0.75;
@@ -284,6 +312,12 @@ const TEMPLATE = `<!DOCTYPE html>
   <div class="field">
     <label class="field-label" for="name">Connection Name</label>
     <vscode-text-field id="name" placeholder="staging" value="{{NAME}}"></vscode-text-field>
+  </div>
+  <!-- Unchecked (global) is the historical, only behavior and stays the
+       default for a brand-new connection: visible from every workspace. -->
+  <div class="field field-checkbox">
+    <vscode-checkbox id="workspaceScope"{{WORKSPACE_SCOPE_CHECKED}}>Only available in this workspace</vscode-checkbox>
+    <span class="field-hint">Leave unchecked to make this connection visible from every workspace.</span>
   </div>
   <div class="two-up">
     <div class="field">
@@ -379,5 +413,6 @@ export function buildConnectionFormHtml(input: ConnectionFormHtmlInput): string 
     .replace(/{{AGENT_SELECTED}}/g, input.agentSelected)
     .replace(/{{PASSWORD_BLANK_HINT}}/g, input.passwordHint)
     .replace(/{{PASSPHRASE_BLANK_HINT}}/g, input.passphraseHint)
+    .replace(/{{WORKSPACE_SCOPE_CHECKED}}/g, input.workspaceScopeChecked)
     .replace(/{{CONNECTIONS_JSON}}/g, input.connectionsJson);
 }

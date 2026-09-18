@@ -52,6 +52,7 @@ describe('mapGovardRemote', () => {
         remotePath: '/srv/www/prod',
         authMethod: 'key',
         keyPath: '/home/deploy/.ssh/id_ed25519',
+        scope: 'workspace',
       },
     });
   });
@@ -62,7 +63,7 @@ describe('mapGovardRemote', () => {
       remoteName: 'staging',
       connection: {
         name: 'myshop-staging', host: 's.example.com', port: 22, username: 'deploy',
-        remotePath: '/srv', authMethod: 'agent', keyPath: undefined,
+        remotePath: '/srv', authMethod: 'agent', keyPath: undefined, scope: 'workspace',
       },
     });
     expect(mapGovardRemote('myshop', 'box', { host: 'h', user: 'u', path: '/p', local: true }).ok).toBe(false);

@@ -32,6 +32,7 @@ interface FakeEvent {
  */
 class FakeElement {
   value = '';
+  checked = false;
   hidden = false;
   className = '';
   title = '';
@@ -109,6 +110,7 @@ function runConnectionFormScript(options: {
     'username',
     'remotePath',
     'authMethod',
+    'workspaceScope',
     'password',
     'keyPath',
     'keyPassphrase',
@@ -294,6 +296,23 @@ describe('connection form webview script', () => {
     expect(dom.fieldsFor('key').every((field) => field.hidden === true)).toBe(true);
   });
 
+  it('sends scope: global when the workspace-only checkbox is left unchecked', () => {
+    const dom = runConnectionFormScript({ nonce: 'n', values: { authMethod: 'agent' } });
+
+    dom.elements.get('save')!.emit('click');
+
+    expect(dom.posted[0].payload).toMatchObject({ scope: 'global' });
+  });
+
+  it('sends scope: workspace when the workspace-only checkbox is checked', () => {
+    const dom = runConnectionFormScript({ nonce: 'n', values: { authMethod: 'agent' } });
+    dom.elements.get('workspaceScope')!.checked = true;
+
+    dom.elements.get('save')!.emit('click');
+
+    expect(dom.posted[0].payload).toMatchObject({ scope: 'workspace' });
+  });
+
   it('includes no id when creating a new connection', () => {
     const dom = runConnectionFormScript({ nonce: 'n', values: { authMethod: 'agent' } });
 
@@ -360,6 +379,7 @@ describe('connection form webview script', () => {
       username: 'deploy',
       remotePath: '/var/www',
       authMethod: 'agent',
+      scope: 'workspace',
     };
 
     it('renders one row per saved connection, sorted by name, on load', () => {
@@ -405,6 +425,24 @@ describe('connection form webview script', () => {
       expect(dom.elements.get('keyPassphrase')!.value).toBe('');
     });
 
+    it('shows a "Workspace" badge on a workspace-scope row, and no badge on a global one', () => {
+      const dom = runConnectionFormScript({ nonce: 'n', connections: [prod, staging] });
+
+      const [prodRow, stagingRow] = dom.remoteRows();
+      expect(prodRow.children[0].children[0].children[0]?.textContent).toBe('Workspace');
+      expect(stagingRow.children[0].children[0].children.length).toBe(0);
+    });
+
+    it('checks the workspace-only checkbox when a workspace-scope row is loaded, unchecked for global', () => {
+      const dom = runConnectionFormScript({ nonce: 'n', connections: [prod, staging] });
+
+      dom.remoteRows().find((r) => r.children[0].children[0].textContent === 'prod')!.emit('click');
+      expect(dom.elements.get('workspaceScope')!.checked).toBe(true);
+
+      dom.remoteRows().find((r) => r.children[0].children[0].textContent === 'staging')!.emit('click');
+      expect(dom.elements.get('workspaceScope')!.checked).toBe(false);
+    });
+
     it('clears the form to a blank new-connection state when "+ Add" is clicked', () => {
       const dom = runConnectionFormScript({ nonce: 'n', connectionId: 'c1', connections: [staging] });
       dom.remoteRows()[0].emit('click');
@@ -416,6 +454,17 @@ describe('connection form webview script', () => {
       expect(dom.elements.get('name')!.value).toBe('');
       expect(dom.elements.get('port')!.value).toBe('22');
       expect(dom.posted[0].payload).not.toHaveProperty('id');
+      expect(dom.posted[0].payload).toMatchObject({ scope: 'global' });
+    });
+
+    it('unchecks the workspace-only checkbox when "+ Add" is clicked after loading a workspace-scope row', () => {
+      const dom = runConnectionFormScript({ nonce: 'n', connections: [prod] });
+      dom.remoteRows()[0].emit('click');
+      expect(dom.elements.get('workspaceScope')!.checked).toBe(true);
+
+      dom.elements.get('addRemote')!.emit('click');
+
+      expect(dom.elements.get('workspaceScope')!.checked).toBe(false);
     });
 
     it('posts deleteConnection with the row id when its delete button is clicked', () => {

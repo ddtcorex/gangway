@@ -1,5 +1,11 @@
 export type AuthMethod = 'password' | 'key' | 'agent';
 
+/** 'global' is visible from every workspace (the historical, only behavior);
+ * 'workspace' is visible only from the workspace it was created in --
+ * ConnectionManager stores each in a different VS Code Memento (globalState
+ * vs workspaceState) rather than filtering one shared list. */
+export type ConnectionScope = 'workspace' | 'global';
+
 export interface ConnectionConfig {
   id: string;
   name: string;
@@ -10,6 +16,13 @@ export interface ConnectionConfig {
   authMethod: AuthMethod;
   /** Only set when authMethod === 'key'. The key *path*, never key material. */
   keyPath?: string;
+  /** Optional (rather than defaulted at the type level) because real stored
+   * data predates this field: every connection used to live in globalState
+   * only, with nothing recorded here at all. Missing means 'global'.
+   * ConnectionManager.list() fills this in for any legacy record it reads
+   * back, so any *newly constructed* ConnectionConfig in the codebase after
+   * that point can rely on it being set. */
+  scope?: ConnectionScope;
 }
 
 export interface SidecarMeta {
