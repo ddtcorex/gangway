@@ -193,17 +193,13 @@ describe('GangwayTreeProvider', () => {
       expect(provider.getTreeItem(file).resourceUri?.fsPath).toBe('/tmp/gangway-test/c1/var/www/app/config.php');
     });
 
-    it('attaches a command that opens the file on click, for non-directory entries only', () => {
+    it('attaches no click command to any entry -- opening a file is driven by the tree view\'s own selection events (double click), not TreeItem.command', () => {
       const provider = new GangwayTreeProvider(() => [], () => undefined, vi.fn(), vi.fn(), localUriFor);
       const folder: RemoteTreeNode = { connectionId: 'c1', entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 } };
       const file: RemoteTreeNode = { connectionId: 'c1', entry: { path: '/var/www/config.php', isDirectory: false, isSymbolicLink: false, size: 1 } };
 
       expect(provider.getTreeItem(folder).command).toBeUndefined();
-      expect(provider.getTreeItem(file).command).toEqual({
-        command: 'gangway.downloadFile',
-        title: 'Open',
-        arguments: [file],
-      });
+      expect(provider.getTreeItem(file).command).toBeUndefined();
     });
   });
 
