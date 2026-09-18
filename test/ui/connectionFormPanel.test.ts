@@ -68,6 +68,52 @@ describe('ConnectionFormPanel', () => {
     await expect(secrets.get(manager.list()[0].id, 'password')).resolves.toBe('hunter2');
   });
 
+  it('defaults a new connection to global scope, and saves it as workspace scope when the payload asks for it', async () => {
+    const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+    const secrets = new ConnectionSecretStore(fakeSecretStore());
+    const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+    const panel = new ConnectionFormPanel(rawPanel as never, manager, secrets);
+    const fire = (rawPanel as unknown as { __test_fireMessage: (m: unknown) => void }).__test_fireMessage;
+
+    await fire({
+      nonce: panel.nonce,
+      type: 'saveConnection',
+      payload: { name: 'global-one', host: 'g.example.com', port: 22, username: 'deploy', remotePath: '/var/www', authMethod: 'password' },
+    });
+    await fire({
+      nonce: panel.nonce,
+      type: 'saveConnection',
+      payload: { name: 'workspace-one', host: 'w.example.com', port: 22, username: 'deploy', remotePath: '/var/www', authMethod: 'password', scope: 'workspace' },
+    });
+
+    expect(manager.list().find((c) => c.name === 'global-one')?.scope).toBe('global');
+    expect(manager.list().find((c) => c.name === 'workspace-one')?.scope).toBe('workspace');
+  });
+
+  it('moves a connection between global and workspace storage when an edit changes its scope', async () => {
+    const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+    const secrets = new ConnectionSecretStore(fakeSecretStore());
+    const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+    const panel = new ConnectionFormPanel(rawPanel as never, manager, secrets);
+    const fire = (rawPanel as unknown as { __test_fireMessage: (m: unknown) => void }).__test_fireMessage;
+
+    const created = await manager.add({
+      name: 'staging', host: 'example.com', port: 22, username: 'deploy', remotePath: '/var/www', authMethod: 'password',
+    });
+
+    await fire({
+      nonce: panel.nonce,
+      type: 'saveConnection',
+      payload: {
+        id: created.id, name: 'staging', host: 'example.com', port: 22, username: 'deploy',
+        remotePath: '/var/www', authMethod: 'password', scope: 'workspace',
+      },
+    });
+
+    expect(manager.list()).toHaveLength(1);
+    expect(manager.list()[0].scope).toBe('workspace');
+  });
+
   it('stores the key path on the connection and the passphrase in the secret store for key auth', async () => {
     // Only the password path was ever covered, even though the form now has
     // key fields and `keyPath` is what authResolver reads to load the private

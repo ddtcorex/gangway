@@ -82,6 +82,15 @@
   .two-up .field {
     flex: 1;
   }
+  .field-checkbox {
+    margin-bottom: 12px;
+  }
+  .field-checkbox .field-hint {
+    display: block;
+    font-size: 0.85em;
+    opacity: 0.7;
+    margin: 2px 0 0 22px;
+  }
   .actions {
     display: flex;
     justify-content: flex-end;
@@ -141,6 +150,16 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .scope-badge {
+    font-weight: 400;
+    font-size: 0.75em;
+    opacity: 0.75;
+    border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+    border-radius: 3px;
+    padding: 0 4px;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
   .remote-row .remote-address {
     font-size: 0.85em;
     opacity: 0.75;
@@ -189,6 +208,12 @@
   <div class="field">
     <label class="field-label" for="name">Connection Name</label>
     <vscode-text-field id="name" placeholder="staging" value="{{NAME}}"></vscode-text-field>
+  </div>
+  <!-- Unchecked (global) is the historical, only behavior and stays the
+       default for a brand-new connection: visible from every workspace. -->
+  <div class="field field-checkbox">
+    <vscode-checkbox id="workspaceScope"{{WORKSPACE_SCOPE_CHECKED}}>Only available in this workspace</vscode-checkbox>
+    <span class="field-hint">Leave unchecked to make this connection visible from every workspace.</span>
   </div>
   <div class="two-up">
     <div class="field">
