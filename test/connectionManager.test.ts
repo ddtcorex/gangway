@@ -74,4 +74,93 @@ describe('ConnectionManager', () => {
     await manager.setWorkspaceBinding(undefined);
     expect(manager.getWorkspaceBinding()).toBeUndefined();
   });
+
+  describe('scope: workspace vs global', () => {
+    it('defaults a new connection to global scope when none is given', async () => {
+      const created = await manager.add({
+        name: 'staging', host: 'example.com', port: 22, username: 'deploy', remotePath: '/var/www', authMethod: 'password',
+      });
+      expect(created.scope).toBe('global');
+    });
+
+    it('stores a workspace-scope connection in workspaceState, not globalState', async () => {
+      const created = await manager.add({
+        name: 'staging', host: 'example.com', port: 22, username: 'deploy', remotePath: '/var/www',
+        authMethod: 'password', scope: 'workspace',
+      });
+      expect(created.scope).toBe('workspace');
+      expect(globalState.get('gangway.connections')).toBeUndefined();
+      expect(workspaceState.get<Array<{ id: string }>>('gangway.connections')?.map((c) => c.id)).toEqual([created.id]);
+    });
+
+    it('list() merges global and workspace connections, each tagged with its own scope', async () => {
+      const g = await manager.add({
+        name: 'global-one', host: 'g.example.com', port: 22, username: 'deploy', remotePath: '/var/www', authMethod: 'password',
+      });
+      const w = await manager.add({
+        name: 'workspace-one', host: 'w.example.com', port: 22, username: 'deploy', remotePath: '/var/www',
+        authMethod: 'password', scope: 'workspace',
+      });
+      expect(manager.list()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: g.id, scope: 'global' }),
+          expect.objectContaining({ id: w.id, scope: 'workspace' }),
+        ]),
+      );
+    });
+
+    it('reads a legacy globalState connection with no stored scope field as global', async () => {
+      await globalState.update('gangway.connections', [
+        { id: 'legacy-1', name: 'old', host: 'h', port: 22, username: 'u', remotePath: '/p', authMethod: 'password' },
+      ]);
+      expect(manager.list()).toEqual([
+        { id: 'legacy-1', name: 'old', host: 'h', port: 22, username: 'u', remotePath: '/p', authMethod: 'password', scope: 'global' },
+      ]);
+    });
+
+    it('update() moves a connection from global to workspace storage when scope changes', async () => {
+      const created = await manager.add({
+        name: 'staging', host: 'example.com', port: 22, username: 'deploy', remotePath: '/var/www', authMethod: 'password',
+      });
+      const updated = await manager.update(created.id, { scope: 'workspace' });
+
+      expect(updated.scope).toBe('workspace');
+      expect(globalState.get('gangway.connections')).toEqual([]);
+      expect(workspaceState.get<Array<{ id: string }>>('gangway.connections')?.map((c) => c.id)).toEqual([created.id]);
+      expect(manager.list()).toEqual([updated]);
+    });
+
+    it('update() moves a connection from workspace back to global storage when scope changes', async () => {
+      const created = await manager.add({
+        name: 'staging', host: 'example.com', port: 22, username: 'deploy', remotePath: '/var/www',
+        authMethod: 'password', scope: 'workspace',
+      });
+      const updated = await manager.update(created.id, { scope: 'global' });
+
+      expect(updated.scope).toBe('global');
+      expect(workspaceState.get('gangway.connections')).toEqual([]);
+      expect(globalState.get<Array<{ id: string }>>('gangway.connections')?.map((c) => c.id)).toEqual([created.id]);
+    });
+
+    it('update() without a scope patch leaves the connection in its current store', async () => {
+      const created = await manager.add({
+        name: 'staging', host: 'example.com', port: 22, username: 'deploy', remotePath: '/var/www',
+        authMethod: 'password', scope: 'workspace',
+      });
+      await manager.update(created.id, { name: 'renamed' });
+
+      expect(globalState.get('gangway.connections')).toBeUndefined();
+      expect(workspaceState.get<Array<{ id: string; name: string }>>('gangway.connections')?.[0]?.name).toBe('renamed');
+    });
+
+    it('remove() deletes a workspace-scope connection from workspaceState', async () => {
+      const created = await manager.add({
+        name: 'staging', host: 'example.com', port: 22, username: 'deploy', remotePath: '/var/www',
+        authMethod: 'password', scope: 'workspace',
+      });
+      await manager.remove(created.id);
+      expect(manager.list()).toEqual([]);
+      expect(workspaceState.get('gangway.connections')).toEqual([]);
+    });
+  });
 });
