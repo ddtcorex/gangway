@@ -22,8 +22,19 @@ const repoRoot = path.resolve(__dirname, '..', '..');
  */
 async function resetFixture(): Promise<void> {
   const fixtureDir = path.join(repoRoot, 'test', 'fixtures', 'sftp-data');
-  await fs.mkdir(fixtureDir, { recursive: true });
-  await fs.writeFile(path.join(fixtureDir, 'hotfix.php'), SEED_CONTENT, 'utf8');
+  try {
+    await fs.mkdir(fixtureDir, { recursive: true });
+    await fs.writeFile(path.join(fixtureDir, 'hotfix.php'), SEED_CONTENT, 'utf8');
+  } catch (err) {
+    // The fixture dir is a docker bind-mount: once the sftp container has
+    // started, the mount point is owned by the container's user, so a direct
+    // host write fails with EACCES (first seen in CI 2026-09-18). Re-throw
+    // with the fix attached instead of a bare errno.
+    const hint =
+      'hint: the sftp-data dir is owned by the container user once the fixture is up; ' +
+      '`sudo chown -R $(id -u):$(id -g) test/fixtures/sftp-data` (CI does this automatically)';
+    throw new Error(`resetFixture failed: ${err instanceof Error ? err.message : String(err)}. ${hint}`);
+  }
 }
 
 /**

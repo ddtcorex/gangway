@@ -19,6 +19,25 @@ const buildOptions = {
   platform: 'node',
   format: 'cjs',
   sourcemap: true,
+  plugins: [
+    {
+      // ssh2's optional native accelerators (*.node) must stay runtime
+      // requires: ssh2 loads each inside try/catch and falls back to pure
+      // JS when the binary is absent. Without this, the build is
+      // environment-dependent — it passes when the ssh2 postinstall never
+      // produced the binary (unresolved require left as-is) and fails with
+      // "No loader is configured for .node files" on any fresh install
+      // where the binary exists (caught 2026-09-18 by a clean-room
+      // install sim while wiring CI).
+      name: 'native-node-external',
+      setup(build) {
+        build.onResolve({ filter: /\.node$/ }, (args) => ({
+          path: args.path,
+          external: true,
+        }));
+      },
+    },
+  ],
 };
 
 function copyMediaAssets() {
