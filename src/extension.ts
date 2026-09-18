@@ -10,8 +10,8 @@ import { uploadFile } from './transfer/uploadFile';
 import { AuditLog } from './auditLog';
 import { checkConflict } from './conflictGuard';
 import { readSidecar } from './tmpStore';
-import { purgeExpiredTmp } from './tmpRetention';
-import { tmpFilePathFor, tmpRootFor } from './tmpPath';
+import { purgeExpiredTmp, sweepUnknownTmpRoots } from './tmpRetention';
+import { tmpFilePathFor, tmpRootFor, connectionSlug } from './tmpPath';
 import { mapSftpError, actionLabel, isConnectionError } from './errorMapper';
 import { mapListingToEntries } from './remoteListing';
 import { GangwayTreeProvider, type RemoteTreeNode } from './ui/gangwayTreeProvider';
@@ -327,6 +327,10 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
 
   const initialConnection = getActiveConnection();
   if (initialConnection) purgeTmpFor(initialConnection);
+  // Orphaned tmp roots (pre-slug-change trees, deleted connections) belong
+  // to no saved connection: sweep them once per boot by the same age rules.
+  // Fire-and-forget like the purge above, and non-throwing by construction.
+  void sweepUnknownTmpRoots(new Set(connectionManager.list().map((c) => connectionSlug(c))));
 
   /**
    * The Manage Remotes page: an add/edit form (left) plus a sidebar listing

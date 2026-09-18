@@ -22,11 +22,19 @@ describe('tmpPath', () => {
     expect(slug).toMatch(/^[0-9a-f]{10}$/);
   });
 
-  it('is stable for the same host:user:port and differs across connections', () => {
+  it('is stable for the same connection and differs across servers', () => {
     const other: ConnectionConfig = { ...connection, id: 'c2', host: 'other.example.com' };
     const withDifferentId: ConnectionConfig = { ...connection, id: 'different-id' };
     expect(tmpRootFor(connection)).toBe(tmpRootFor(withDifferentId));
     expect(tmpRootFor(connection)).not.toBe(tmpRootFor(other));
+  });
+
+  it('scopes the same server by remotePath, so staging and prod never share a tmp tree', () => {
+    const staging: ConnectionConfig = { ...connection, id: 'staging', remotePath: '/srv/www/staging' };
+    const prod: ConnectionConfig = { ...connection, id: 'prod', remotePath: '/srv/www/prod' };
+    expect(tmpRootFor(staging)).not.toBe(tmpRootFor(prod));
+    // And the same server file under each maps to a different local file.
+    expect(tmpFilePathFor(staging, '/srv/www/staging/x.php')).not.toBe(tmpFilePathFor(prod, '/srv/www/prod/x.php'));
   });
 
   it('maps a remote relative path under the tmp root', () => {

@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { readSidecar } from './tmpStore';
 import { sidecarPathFor } from './tmpPath';
@@ -60,6 +61,70 @@ export async function purgeExpiredTmp(tmpRoot: string, retentionDays = 7, now = 
       await fs.rm(filePath, { force: true });
       await fs.rm(sidecarPathFor(filePath), { force: true });
       purged.push(filePath);
+    }
+  }
+  return purged;
+}
+
+/**
+ * Removes a directory tree that has drained fully, bottom-up. Each rm only
+ * succeeds on an actually-empty directory *at that moment*, so a file
+ * landing concurrently (another window's download) aborts that branch
+ * instead of deleting through it -- removal here can never take live data.
+ */
+async function removeEmptyDirs(dir: string): Promise<void> {
+  let entries;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory()) await removeEmptyDirs(path.join(dir, entry.name));
+  }
+  try {
+    // rmdir (not rm): succeeds only on an actually-empty directory, which is
+    // exactly the atomic guard this needs -- fs.rm refuses directories
+    // outright (EISDIR), and rm recursive would delete through a race.
+    await fs.rmdir(dir);
+  } catch {
+    // Raced (something landed inside) or still occupied -- leave it for the
+    // next sweep rather than forcing anything.
+  }
+}
+
+/**
+ * Drops tmp roots no saved connection owns anymore: pre-slug-change roots
+ * (the slug gained remotePath, orphaning the old trees) and roots whose
+ * connection was deleted. Age-gated file by file through purgeExpiredTmp,
+ * then the directory itself goes only if it drained fully -- a second
+ * window's live downloads are never touched. Never throws: a sweep runs at
+ * boot and must not wedge activation on one unreadable directory.
+ */
+export async function sweepUnknownTmpRoots(
+  knownSlugs: ReadonlySet<string>,
+  retentionDays = 7,
+  now = Date.now(),
+  baseDir: string = path.join(os.tmpdir(), 'vs-sftp'),
+): Promise<string[]> {
+  let children: Array<{ name: string; isDirectory: () => boolean }>;
+  try {
+    children = await fs.readdir(baseDir, { withFileTypes: true });
+  } catch {
+    // Missing base dir is the common first-boot case; an unreadable one is
+    // someone else's problem, not activation's.
+    return [];
+  }
+  const purged: string[] = [];
+  for (const child of children) {
+    if (!child.isDirectory() || knownSlugs.has(child.name)) continue;
+    const dir = path.join(baseDir, child.name);
+    try {
+      purged.push(...(await purgeExpiredTmp(dir, retentionDays, now)));
+      await removeEmptyDirs(dir);
+    } catch {
+      // Still holds fresh files, or is unreadable: leave it for the next
+      // sweep rather than failing boot on someone else's directory.
     }
   }
   return purged;

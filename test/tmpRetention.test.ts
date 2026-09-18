@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { purgeExpiredTmp } from '../src/tmpRetention';
+import { purgeExpiredTmp, sweepUnknownTmpRoots } from '../src/tmpRetention';
 import { writeSidecar } from '../src/tmpStore';
 import type { SidecarMeta } from '../src/types';
 
@@ -133,5 +133,44 @@ describe('purgeExpiredTmp', () => {
     } finally {
       readdirSpy.mockRestore();
     }
+  });
+});
+
+describe('sweepUnknownTmpRoots', () => {
+  it('purges expired files under unknown roots, drops drained dirs, and keeps known or fresh ones', async () => {
+    const now = Date.parse('2026-09-16T00:00:00Z');
+    const eightDaysAgo = now - 8 * 24 * 60 * 60 * 1000;
+    const base = path.join(tmpRoot, 'vs-sftp');
+    const staleRoot = path.join(base, 'deadbeef00');
+    await fs.mkdir(path.join(staleRoot, 'app'), { recursive: true });
+    const staleFile = path.join(staleRoot, 'app', 'old.php');
+    await fs.writeFile(staleFile, 'orphaned cache');
+    await writeSidecar(staleFile, {
+      connectionId: 'gone',
+      remotePath: '/x/old.php',
+      mtime: 1,
+      size: 7,
+      downloadedAt: eightDaysAgo,
+    });
+    const freshRoot = path.join(base, 'freshfresh01');
+    await fs.mkdir(freshRoot, { recursive: true });
+    const freshFile = path.join(freshRoot, 'new.php');
+    await fs.writeFile(freshFile, 'still warm');
+    const knownRoot = path.join(base, 'knownknown02');
+    await fs.mkdir(knownRoot, { recursive: true });
+
+    const purged = await sweepUnknownTmpRoots(new Set(['knownknown02']), 7, now, base);
+
+    expect(purged).toEqual([staleFile]);
+    await expect(fs.access(staleRoot)).rejects.toThrow();
+    await expect(fs.access(freshFile)).resolves.toBeUndefined();
+    await expect(fs.access(freshRoot)).resolves.toBeUndefined();
+    await expect(fs.access(knownRoot)).resolves.toBeUndefined();
+  });
+
+  it('returns empty when the base directory does not exist', async () => {
+    await expect(
+      sweepUnknownTmpRoots(new Set(), 7, Date.now(), path.join(tmpRoot, 'no-such-base')),
+    ).resolves.toEqual([]);
   });
 });
