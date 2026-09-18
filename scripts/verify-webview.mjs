@@ -50,7 +50,14 @@ async function firstExisting(candidates) {
 
 /** Bundles the real TypeScript template module so this script renders exactly
  * what ships, instead of re-implementing the substitution or reading the
- * reference index.html copy. */
+ * reference index.html copy. Returns both functions: buildConnectionFormHtml
+ * needs every ConnectionFormHtmlInput field, and resolveConnectionFormFields
+ * is the one place (besides extension.ts itself) that computes the
+ * add-vs-edit-mode ones correctly -- hand-rolling a partial object here
+ * previously left `connectionsJson` (and everything else) undefined, which
+ * `{{TOKEN}}.replace()` coerces to the literal string "undefined", corrupting
+ * the embedded JSON script tag and crashing main.js before it can attach the
+ * Save listener at all. */
 async function loadTemplateRenderer(workDir) {
   const outfile = path.join(workDir, 'connectionFormHtml.cjs');
   await esbuild.build({
@@ -62,7 +69,7 @@ async function loadTemplateRenderer(workDir) {
     logLevel: 'silent',
   });
   const module = await import(`file://${outfile}`);
-  return (module.default ?? module).buildConnectionFormHtml;
+  return module.default ?? module;
 }
 
 function serveDirectory(dir) {
@@ -140,7 +147,7 @@ async function main() {
   }
 
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gangway-webview-verify-'));
-  const buildConnectionFormHtml = await loadTemplateRenderer(workDir);
+  const { buildConnectionFormHtml, resolveConnectionFormFields, toConnectionsJson } = await loadTemplateRenderer(workDir);
 
   const serveDir = path.join(workDir, 'www');
   await fs.mkdir(serveDir, { recursive: true });
@@ -148,11 +155,17 @@ async function main() {
   await fs.copyFile(path.join(mediaDir, 'main.js'), path.join(serveDir, 'main.js'));
   await fs.writeFile(
     path.join(serveDir, 'index.html'),
+    // Same call shape extension.ts itself uses (openManageRemotesPanel): every
+    // add-vs-edit-mode field comes from resolveConnectionFormFields(), never
+    // hand-rolled here, so this can never again drift out of sync with what
+    // buildConnectionFormHtml actually requires.
     buildConnectionFormHtml({
       toolkitUri: './toolkit.min.js',
       mainScriptUri: './main.js',
       cspSource: "'self'",
       nonce: 'verify-nonce-123',
+      ...resolveConnectionFormFields(undefined),
+      connectionsJson: toConnectionsJson([]),
     }),
     'utf8',
   );
@@ -190,6 +203,18 @@ async function main() {
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
     await cdp.send('Log.enable');
+    // Without an explicit device metrics override, headless Chrome's default
+    // viewport does not line up with the coordinates getBoundingClientRect()
+    // reports, so the real mouse click below (Input.dispatchMouseEvent) lands
+    // on the wrong pixel and never reaches the button at all -- discovered by
+    // comparing a plain element.click() (which worked) against the
+    // coordinate-based click (which silently posted nothing).
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: 1200,
+      height: 900,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
     // Exactly what the VS Code webview host injects before any page script runs.
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
       source: `
