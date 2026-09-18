@@ -654,6 +654,160 @@ describe('activate - realistic command invocation', () => {
   });
 
   /**
+   * Govard remote import. The auto-scan is driven through the workspace
+   * folder-change event (not the activate-time race) so every test is
+   * deterministic: activate first with no folders, then set folders, write
+   * the fixture, and fire the event. workspaceFolders is reset after each
+   * test so no other suite ever sees a govard project.
+   */
+  describe('govard remote import', () => {
+    const spies: Array<{ mockRestore: () => void }> = [];
+    function track<T extends { mockRestore: () => void }>(spy: T): T {
+      spies.push(spy);
+      return spy;
+    }
+    afterEach(() => {
+      while (spies.length) spies.pop()!.mockRestore();
+      (vscode.workspace as unknown as { workspaceFolders: unknown[] }).workspaceFolders = [];
+    });
+
+    // Give the activate-time auto-scan room to finish: inputs are always
+    // stable before activate() here (folders + fixture preset, choices
+    // mocked), so the sleep only waits out the implementation's own async
+    // file read, never a race with the test body.
+    const settleScan = () => new Promise((resolve) => setTimeout(resolve, 150));
+
+    async function writeGovardFixture(dir: string): Promise<void> {
+      await fs.writeFile(
+        path.join(dir, '.govard.yml'),
+        'project_name: myshop\n' +
+          'remotes:\n' +
+          '  staging:\n' +
+          '    host: staging.example.com\n' +
+          '    user: deploy\n' +
+          '    path: /srv/www/staging\n' +
+          '  prod:\n' +
+          '    host: prod.example.com\n' +
+          '    user: deploy\n' +
+          '    path: /srv/www/prod\n',
+        'utf8',
+      );
+    }
+
+    function openProject(dir: string): void {
+      (vscode.workspace as unknown as { workspaceFolders: { uri: { fsPath: string }; name: string }[] }).workspaceFolders = [
+        { uri: { fsPath: dir }, name: 'myshop' },
+      ];
+    }
+
+    it('prompts on activate and imports every fresh remote when Import all is chosen', async () => {
+      openProject(tmpHome);
+      await writeGovardFixture(tmpHome);
+      const infoSpy = track(vi.spyOn(vscode.window, 'showInformationMessage').mockResolvedValue('Import all (2)' as never));
+
+      const second = activate(fakeContext());
+      await settleScan();
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('staging'));
+      expect(second.connectionManager.list().map((c) => c.name).sort()).toEqual(['myshop-prod', 'myshop-staging']);
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Imported 2'));
+    });
+
+    it('stays silent when every govard hostname already exists as a connection', async () => {
+      openProject(tmpHome);
+      await writeGovardFixture(tmpHome);
+      const second = activate(fakeContext());
+      // No await: the fake memento applies update() synchronously, so both
+      // records land before the auto-scan crosses its first async boundary
+      // (the dynamic import). Awaiting here would hand the scan a window to
+      // run first and prompt.
+      void second.connectionManager.add({
+        name: 'myshop-staging',
+        host: 'staging.example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/srv/www/staging',
+        authMethod: 'agent',
+      });
+      void second.connectionManager.add({
+        name: 'myshop-prod',
+        host: 'prod.example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/srv/www/prod',
+        authMethod: 'agent',
+      });
+      const infoSpy = track(vi.spyOn(vscode.window, 'showInformationMessage'));
+      await settleScan();
+
+      expect(infoSpy).not.toHaveBeenCalled();
+      expect(second.connectionManager.list()).toHaveLength(2);
+    });
+
+    it("respects Don't ask again and suppresses later scans", async () => {
+      openProject(tmpHome);
+      await writeGovardFixture(tmpHome);
+      const infoSpy = track(vi.spyOn(vscode.window, 'showInformationMessage').mockResolvedValue("Don't ask again" as never));
+      // Both activations share one ExtensionContext, so the dismiss flag set
+      // by the first scan is visible to the second: this is the production
+      // shape (one context per window), and it keeps the outer beforeEach
+      // activation's idle folder-listener out of the picture (it never fires
+      // here, and its activate-time snapshot saw no folders).
+      const sharedContext = fakeContext();
+      activate(sharedContext);
+      await settleScan();
+
+      // The prompt appeared (proving the scan ran) and nothing was imported.
+      // NOTE: toHaveBeenCalledWith needs the full 4-arg call (message + 3
+      // buttons), so assert on the recorded first argument instead.
+      expect(infoSpy.mock.calls[0][0]).toContain('myshop-staging');
+      infoSpy.mockClear();
+
+      activate(sharedContext);
+      await settleScan();
+
+      expect(infoSpy).not.toHaveBeenCalled();
+    });
+
+    it('manual command imports only the QuickPick subset and reports the already-present remainder', async () => {
+      const second = activate(fakeContext());
+      await second.connectionManager.add({
+        name: 'myshop-staging',
+        host: 'staging.example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/srv/www/staging',
+        authMethod: 'agent',
+      });
+      openProject(tmpHome);
+      await writeGovardFixture(tmpHome);
+      track(
+        vi.spyOn(vscode.window, 'showQuickPick').mockResolvedValue([
+          {
+            label: 'myshop-prod',
+            description: 'deploy@prod.example.com:/srv/www/prod',
+            connection: {
+              name: 'myshop-prod',
+              host: 'prod.example.com',
+              port: 22,
+              username: 'deploy',
+              remotePath: '/srv/www/prod',
+              authMethod: 'agent',
+              keyPath: undefined,
+            },
+          },
+        ] as never),
+      );
+      const infoSpy = track(vi.spyOn(vscode.window, 'showInformationMessage'));
+
+      await handlers.get('gangway.importGovardRemotes')!();
+
+      expect(second.connectionManager.list().map((c) => c.name).sort()).toEqual(['myshop-prod', 'myshop-staging']);
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Already present'));
+    });
+  });
+
+  /**
    * Command-layer wiring from the review pass: error actions that act,
    * single-item status bar, compare/refresh commands, upload-from-node, the
    * >5MB/binary open prompt, folder failure reports, and the keep-server

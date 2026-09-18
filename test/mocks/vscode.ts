@@ -145,12 +145,23 @@ export const window = {
 };
 
 const onDidSaveTextDocumentEmitter = new EventEmitter<{ uri: { fsPath: string } }>();
+const onDidChangeWorkspaceFoldersEmitter = new EventEmitter<unknown>();
+
+export interface MockWorkspaceFolder {
+  uri: { fsPath: string };
+  name: string;
+}
 
 export const workspace = {
   onDidSaveTextDocument: onDidSaveTextDocumentEmitter.event,
   /** Test-only: fires the real onDidSaveTextDocument listeners a production
    * subscriber attached, simulating a real editor save. */
   __test_fireDidSaveTextDocument: (uri: { fsPath: string }) => onDidSaveTextDocumentEmitter.fire({ uri }),
+  /** Mutable so tests can simulate an open govard project by assigning folders. */
+  workspaceFolders: [] as MockWorkspaceFolder[],
+  onDidChangeWorkspaceFolders: onDidChangeWorkspaceFoldersEmitter.event,
+  /** Test-only: simulates adding/removing workspace folders. */
+  __test_fireDidChangeWorkspaceFolders: () => onDidChangeWorkspaceFoldersEmitter.fire({}),
 };
 
 export const commands = {
