@@ -81,7 +81,16 @@ export async function runFolderDownload(
   if (options.ensureDir) {
     for (const dir of plan.dirs) {
       if (options.signal?.aborted) return cancelledDownload([], [], []);
-      await options.ensureDir(dir);
+      try {
+        await options.ensureDir(dir);
+      } catch {
+        // A directory that cannot be ensured will fail every file under it
+        // with a clearer per-file error below (downloadFile fails to write
+        // into a missing/unwritable directory); recording it once here
+        // would double-report. Let the files speak -- matches the identical
+        // catch in runFolderUpload just below, so one bad directory never
+        // aborts the whole batch on either side of a transfer.
+      }
     }
   }
   const downloaded: string[] = [];

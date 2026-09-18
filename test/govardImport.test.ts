@@ -43,6 +43,7 @@ describe('mapGovardRemote', () => {
     const config = parseGovardYaml(SAMPLE);
     expect(mapGovardRemote('myshop', 'prod', config.remotes['prod'])).toEqual({
       ok: true,
+      remoteName: 'prod',
       connection: {
         name: 'myshop-prod',
         host: 'prod.example.com',
@@ -58,6 +59,7 @@ describe('mapGovardRemote', () => {
   it('defaults agent auth and port 22, and skips local remotes and remotes missing host/user/path', () => {
     expect(mapGovardRemote('myshop', 'staging', { host: 's.example.com', user: 'deploy', path: '/srv' })).toEqual({
       ok: true,
+      remoteName: 'staging',
       connection: {
         name: 'myshop-staging', host: 's.example.com', port: 22, username: 'deploy',
         remotePath: '/srv', authMethod: 'agent', keyPath: undefined,
@@ -69,10 +71,16 @@ describe('mapGovardRemote', () => {
       expect.objectContaining({ ok: true, connection: expect.objectContaining({ authMethod: 'agent' }) }),
     );
   });
+
+  it('maps an explicit password auth method to the password authMethod, not agent', () => {
+    expect(mapGovardRemote('myshop', 'staging', { host: 's.example.com', user: 'd', path: '/srv', auth: { method: 'password' } })).toEqual(
+      expect.objectContaining({ ok: true, connection: expect.objectContaining({ authMethod: 'password' }) }),
+    );
+  });
 });
 
 describe('filterNewRemotes', () => {
-  it('splits fresh, already-present (by host+port), and skipped entries without touching existing ones', () => {
+  it('splits fresh, already-present (by host+port+path+user), and skipped entries without touching existing ones', () => {
     const mapped = [
       mapGovardRemote('myshop', 'staging', { host: 's.example.com', user: 'd', path: '/srv' }),
       mapGovardRemote('myshop', 'prod', { host: 'p.example.com', user: 'd', path: '/srv' }),
@@ -84,5 +92,24 @@ describe('filterNewRemotes', () => {
     expect(result.alreadyPresent).toEqual(['staging']);
     expect(result.skipped.map((s) => s.remoteName)).toEqual(['box']);
     expect(existing).toHaveLength(1);
+  });
+
+  it('imports two remotes on the same host:port with different remotePath instead of dropping the second as already-present', () => {
+    const mapped = [
+      mapGovardRemote('myshop', 'staging', { host: 'box.example.com', user: 'd', path: '/srv/staging' }),
+      mapGovardRemote('myshop', 'prod', { host: 'box.example.com', user: 'd', path: '/srv/prod' }),
+    ];
+    const result = filterNewRemotes(mapped, []);
+    expect(result.fresh.map((c) => c.name)).toEqual(['myshop-staging', 'myshop-prod']);
+    expect(result.alreadyPresent).toEqual([]);
+  });
+
+  it('reports the already-present remote name untruncated for a hyphenated project name', () => {
+    const mapped = [mapGovardRemote('my-shop', 'prod', { host: 's.example.com', user: 'd', path: '/srv' })];
+    const existing = [
+      { id: 'c0', name: 'old', host: 's.example.com', port: 22, username: 'd', remotePath: '/srv', authMethod: 'agent' as const },
+    ];
+    const result = filterNewRemotes(mapped, existing);
+    expect(result.alreadyPresent).toEqual(['prod']);
   });
 });

@@ -21,7 +21,7 @@ export interface RemoteTreeNode {
 
 export type GangwayTreeNode = SelectorNode | RemoteTreeNode;
 
-function isSelectorNode(node: GangwayTreeNode): node is SelectorNode {
+export function isSelectorNode(node: GangwayTreeNode): node is SelectorNode {
   return 'kind' in node && node.kind === 'selector';
 }
 
@@ -134,9 +134,11 @@ export class GangwayTreeProvider implements vscode.TreeDataProvider<GangwayTreeN
       item.iconPath = new vscode.ThemeIcon('file-symlink-file');
     }
     item.contextValue = node.entry.isDirectory ? 'gangway.folder' : 'gangway.file';
-    if (!node.entry.isDirectory) {
-      item.command = { command: 'gangway.downloadFile', title: 'Open', arguments: [node] };
-    }
+    // No `command` here: a single click on a file used to download and open
+    // it immediately, so every click re-ran the whole download workflow.
+    // extension.ts now drives opening from the tree view's own selection
+    // events instead (a second selection of the same node within a short
+    // window = double click), so a click here only selects.
     return item;
   }
 

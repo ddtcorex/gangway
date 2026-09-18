@@ -241,6 +241,20 @@ describe('folder transfer failure isolation', () => {
     expect(ensureDir).toHaveBeenCalledWith('/var/www/app');
   });
 
+  it('lets a per-file download fail instead of aborting the whole batch when ensureDir rejects, matching upload', async () => {
+    const dirTree: Record<string, RemoteEntry[]> = {
+      '/var/www': [{ path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 }],
+      '/var/www/app': [{ path: '/var/www/app/config.php', isDirectory: false, isSymbolicLink: false, size: 1 }],
+    };
+    const ensureDir = vi.fn().mockRejectedValue(new Error('mkdir: permission denied'));
+    const downloadFile = vi.fn().mockRejectedValue(new Error('ENOENT: no such directory'));
+
+    const result = await runFolderDownload(root, listRemoteFixture(dirTree), downloadFile, vi.fn(), { ensureDir });
+
+    expect(result.downloaded).toEqual([]);
+    expect(result.failed).toEqual([{ remotePath: '/var/www/app/config.php', message: 'ENOENT: no such directory' }]);
+  });
+
   it('retries only the failed subset when onlyPaths is given', async () => {
     const uploadFile = vi.fn().mockResolvedValue(undefined);
 

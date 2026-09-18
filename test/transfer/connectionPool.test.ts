@@ -246,6 +246,59 @@ describe('ConnectionPool', () => {
     expect(bad.end).toHaveBeenCalledTimes(1);
   });
 
+  it('invalidate() during an in-flight connect discards the client once it lands, instead of pooling it anyway', async () => {
+    let resolveConnect!: () => void;
+    const client = {
+      connect: vi.fn().mockImplementation(() => new Promise<void>((resolve) => (resolveConnect = resolve))),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    const factory = { create: vi.fn().mockReturnValue(client) };
+    const prompt = { confirmNewOrChangedKey: vi.fn().mockResolvedValue('accept') };
+    const pool = new ConnectionPool(factory, hostKeyStore, prompt, secrets);
+
+    const pending = pool.getClient(connection);
+    await vi.waitFor(() => expect(client.connect).toHaveBeenCalledTimes(1));
+    pool.invalidate(connection.id);
+    expect(client.end).not.toHaveBeenCalled();
+
+    resolveConnect();
+    await pending;
+    await vi.waitFor(() => expect(client.end).toHaveBeenCalledTimes(1));
+    expect(pool.hasClient(connection.id)).toBe(false);
+  });
+
+  it('dispose() while a connect is still in flight discards it too, instead of leaving it pooled past shutdown', async () => {
+    let resolveConnect!: () => void;
+    const client = {
+      connect: vi.fn().mockImplementation(() => new Promise<void>((resolve) => (resolveConnect = resolve))),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    const factory = { create: vi.fn().mockReturnValue(client) };
+    const prompt = { confirmNewOrChangedKey: vi.fn().mockResolvedValue('accept') };
+    const pool = new ConnectionPool(factory, hostKeyStore, prompt, secrets);
+
+    const pending = pool.getClient(connection);
+    await vi.waitFor(() => expect(client.connect).toHaveBeenCalledTimes(1));
+    const disposed = pool.dispose();
+    resolveConnect();
+    await pending;
+    await disposed;
+
+    expect(client.end).toHaveBeenCalledTimes(1);
+    expect(pool.hasClient(connection.id)).toBe(false);
+  });
+
+  it('hasClient() is true only once a client is actually pooled, not merely in flight', async () => {
+    const client = clientThatInvokesHostVerifier(Buffer.from('deadbeef', 'hex'));
+    const factory = { create: vi.fn().mockReturnValue(client) };
+    const prompt = { confirmNewOrChangedKey: vi.fn().mockResolvedValue('accept') };
+    const pool = new ConnectionPool(factory, hostKeyStore, prompt, secrets);
+
+    expect(pool.hasClient(connection.id)).toBe(false);
+    await pool.getClient(connection);
+    expect(pool.hasClient(connection.id)).toBe(true);
+  });
+
   it('enables ssh-level keepalive so an idle pooled client is not silently dropped server-side', async () => {
     const client = clientThatInvokesHostVerifier(Buffer.from('deadbeef', 'hex'));
     const factory = { create: vi.fn().mockReturnValue(client) };

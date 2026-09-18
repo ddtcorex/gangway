@@ -106,10 +106,18 @@ export const window = {
   // before invoking a command handler, and reset to undefined afterwards.
   activeTextEditor: undefined as MockTextEditor | undefined,
   createWebviewPanel: (..._args: unknown[]) => createFakeWebviewPanel(),
-  createTreeView: (_id: string, _options: unknown) => ({
-    visible: false,
-    dispose: () => {},
-  }),
+  createTreeView: (_id: string, _options: unknown) => {
+    const selectionEmitter = new EventEmitter<{ selection: unknown[] }>();
+    return {
+      visible: false,
+      dispose: () => {},
+      onDidChangeSelection: selectionEmitter.event,
+      /** Test-only: simulates the user clicking a tree row (once per call;
+       * call twice with the same node within the double-click window to
+       * simulate a double click). */
+      __test_fireDidChangeSelection: (node: unknown) => selectionEmitter.fire({ selection: [node] }),
+    };
+  },
   createStatusBarItem: (..._args: unknown[]) => ({
     text: '',
     color: undefined as ThemeColor | undefined,
@@ -145,6 +153,7 @@ export const window = {
 };
 
 const onDidSaveTextDocumentEmitter = new EventEmitter<{ uri: { fsPath: string } }>();
+const onDidCloseTextDocumentEmitter = new EventEmitter<{ uri: { fsPath: string } }>();
 const onDidChangeWorkspaceFoldersEmitter = new EventEmitter<unknown>();
 
 export interface MockWorkspaceFolder {
@@ -157,6 +166,9 @@ export const workspace = {
   /** Test-only: fires the real onDidSaveTextDocument listeners a production
    * subscriber attached, simulating a real editor save. */
   __test_fireDidSaveTextDocument: (uri: { fsPath: string }) => onDidSaveTextDocumentEmitter.fire({ uri }),
+  onDidCloseTextDocument: onDidCloseTextDocumentEmitter.event,
+  /** Test-only: simulates the user closing an editor tab. */
+  __test_fireDidCloseTextDocument: (uri: { fsPath: string }) => onDidCloseTextDocumentEmitter.fire({ uri }),
   /** Mutable so tests can simulate an open govard project by assigning folders. */
   workspaceFolders: [] as MockWorkspaceFolder[],
   onDidChangeWorkspaceFolders: onDidChangeWorkspaceFoldersEmitter.event,
