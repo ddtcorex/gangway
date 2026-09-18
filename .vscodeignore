@@ -7,3 +7,15 @@ node_modules/**
 tsconfig.json
 esbuild.js
 vitest.config.ts
+.github/**
+.superpowers/**
+.vscode-test/**
+docs/**
+scripts/**
+pnpm-lock.yaml
+pnpm-workspace.yaml
+AGENTS.md
+CLAUDE.md
+.gitignore
+media/icon.svg
+media/icon@2x.png
