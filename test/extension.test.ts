@@ -1219,16 +1219,29 @@ describe('activate - realistic command invocation', () => {
       };
     }
 
-    it('a single selection does not download or open the file', () => {
-      capturedTreeView!.__test_fireDidChangeSelection(nodeFor('/var/www/app/config.php'));
+    // Driven through the registered 'gangway.internalFileClick' command --
+    // the same thing VS Code invokes for every click on a TreeItem that
+    // carries a `command` (gangwayTreeProvider.ts) -- rather than
+    // `treeView.onDidChangeSelection`. A real TreeView only fires that
+    // selection event when the selection actually changes, so it never
+    // fires a second time for a real double click on an already-selected
+    // item; driving these tests off it once hid exactly that bug (the
+    // fixture fired the mock event manually regardless of whether the
+    // selection "changed").
+    function click(node: ReturnType<typeof nodeFor>) {
+      handlers.get('gangway.internalFileClick')!(node);
+    }
+
+    it('a single click does not download or open the file', () => {
+      click(nodeFor('/var/www/app/config.php'));
 
       expect(fakeRawClient.stat).not.toHaveBeenCalled();
     });
 
-    it('selecting the same file node twice in quick succession downloads and opens it (double click)', async () => {
+    it('clicking the same file node twice in quick succession downloads and opens it (double click)', async () => {
       const node = nodeFor('/var/www/app/config.php');
-      capturedTreeView!.__test_fireDidChangeSelection(node);
-      capturedTreeView!.__test_fireDidChangeSelection(node);
+      click(node);
+      click(node);
       // The handler is fired synchronously but runs async; let it settle.
       await vi.waitFor(() => expect(fakeRawClient.stat).toHaveBeenCalled());
 
@@ -1236,18 +1249,18 @@ describe('activate - realistic command invocation', () => {
       expect(fakeRawClient.fastGet).toHaveBeenCalledWith('/var/www/app/config.php', expect.any(String));
     });
 
-    it('selecting two different file nodes in a row does not count as a double click on either', async () => {
-      capturedTreeView!.__test_fireDidChangeSelection(nodeFor('/var/www/app/a.php'));
-      capturedTreeView!.__test_fireDidChangeSelection(nodeFor('/var/www/app/b.php'));
+    it('clicking two different file nodes in a row does not count as a double click on either', async () => {
+      click(nodeFor('/var/www/app/a.php'));
+      click(nodeFor('/var/www/app/b.php'));
       await new Promise((resolve) => setTimeout(resolve, 10));
 
       expect(fakeRawClient.stat).not.toHaveBeenCalled();
     });
 
-    it('selecting a folder node never triggers a download, even twice in a row', async () => {
+    it('clicking a folder node never triggers a download, even twice in a row', async () => {
       const folder = nodeFor('/var/www/app', true);
-      capturedTreeView!.__test_fireDidChangeSelection(folder);
-      capturedTreeView!.__test_fireDidChangeSelection(folder);
+      click(folder);
+      click(folder);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
       expect(fakeRawClient.stat).not.toHaveBeenCalled();

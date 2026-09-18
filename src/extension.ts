@@ -333,32 +333,40 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   });
 
   /**
-   * TreeItem has no native double-click event, and a single click used to
-   * carry a `command` that downloaded and opened the file immediately --
-   * every click re-ran the whole download workflow. File nodes no longer
-   * set `command` (see gangwayTreeProvider.ts); opening one now requires
-   * selecting the same file node twice within DOUBLE_CLICK_THRESHOLD_MS, the
-   * same pattern VS Code's own Explorer preview mode implements natively.
+   * TreeItem has no native double-click event. A single click used to carry
+   * a `command` that downloaded and opened the file immediately, so every
+   * click re-ran the whole download workflow. A first attempt at fixing that
+   * drove the double-click timing off `treeView.onDidChangeSelection`
+   * instead -- but VS Code only fires that event when the selection
+   * actually *changes*, so clicking an already-selected file a second time
+   * (exactly what a double click is) never fired a second event at all, and
+   * double-click-to-open silently stopped working. `TreeItem.command` fires
+   * on every click regardless of prior selection state (see
+   * gangwayTreeProvider.ts), so the timing check now lives in this command
+   * handler instead, the same pattern VS Code's own Explorer preview mode
+   * uses.
    */
   const DOUBLE_CLICK_THRESHOLD_MS = 500;
-  let lastSelectedKey: string | undefined;
-  let lastSelectedAt = 0;
-  const selectionListener = treeView.onDidChangeSelection((event) => {
-    const node = event.selection[0] as GangwayTreeNode | undefined;
-    if (!node || isSelectorNode(node) || node.entry.isDirectory) {
-      lastSelectedKey = undefined;
-      return;
-    }
-    const key = `${node.connectionId}:${node.entry.path}`;
-    const now = Date.now();
-    if (lastSelectedKey === key && now - lastSelectedAt < DOUBLE_CLICK_THRESHOLD_MS) {
-      lastSelectedKey = undefined;
-      void runDownloadFileCommand(node);
-      return;
-    }
-    lastSelectedKey = key;
-    lastSelectedAt = now;
-  });
+  let lastClickedKey: string | undefined;
+  let lastClickedAt = 0;
+  const internalFileClickDisposable = vscode.commands.registerCommand(
+    'gangway.internalFileClick',
+    (node?: GangwayTreeNode) => {
+      if (!node || isSelectorNode(node) || node.entry.isDirectory) {
+        lastClickedKey = undefined;
+        return;
+      }
+      const key = `${node.connectionId}:${node.entry.path}`;
+      const now = Date.now();
+      if (lastClickedKey === key && now - lastClickedAt < DOUBLE_CLICK_THRESHOLD_MS) {
+        lastClickedKey = undefined;
+        void runDownloadFileCommand(node);
+        return;
+      }
+      lastClickedKey = key;
+      lastClickedAt = now;
+    },
+  );
 
   /**
    * Badges a Gangway tmp file (in this tree, and in any editor tab showing
@@ -1031,7 +1039,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   context.subscriptions.push(
     output,
     treeView,
-    selectionListener,
+    internalFileClickDisposable,
     dirtyDecorationRegistration,
     saveListener,
     tmpStatusBar,
