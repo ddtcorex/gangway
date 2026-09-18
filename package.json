@@ -57,6 +57,10 @@
         "command": "gangway.refreshExplorer",
         "title": "Gangway: Refresh Explorer",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "gangway.importGovardRemotes",
+        "title": "Gangway: Import Remotes from Govard"
       }
     ],
     "keybindings": [

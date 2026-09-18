@@ -22,6 +22,7 @@ import { buildConnectionFormHtml, resolveConnectionFormFields, toConnectionsJson
 import { ConnectionFormPanel } from './ui/connectionFormPanel';
 import { SftpClientAdapter, type RawSftpClient } from './transfer/sftpClientAdapter';
 import { runFolderDownload, runFolderUpload } from './ui/folderTransferCommands';
+import { parseGovardYaml, mapGovardRemote, filterNewRemotes, type MappedRemote, type GovardConfig } from './govardImport';
 import { raceWithCancellation } from './ui/cancellable';
 import { TransferCancelledError } from './folderQueue';
 import { resolveFileConflict, type ConflictResolutionUi } from './ui/conflictResolution';
@@ -782,6 +783,137 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     }
   };
 
+  /**
+   * Govard remote import (see docs/specs/2026-09-18-gangway-govard-import-design.md).
+   *
+   * Workspaces carrying a `.govard.yml` already know their servers, so offer
+   * them as Gangway connections instead of making the user retype host/user/
+   * path. One-time import (copies, never links): later govard edits do not
+   * re-sync, existing connections are never touched, and secrets never flow
+   * from the YAML (which carries none).
+   */
+  const GOVARD_DISMISS_KEY = 'gangway.govardImportDismissed';
+  interface GovardScan {
+    projectName: string;
+    mapped: MappedRemote[];
+  }
+
+  type GovardPickItem = vscode.QuickPickItem & { connection: Omit<ConnectionConfig, 'id'> };
+
+  async function importGovardRemotes(
+    manual: boolean,
+    folders: readonly { uri: { fsPath: string }; name: string }[] = vscode.workspace.workspaceFolders ?? [],
+  ): Promise<void> {
+    // folders defaults to a live read, except the activate-time auto-run
+    // passes a snapshot taken synchronously during activate(): the scan body
+    // awaits (dynamic import, file reads), and folders set after activate
+    // must not leak into a scan that started before them.
+    const fs = (await import('node:fs/promises')).default;
+    const scans: GovardScan[] = [];
+    for (const folder of folders) {
+      let text: string;
+      try {
+        text = await fs.readFile(path.join(folder.uri.fsPath, '.govard.yml'), 'utf8');
+      } catch {
+        continue;
+      }
+      let config: GovardConfig;
+      try {
+        config = parseGovardYaml(text);
+      } catch {
+        // Broken govard files are the project owner's problem: auto-detect
+        // stays silent, the manual command reports.
+        if (manual) {
+          await vscode.window.showErrorMessage(
+            `Could not parse ${path.join(folder.uri.fsPath, '.govard.yml')}: not valid govard YAML.`,
+          );
+        }
+        continue;
+      }
+      const projectName = config.projectName || path.basename(folder.uri.fsPath);
+      scans.push({
+        projectName,
+        mapped: Object.entries(config.remotes).map(([name, remote]) => mapGovardRemote(projectName, name, remote)),
+      });
+    }
+    const mapped = scans.flatMap((scan) => scan.mapped);
+    const { fresh, alreadyPresent, skipped } = filterNewRemotes(mapped, connectionManager.list());
+    if (fresh.length === 0) {
+      if (manual) {
+        const skippedNote =
+          skipped.length > 0 ? ` Skipped: ${skipped.map((s) => `${s.remoteName} (${s.reason})`).join(', ')}.` : '';
+        await vscode.window.showInformationMessage(
+          alreadyPresent.length > 0
+            ? `All govard remotes are already present (${alreadyPresent.join(', ')}).${skippedNote}`
+            : `No importable govard remotes found.${skippedNote}`,
+        );
+      }
+      return;
+    }
+    if (!manual && context.workspaceState.get<boolean>(GOVARD_DISMISS_KEY)) return;
+    const choices: GovardPickItem[] = fresh.map((connection) => ({
+      label: connection.name,
+      description: `${connection.username}@${connection.host}:${connection.port}`,
+      detail: connection.remotePath,
+      picked: true,
+      connection,
+    }));
+    let selected: Omit<ConnectionConfig, 'id'>[];
+    if (!manual) {
+      const action = await vscode.window.showInformationMessage(
+        `Found ${fresh.length} govard remote(s) not in Gangway yet (${fresh.map((c) => c.name).join(', ')}). Import them?`,
+        `Import all (${fresh.length})`,
+        'Choose remotes…',
+        "Don't ask again",
+      );
+      if (action === "Don't ask again") {
+        await context.workspaceState.update(GOVARD_DISMISS_KEY, true);
+        return;
+      }
+      if (action === 'Choose remotes…') {
+        const picked = await vscode.window.showQuickPick(choices, {
+          canPickMany: true,
+          placeHolder: 'Select govard remotes to import',
+        });
+        if (!picked) return;
+        selected = picked.map((item) => item.connection);
+      } else if (action?.startsWith('Import all')) {
+        selected = fresh;
+      } else {
+        return;
+      }
+    } else {
+      const picked = await vscode.window.showQuickPick(choices, {
+        canPickMany: true,
+        placeHolder: 'Select govard remotes to import',
+      });
+      if (!picked) return;
+      selected = picked.map((item) => item.connection);
+    }
+    try {
+      for (const connection of selected) {
+        await connectionManager.add(connection);
+      }
+    } catch (err) {
+      if (manual) {
+        await vscode.window.showErrorMessage(
+          `Could not save the imported connections: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      return;
+    }
+    treeProvider.refresh();
+    const importedNote = `Imported ${selected.length} (${selected.map((c) => c.name).join(', ')}).`;
+    const presentNote = alreadyPresent.length > 0 ? ` Already present: ${alreadyPresent.join(', ')}.` : '';
+    const skippedNote =
+      skipped.length > 0 ? ` Skipped: ${skipped.map((s) => `${s.remoteName} (${s.reason})`).join(', ')}.` : '';
+    await vscode.window.showInformationMessage(`${importedNote}${presentNote}${skippedNote}`);
+  }
+
+  const govardFoldersListener = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+    void importGovardRemotes(false).catch(() => {});
+  });
+
   context.subscriptions.push(
     output,
     treeView,
@@ -848,7 +980,18 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     vscode.commands.registerCommand('gangway.uploadFolder', runUploadFolderCommand),
     vscode.commands.registerCommand('gangway.compareFile', runCompareFileCommand),
     vscode.commands.registerCommand('gangway.refreshExplorer', () => treeProvider.refresh()),
+    vscode.commands.registerCommand('gangway.importGovardRemotes', () => importGovardRemotes(true)),
+    govardFoldersListener,
   );
+
+  // Prompt-once auto-detect: a workspace that already knows its servers via
+  // govard should not make the user retype them. Silent by construction when
+  // there is nothing new (or no govard file at all). The folder list is
+  // snapshotted synchronously here: the scan body awaits (dynamic import,
+  // file reads), and folders appearing after activate must not leak into a
+  // scan that started before them -- later changes arrive through the
+  // folder-change listener above, which reads live.
+  void importGovardRemotes(false, [...(vscode.workspace.workspaceFolders ?? [])]).catch(() => {});
 
   // Exported so tests (Task 19's E2E in particular) can set up a real
   // connection through the same modules the connection form itself uses,
