@@ -6,13 +6,15 @@ on:
       - "v*.*.*"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
         with:
@@ -35,6 +37,14 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Version == tag gate
+        run: |
+          v="$(jq -r .version package.json)"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$v" != "$tag" ]; then
+            echo "package.json version ($v) != tag ($tag)"; exit 1
+          fi
+
       # --no-dependencies: pnpm build (esbuild) already bundled every
       # runtime dependency into dist/extension.js -- vsce does not need
       # to (and should not) run its own dependency pass on top of that.
@@ -56,3 +66,23 @@ jobs:
       # reusing this same .vsix) plus a VSCE_PAT secret.
       - name: Publish to Open VSX
         run: pnpm dlx --allow-build=@vscode/vsce-sign --allow-build=keytar ovsx publish gangway.vsix -p ${{ secrets.OVSX_PAT }}
+
+      # Same pattern as ddtcorex/dsh-maestro-ci node-release.yml: take the
+      # matching `## [X.Y.Z]` section from CHANGELOG.md as the release body
+      # and let GitHub append its auto-generated notes on top.
+      - name: Extract changelog section
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="$version" '
+            /^## \[/ { if (found) exit; if (index($0, "[" ver "]")) { found=1; next } }
+            found { print }
+          ' CHANGELOG.md > release-notes.md || true
+          cat release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body_path: release-notes.md
+          generate_release_notes: true
+          files: gangway.vsix
