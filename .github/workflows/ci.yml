@@ -49,6 +49,13 @@ jobs:
       - name: Build extension + e2e
         run: pnpm run build && pnpm run build:e2e
 
+      # Real-browser check the unit/jsdom suite structurally cannot express
+      # (module-script semantics, a real CSP, real mouse events on the
+      # toolkit's custom elements) -- see docs/testing.md rule 3 and the
+      # script's own header. ubuntu-latest ships Chrome, so no extra setup.
+      - name: Verify the connection-form webview in a real browser
+        run: node scripts/verify-webview.mjs
+
       - name: Start SFTP fixture
         working-directory: test/fixtures
         # Align the container sftp user with the runner uid (see the compose

@@ -104,9 +104,12 @@ export function resolveConnectionFormFields(
     agentSelected: selected('agent'),
     passwordHint: blankHint,
     passphraseHint: blankHint,
-    // A brand-new connection (c undefined) defaults to global, unchecked --
-    // the historical, only behavior, and the common case.
-    workspaceScopeChecked: c?.scope === 'workspace' ? ' checked' : '',
+    // A brand-new connection (c undefined) defaults to workspace-scope,
+    // checked: a connection added while working in this project is most
+    // often specific to it, same reasoning as the govard-import default.
+    // Editing an existing connection always reflects its actual stored
+    // scope instead.
+    workspaceScopeChecked: (c ? c.scope === 'workspace' : true) ? ' checked' : '',
   };
 }
 

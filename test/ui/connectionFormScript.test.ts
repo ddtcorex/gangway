@@ -443,7 +443,7 @@ describe('connection form webview script', () => {
       expect(dom.elements.get('workspaceScope')!.checked).toBe(false);
     });
 
-    it('clears the form to a blank new-connection state when "+ Add" is clicked', () => {
+    it('clears the form to a blank new-connection state when "+ Add" is clicked, defaulting to workspace scope', () => {
       const dom = runConnectionFormScript({ nonce: 'n', connectionId: 'c1', connections: [staging] });
       dom.remoteRows()[0].emit('click');
 
@@ -454,17 +454,17 @@ describe('connection form webview script', () => {
       expect(dom.elements.get('name')!.value).toBe('');
       expect(dom.elements.get('port')!.value).toBe('22');
       expect(dom.posted[0].payload).not.toHaveProperty('id');
-      expect(dom.posted[0].payload).toMatchObject({ scope: 'global' });
+      expect(dom.posted[0].payload).toMatchObject({ scope: 'workspace' });
     });
 
-    it('unchecks the workspace-only checkbox when "+ Add" is clicked after loading a workspace-scope row', () => {
-      const dom = runConnectionFormScript({ nonce: 'n', connections: [prod] });
+    it('leaves the workspace-only checkbox checked when "+ Add" is clicked, whether the previous row was workspace or global scope', () => {
+      const dom = runConnectionFormScript({ nonce: 'n', connections: [staging] });
       dom.remoteRows()[0].emit('click');
-      expect(dom.elements.get('workspaceScope')!.checked).toBe(true);
+      expect(dom.elements.get('workspaceScope')!.checked).toBe(false);
 
       dom.elements.get('addRemote')!.emit('click');
 
-      expect(dom.elements.get('workspaceScope')!.checked).toBe(false);
+      expect(dom.elements.get('workspaceScope')!.checked).toBe(true);
     });
 
     it('posts deleteConnection with the row id when its delete button is clicked', () => {

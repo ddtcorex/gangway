@@ -127,9 +127,10 @@ function clearForm() {
   setFieldValue('keyPath', '');
   setFieldValue('keyPassphrase', '');
   document.getElementById('authMethod').value = 'password';
-  // Global (unchecked) is the default for a brand-new connection -- the
-  // historical, only behavior.
-  setCheckboxChecked('workspaceScope', false);
+  // Workspace-scope (checked) is the default for a brand-new connection: one
+  // added while working in this project is most often specific to it, same
+  // reasoning as the govard-import default.
+  setCheckboxChecked('workspaceScope', true);
   applyAuthVisibility();
   renderRemotesList();
 }
