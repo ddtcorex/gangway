@@ -40,13 +40,23 @@ export function parseGovardYaml(text: string): GovardConfig {
 }
 
 export type MappedRemote =
-  | { ok: true; connection: Omit<ConnectionConfig, 'id'> }
+  | { ok: true; remoteName: string; connection: Omit<ConnectionConfig, 'id'> }
   | { ok: false; remoteName: string; reason: string };
 
 function resolveAuthMethod(remote: GovardRemote): { authMethod: AuthMethod; keyPath?: string } {
   const method = (remote.auth?.method ?? '').toLowerCase().trim();
   if (method === 'keyfile' && remote.auth?.key_path) {
     return { authMethod: 'key', keyPath: remote.auth.key_path };
+  }
+  // An explicit password method maps to Gangway's own 'password' auth
+  // rather than falling into the generic agent bucket below: import cannot
+  // carry the plaintext secret (govard.yml never stores one either), but
+  // authResolver's 'password' branch already gives a clear "open the
+  // connection form and re-enter the password" error when none is stored
+  // yet -- far better than a misleading "no SSH agent detected" failure for
+  // a remote the user never intended to use agent auth with.
+  if (method === 'password') {
+    return { authMethod: 'password' };
   }
   // ssh-agent, keychain, missing, and anything unrecognized all resolve to
   // agent: no explicit key material either way, and agent never sends a
@@ -63,6 +73,7 @@ export function mapGovardRemote(projectName: string, remoteName: string, remote:
   const { authMethod, keyPath } = resolveAuthMethod(remote);
   return {
     ok: true,
+    remoteName,
     connection: {
       name: `${projectName}-${remoteName}`,
       host: remote.host,
@@ -81,8 +92,16 @@ export interface FilteredRemotes {
   skipped: { remoteName: string; reason: string }[];
 }
 
+// Matches connectionSlug's own key (tmpPath.ts): host + user + port +
+// remotePath. Two remotes on the same host:port but different remotePath
+// (staging/prod on one box, the standard govard layout) are distinct
+// connections and must never collapse into "already present".
+function dedupeKey(connection: Pick<ConnectionConfig, 'host' | 'username' | 'port' | 'remotePath'>): string {
+  return `${connection.host}:${connection.username}:${connection.port}:${connection.remotePath}`;
+}
+
 export function filterNewRemotes(mapped: MappedRemote[], existing: ConnectionConfig[]): FilteredRemotes {
-  const known = new Set(existing.map((c) => `${c.host}:${c.port}`));
+  const known = new Set(existing.map(dedupeKey));
   const fresh: Omit<ConnectionConfig, 'id'>[] = [];
   const alreadyPresent: string[] = [];
   const skipped: { remoteName: string; reason: string }[] = [];
@@ -91,11 +110,11 @@ export function filterNewRemotes(mapped: MappedRemote[], existing: ConnectionCon
       skipped.push({ remoteName: entry.remoteName, reason: entry.reason });
       continue;
     }
-    if (known.has(`${entry.connection.host}:${entry.connection.port}`)) {
-      alreadyPresent.push(entry.connection.name.replace(/^[^-]+-/, ''));
+    if (known.has(dedupeKey(entry.connection))) {
+      alreadyPresent.push(entry.remoteName);
       continue;
     }
-    known.add(`${entry.connection.host}:${entry.connection.port}`);
+    known.add(dedupeKey(entry.connection));
     fresh.push(entry.connection);
   }
   return { fresh, alreadyPresent, skipped };
