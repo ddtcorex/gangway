@@ -301,9 +301,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   /**
    * Created unconditionally: every saved connection is always listed as a
    * root node (a brand-new user with zero connections just sees an empty
-   * tree, no special-casing needed), and expanding one connects it --
-   * mirroring PhpStorm's "Remote Host" tool window, where expanding a host
-   * row is what connects to it.
+   * tree, no special-casing needed), and expanding one connects it.
    */
   const treeProvider = new GangwayTreeProvider(
     () => connectionManager.list(),
@@ -438,9 +436,9 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   void sweepUnknownTmpRoots(new Set(connectionManager.list().map((c) => connectionSlug(c))));
 
   /**
-   * The Manage Remotes page: an add/edit form (left) plus a sidebar listing
-   * every saved connection (right), matching PhpStorm's Deployment dialog.
-   * `initialConnection` only decides which entry the form starts on -- the
+   * The Manage Remotes page: a sidebar listing every saved connection
+   * (left) plus an add/edit form (right). `initialConnection` only decides
+   * which entry the form starts on -- the
    * sidebar always lists everything and the user can click any row, or "+
    * Add", to change what the form is editing without reopening the page.
    */
@@ -1052,9 +1050,9 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     vscode.commands.registerCommand('gangway.uploadFile', (nodeOrLocalPath?: RemoteTreeNode | string, remotePathArg?: string) => runUploadFileCommand(nodeOrLocalPath, remotePathArg)),
     vscode.commands.registerCommand('gangway.manageRemotes', () => openManageRemotesPanel(getActiveConnection())),
     vscode.commands.registerCommand('gangway.pickConnection', async () => {
-      // The native analogue of PhpStorm's host dropdown: VS Code has no
-      // built-in <select> inside a TreeView, and a QuickPick is the
-      // idiomatic way to let the user pick one of several named things.
+      // VS Code has no built-in <select> inside a TreeView, and a
+      // QuickPick is the idiomatic way to let the user pick one of
+      // several named things.
       type PickItem = vscode.QuickPickItem & { connectionId?: string; action?: 'add' | 'manage' };
       const items: PickItem[] = [
         ...connectionManager

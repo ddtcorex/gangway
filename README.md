@@ -1,15 +1,14 @@
 # Gangway
 
-PhpStorm-style single-file SFTP hotfix editing for VS Code: browse a
-remote server, edit one file locally, push it back explicitly. No sync
-daemon, no folder mirroring, no auto-upload — you decide exactly when a
-change goes live.
+Single-file SFTP hotfix editing for VS Code: browse a remote server, edit
+one file locally, push it back explicitly. No sync daemon, no folder
+mirroring, no auto-upload — you decide exactly when a change goes live.
 
 ## Why
 
 Sometimes you need to fix one file on a server right now: a config
 value, a broken template, a stray typo in production. Gangway gives you
-that PhpStorm "Deployment" workflow inside VS Code instead of `vim` over
+that one-file deployment workflow inside VS Code instead of `vim` over
 raw `ssh`, or a full sync tool built for a workflow you don't need.
 
 ## Quickstart

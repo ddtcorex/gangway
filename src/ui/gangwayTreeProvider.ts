@@ -5,10 +5,9 @@ import type { ConnectionConfig } from '../types';
 /**
  * Always the first root node. Its label/description mirror whichever
  * connection is currently bound to the workspace (or a placeholder when
- * none is), and its command opens a QuickPick to switch -- the native VS
- * Code analogue of PhpStorm's host dropdown at the top of its Remote Host
- * tool window: a real HTML <select> has no equivalent inside a TreeView,
- * and a QuickPick is the idiomatic native primitive for "pick one of these".
+ * none is), and its command opens a QuickPick to switch -- a real HTML
+ * <select> has no equivalent inside a TreeView, and a QuickPick is the
+ * idiomatic native primitive for "pick one of these".
  */
 export interface SelectorNode {
   kind: 'selector';
@@ -34,8 +33,8 @@ function compareEntries(a: RemoteEntry, b: RemoteEntry): number {
 
 /**
  * The single view backing the Gangway activity bar tab. Only the connection
- * currently bound to the workspace is ever browsed here (matching PhpStorm's
- * single active deployment target): the root is the selector row followed
+ * currently bound to the workspace is ever browsed here (a single active
+ * deployment target): the root is the selector row followed
  * directly by that connection's own file tree, not a list of every saved
  * connection -- switching which one is bound (via the selector's QuickPick,
  * or the Manage Remotes page) is what changes what this tree shows.

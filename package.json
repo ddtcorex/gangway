@@ -1,7 +1,7 @@
 {
   "name": "gangway",
   "displayName": "Gangway",
-  "description": "PhpStorm-style single-file SFTP hotfix editing for VS Code.",
+  "description": "Single-file SFTP hotfix editing for VS Code.",
   "version": "0.1.0",
   "publisher": "ddtcorex",
   "license": "MIT",
