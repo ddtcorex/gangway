@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify
+        run: pnpm verify
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      # --no-dependencies: pnpm build (esbuild) already bundled every
+      # runtime dependency into dist/extension.js -- vsce does not need
+      # to (and should not) run its own dependency pass on top of that.
+      # It also sidesteps vsce shelling out to `npm ls` for dependency
+      # detection, which fails outright in a pnpm-only repo (verified
+      # locally while wiring this workflow -- npm reports dozens of
+      # "missing" peer/dev deps of transitive packages that pnpm never
+      # installs because they're irrelevant to this build).
+      - name: Publish to Marketplace
+        run: pnpm dlx --allow-build=@vscode/vsce-sign @vscode/vsce publish --no-dependencies -p ${{ secrets.VSCE_PAT }}
