@@ -12,10 +12,11 @@ import { checkConflict } from './conflictGuard';
 import { readSidecar } from './tmpStore';
 import { purgeExpiredTmp } from './tmpRetention';
 import { tmpFilePathFor, tmpRootFor } from './tmpPath';
-import { mapSftpError, actionLabel } from './errorMapper';
+import { mapSftpError, actionLabel, isConnectionError } from './errorMapper';
 import { mapListingToEntries } from './remoteListing';
 import { GangwayTreeProvider, type RemoteTreeNode } from './ui/gangwayTreeProvider';
-import { createTmpStatusBarItem } from './ui/statusBar';
+import { TmpStatusBar } from './ui/statusBar';
+import { AUTO_OPEN_PROMPT_THRESHOLD_BYTES, isProbablyBinary } from './folderQueue';
 import { DirtyDecorationProvider } from './ui/dirtyDecoration';
 import { buildConnectionFormHtml, resolveConnectionFormFields, toConnectionsJson } from './ui/connectionFormHtml';
 import { ConnectionFormPanel } from './ui/connectionFormPanel';
@@ -151,6 +152,95 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   };
 
   /**
+   * The single funnel for every command's catch block. Previously each site
+   * rendered the mapped actions and discarded the user's choice, so Retry /
+   * Open Output / Disconnect were buttons that did nothing. Now:
+   *   - a connection-level failure first invalidates the pooled client, so a
+   *     Retry reconnects instead of reusing the dead socket;
+   *   - only the actions the call site can actually honor are shown (no
+   *     Retry without a retry closure, no Disconnect without a connection),
+   *     so a rendered button can never be dead by construction;
+   *   - Retry re-invokes the command; anything else (including dismissing
+   *     the notification) stops -- retries never chain on their own.
+   */
+  async function showCommandError(
+    err: unknown,
+    options: { retry?: () => Promise<void>; connection?: ConnectionConfig } = {},
+  ): Promise<void> {
+    const { retry, connection } = options;
+    if (connection && isConnectionError(err)) pool.invalidate(connection.id);
+    const mapped = mapSftpError(err);
+    const available = mapped.actions.filter((action) =>
+      action === 'retry' ? retry !== undefined : action === 'disconnect' ? connection !== undefined : true,
+    );
+    if (available.length === 0) {
+      await vscode.window.showErrorMessage(mapped.message);
+      return;
+    }
+    const choice = await vscode.window.showErrorMessage(mapped.message, ...available.map(actionLabel));
+    const picked = mapped.actions.find((action) => actionLabel(action) === choice);
+    if (picked === 'openOutput') output.show();
+    else if (picked === 'disconnect' && connection) pool.invalidate(connection.id);
+    else if (picked === 'retry' && retry) await retry();
+  }
+
+  /**
+   * Spec §2.3: a download always proceeds, but a file over 5MB or one that
+   * looks binary does not auto-open in the editor unasked. Small text files
+   * keep the old instant-open behavior.
+   */
+  async function shouldAutoOpen(localPath: string, remotePath: string, byteSize: number): Promise<boolean> {
+    let binary = false;
+    if (byteSize <= AUTO_OPEN_PROMPT_THRESHOLD_BYTES) {
+      try {
+        const fh = await (await import('node:fs/promises')).default.open(localPath, 'r');
+        try {
+          const buffer = Buffer.alloc(8192);
+          const { bytesRead } = await fh.read(buffer, 0, 8192, 0);
+          binary = isProbablyBinary(buffer.subarray(0, bytesRead));
+        } finally {
+          await fh.close();
+        }
+      } catch {
+        binary = false;
+      }
+    }
+    if (byteSize <= AUTO_OPEN_PROMPT_THRESHOLD_BYTES && !binary) return true;
+    const reason =
+      byteSize > AUTO_OPEN_PROMPT_THRESHOLD_BYTES
+        ? `${(byteSize / 1024 / 1024).toFixed(1)} MB exceeds the 5 MB auto-open limit`
+        : 'looks like a binary file';
+    const choice = await vscode.window.showWarningMessage(
+      `Downloaded ${remotePath}, which ${reason}. Open it in the editor?`,
+      'Open anyway',
+      'Keep closed',
+    );
+    return choice === 'Open anyway';
+  }
+
+  /**
+   * Shared tail for both folder commands: per-file failures were already
+   * isolated by the queue (failed[] instead of a throw), so this reports
+   * them where they stay visible (Output channel, shown) and offers a
+   * retry limited to exactly the failed subset.
+   */
+  async function handleFolderFailures(
+    what: string,
+    failed: { remotePath: string; message: string }[],
+    retryFailed: (paths: ReadonlySet<string>) => Promise<void>,
+  ): Promise<void> {
+    if (failed.length === 0) return;
+    for (const entry of failed) output.appendLine(`${what} failed: ${entry.remotePath}: ${entry.message}`);
+    output.show();
+    const choice = await vscode.window.showWarningMessage(
+      `${failed.length} file(s) failed during ${what}. Details are in the Gangway output channel.`,
+      'Retry failed',
+      'Dismiss',
+    );
+    if (choice === 'Retry failed') await retryFailed(new Set(failed.map((entry) => entry.remotePath)));
+  }
+
+  /**
    * Created unconditionally: every saved connection is always listed as a
    * root node (a brand-new user with zero connections just sees an empty
    * tree, no special-casing needed), and expanding one connects it --
@@ -174,8 +264,10 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       return vscode.Uri.file(connection ? tmpFilePathFor(connection, remotePath) : remotePath);
     },
     (err) => {
-      const mapped = mapSftpError(err);
-      void vscode.window.showErrorMessage(mapped.message, ...mapped.actions.map(actionLabel));
+      // A listing failure has no single connection to invalidate (the tree
+      // lists many), but re-listing is a meaningful retry: refresh the whole
+      // tree instead of leaving the node failed.
+      void showCommandError(err, { retry: () => Promise.resolve(treeProvider.refresh()) });
     },
   );
   const treeView = vscode.window.createTreeView('gangway.remoteExplorer', {
@@ -193,6 +285,17 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   const dirtyDecorationRegistration = vscode.window.registerFileDecorationProvider(dirtyDecorations);
   const saveListener = vscode.workspace.onDidSaveTextDocument((document) => {
     dirtyDecorations.refresh(vscode.Uri.file(document.uri.fsPath));
+  });
+
+  /**
+   * The one tmp-file status indicator for the session (TmpStatusBar owns a
+   * single item: per-download creation leaked an item per file). Shown for
+   * Gangway-managed tmp files, hidden everywhere else, disposed with the
+   * extension host.
+   */
+  const tmpStatusBar = new TmpStatusBar();
+  const editorSwitchListener = vscode.window.onDidChangeActiveTextEditor((editor) => {
+    tmpStatusBar.handleActiveEditorChanged(editor?.document.uri.fsPath);
   });
 
   /**
@@ -284,141 +387,388 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     });
   }
 
+  async function runDownloadFileCommand(node?: RemoteTreeNode): Promise<void> {
+    const connection = resolveConnection(node);
+    if (!connection) return;
+
+    let remotePath = node?.entry?.path;
+
+    // Real keybinding invocation (Alt+Shift+W) supplies no arguments at
+    // all -- a keybinding can only pass a static `args` value declared in
+    // package.json, never "the tree item that's currently selected". The
+    // actual context is "re-download whatever tmp file is open right now,
+    // discarding local edits": derive the remote path from the active
+    // editor's own sidecar, symmetric to how gangway.uploadFile derives
+    // its arguments from the active editor.
+    if (!remotePath) {
+      const activeEditor = vscode.window.activeTextEditor;
+      if (!activeEditor) {
+        await vscode.window.showWarningMessage(
+          'No active editor to download. Select a file in the Gangway Remote Explorer, or open a Gangway-downloaded file first.',
+        );
+        return;
+      }
+      const localPath = activeEditor.document.uri.fsPath;
+      const sidecar = await readSidecar(localPath);
+      if (!sidecar) {
+        await vscode.window.showWarningMessage(
+          `${localPath} is not a Gangway-managed file (no sidecar metadata found).`,
+        );
+        return;
+      }
+      if (sidecar.connectionId !== connection.id) {
+        // A tmp file left open from a previously-bound connection would
+        // otherwise run against whatever connection is active now: pushing
+        // a hotfix to the wrong server is the worst outcome this tool can
+        // produce, so it stops here rather than issuing any network call.
+        await vscode.window.showWarningMessage(
+          `${localPath} belongs to a different connection than the one currently active for this workspace ` +
+            `("${connection.name}"). Bind that connection to this workspace before continuing.`,
+        );
+        return;
+      }
+      remotePath = sidecar.remotePath;
+    }
+
+    try {
+      const { localPath, meta } = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: `Gangway: downloading ${remotePath}` },
+        async () => {
+          const adapter = await getAdapter(connection);
+          return downloadFile(adapter, connection, remotePath);
+        },
+      );
+      tmpStatusBar.showFor(connection.name, remotePath, localPath);
+      dirtyDecorations.refresh(vscode.Uri.file(localPath));
+      if (await shouldAutoOpen(localPath, remotePath, meta.size)) {
+        await vscode.window.showTextDocument(vscode.Uri.file(localPath) as never);
+      }
+    } catch (err) {
+      await showCommandError(err, { retry: () => runDownloadFileCommand(node), connection });
+    }
+  }
+
+  /**
+   * Accepts either a tree file node (context-menu invocation), an explicit
+   * local+remote pair (tests, future callers), or nothing at all (the real
+   * Alt+Shift+Q keybinding, which derives everything from the active editor
+   * + sidecar). Every shape funnels into the same wrong-server guard: a
+   * sidecar naming another connection stops the push before any network
+   * call, no matter how the command was invoked.
+   */
+  async function runUploadFileCommand(nodeOrLocalPath?: RemoteTreeNode | string, remotePathArg?: string): Promise<void> {
+    const node = typeof nodeOrLocalPath === 'object' ? nodeOrLocalPath : undefined;
+    // A tree invocation names its own connection; only the keybinding falls
+    // back to the workspace binding (see resolveConnection()).
+    const connection = node ? resolveConnection(node) : requireActiveConnection();
+    if (!connection) return;
+
+    let localPath: string | undefined;
+    let remotePath: string | undefined;
+    if (node?.entry?.path) {
+      remotePath = node.entry.path;
+      localPath = tmpFilePathFor(connection, remotePath);
+    } else {
+      localPath = typeof nodeOrLocalPath === 'string' ? nodeOrLocalPath : undefined;
+      remotePath = remotePathArg;
+    }
+
+    // Real keybinding invocation (Alt+Shift+Q) supplies no arguments at
+    // all -- VS Code keybindings can only pass a static `args` value
+    // declared in package.json, never "the currently active file". The
+    // actual context is simply "whatever tmp file is open right now":
+    // derive both the local path and its remote counterpart from the
+    // active editor + that file's own sidecar metadata.
+    if (!localPath) {
+      const activeEditor = vscode.window.activeTextEditor;
+      if (!activeEditor) {
+        await vscode.window.showWarningMessage('No active editor to upload. Open a Gangway-downloaded file first.');
+        return;
+      }
+      localPath = activeEditor.document.uri.fsPath;
+      const derivedSidecar = await readSidecar(localPath);
+      if (!derivedSidecar) {
+        await vscode.window.showWarningMessage(
+          `${localPath} is not a Gangway-managed file (no sidecar metadata found).`,
+        );
+        return;
+      }
+      if (derivedSidecar.connectionId !== connection.id) {
+        // A tmp file left open from a previously-bound connection would
+        // otherwise run against whatever connection is active now: pushing
+        // a hotfix to the wrong server is the worst outcome this tool can
+        // produce, so it stops here rather than issuing any network call.
+        await vscode.window.showWarningMessage(
+          `${localPath} belongs to a different connection than the one currently active for this workspace ` +
+            `("${connection.name}"). Bind that connection to this workspace before continuing.`,
+        );
+        return;
+      }
+      remotePath = derivedSidecar.remotePath;
+    }
+
+    if (!remotePath) {
+      await vscode.window.showWarningMessage('Upload requires a remote path; none was provided or derived.');
+      return;
+    }
+
+    try {
+      const adapter = await getAdapter(connection);
+      const sidecar = await readSidecar(localPath);
+      // The same wrong-server guard for explicitly-supplied paths: only the
+      // derived (keybinding) shape used to check this, so a programmatic
+      // call with a stale tmp file could push to the wrong server.
+      if (sidecar && sidecar.connectionId !== connection.id) {
+        await vscode.window.showWarningMessage(
+          `${localPath} belongs to a different connection than "${connection.name}". Bind that connection to this workspace before continuing.`,
+        );
+        return;
+      }
+      // A tree-node upload for a file that was never downloaded has no
+      // local mirror yet. Say so directly: without this, the stat below
+      // fails with ENOENT and the user is told the path "does not exist on
+      // the server", which is the exact opposite of the truth.
+      let byteSize: number;
+      try {
+        byteSize = await (await import('node:fs/promises')).default.stat(localPath).then((s) => s.size);
+      } catch {
+        await vscode.window.showWarningMessage(
+          `${localPath} has no local copy yet. Download it first, then upload.`,
+        );
+        return;
+      }
+      const freshStat = await adapter.stat(remotePath);
+      if (sidecar && checkConflict(sidecar, freshStat) === 'conflict') {
+        const decision = await resolveFileConflict(adapter, connection.id, localPath, remotePath, conflictUi);
+        if (decision === 'keepServer') {
+          dirtyDecorations.refresh(vscode.Uri.file(localPath));
+          await vscode.window.showInformationMessage(
+            `Local edits discarded: ${localPath} now matches the server copy of ${remotePath}.`,
+          );
+          return;
+        }
+        if (decision !== 'overwrite') return;
+      }
+      await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: `Gangway: uploading ${remotePath}` },
+        () => uploadFile(adapter, connection.id, localPath as string, remotePath as string, byteSize, auditLog, (message) => output.appendLine(message)),
+      );
+      dirtyDecorations.refresh(vscode.Uri.file(localPath));
+      treeProvider.refresh();
+    } catch (err) {
+      await showCommandError(err, { retry: () => runUploadFileCommand(nodeOrLocalPath, remotePathArg), connection });
+    }
+  }
+
+  /**
+   * `onlyPaths` carries the Retry-failed subset; the error-action Retry
+   * re-runs the whole command instead (fresh plan, fresh conflict scan).
+   */
+  const runDownloadFolderCommand = async (node?: RemoteTreeNode, onlyPaths?: ReadonlySet<string>): Promise<void> => {
+    if (!node?.entry?.path) {
+      await vscode.window.showWarningMessage('Select a folder in the Gangway Remote Explorer to download it.');
+      return;
+    }
+    const connection = resolveConnection(node);
+    if (!connection) return;
+    const remotePath = node.entry.path;
+    const fs = (await import('node:fs/promises')).default;
+    try {
+      const adapter = await getAdapter(connection);
+      const result = await withCancellableProgress(`Downloading ${remotePath}`, (signal, reportProgress) =>
+        runFolderDownload(
+          { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 },
+          async (dirPath) => mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName),
+          async (file) => {
+            const { localPath } = await downloadFile(adapter, connection, file);
+            dirtyDecorations.refresh(vscode.Uri.file(localPath));
+            tmpStatusBar.showFor(connection.name, file, localPath);
+          },
+          reportProgress,
+          {
+            signal,
+            onlyPaths,
+            ensureDir: async (dir) => {
+              await fs.mkdir(tmpFilePathFor(connection, dir), { recursive: true });
+            },
+          },
+        ),
+      );
+      treeProvider.refresh();
+      if (result.symlinked.length > 0) {
+        // Spec §2.3: symlinks download as plain files *with a warning* --
+        // the listing flag existed, but no warning was ever shown.
+        const preview = result.symlinked.slice(0, 3).join(', ');
+        await vscode.window.showWarningMessage(
+          `Downloaded ${result.downloaded.length} file(s), but ${result.symlinked.length} arrived as plain files ` +
+            `(remote symlinks are never recreated locally${result.symlinked.length > 0 ? `: ${preview}` : ''}${result.symlinked.length > 3 ? ', …' : ''}).`,
+        );
+      } else {
+        await vscode.window.showInformationMessage(
+          result.cancelled
+            ? `Cancelled after downloading ${result.downloaded.length} file(s).`
+            : `Downloaded ${result.downloaded.length} file(s).`,
+        );
+      }
+      await handleFolderFailures('download', result.failed, (paths) => runDownloadFolderCommand(node, paths));
+    } catch (err) {
+      await showCommandError(err, { retry: () => runDownloadFolderCommand(node), connection });
+    }
+  };
+
+  const runUploadFolderCommand = async (node?: RemoteTreeNode, onlyPaths?: ReadonlySet<string>): Promise<void> => {
+    if (!node?.entry?.path) {
+      await vscode.window.showWarningMessage('Select a folder in the Gangway Remote Explorer to upload it.');
+      return;
+    }
+    const connection = resolveConnection(node);
+    if (!connection) return;
+    const remotePath = node.entry.path;
+    const fs = (await import('node:fs/promises')).default;
+    try {
+      // A tree-view context-menu command only ever receives the one
+      // clicked node -- there is no second free-form argument a real
+      // invocation can supply. Derive the local tmp mirror the same way
+      // single-file downloads do (tmpFilePathFor mirrors
+      // connection.remotePath-relative paths under the per-connection tmp
+      // root). tmpFilePathFor throws on an escaping path (see tmpPath.ts),
+      // and that throw must land in this catch like every other failure
+      // below, not become an unhandled rejection outside it.
+      const localRoot = tmpFilePathFor(connection, remotePath);
+      // Remote paths are posix; the local mirror is platform-native.
+      // String concatenation here used to break on Windows separators and
+      // bypass the tmpPath containment check -- path.posix.relative keeps
+      // the remote semantics, path.join builds the local path.
+      const toLocal = (file: string): string => path.join(localRoot, path.posix.relative(remotePath, file));
+      const adapter = await getAdapter(connection);
+      const result = await withCancellableProgress(`Uploading ${remotePath}`, (signal, reportProgress) =>
+        runFolderUpload(
+          { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 },
+          async (dirPath) => mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName),
+          async (file) => {
+            const localPath = toLocal(file);
+            let byteSize: number;
+            try {
+              byteSize = (await fs.stat(localPath)).size;
+            } catch {
+              throw new Error(`No local copy of ${file} -- download the folder before uploading it.`);
+            }
+            await uploadFile(adapter, connection.id, localPath, file, byteSize, auditLog, (message) =>
+              output.appendLine(message),
+            );
+            dirtyDecorations.refresh(vscode.Uri.file(localPath));
+          },
+          async (file) => {
+            const sidecar = await readSidecar(toLocal(file));
+            if (!sidecar) return false;
+            const freshStat = await adapter.stat(file);
+            return checkConflict(sidecar, freshStat) === 'conflict';
+          },
+          async (conflictedPaths) => {
+            const choice = await vscode.window.showWarningMessage(
+              `${conflictedPaths.length} file(s) changed on the server since download.`,
+              'Review one by one',
+              'Skip conflicted',
+            );
+            return choice === 'Review one by one' ? 'reviewOneByOne' : 'skipConflicted';
+          },
+          // The per-file review. Without this argument runFolderUpload has
+          // nothing to call, so "Review one by one" silently behaved exactly
+          // like "Skip conflicted": the user was offered a choice that did
+          // nothing. Each conflicted file now gets the same diff and
+          // three-way decision as a single-file push.
+          async (file) => resolveFileConflict(adapter, connection.id, toLocal(file), file, conflictUi),
+          {
+            signal,
+            reportProgress,
+            onlyPaths,
+            ensureDir: async (dir) => {
+              await adapter.mkdir(dir, true);
+            },
+          },
+        ),
+      );
+      treeProvider.refresh();
+      await vscode.window.showInformationMessage(
+        `${result.cancelled ? 'Cancelled. ' : ''}Uploaded ${result.uploaded.length} file(s). ` +
+          `${result.skippedConflicted.length} skipped (conflicted), ${result.skippedSymlinks.length} skipped (symlinks), ${result.failed.length} failed.`,
+      );
+      await handleFolderFailures('upload', result.failed, (paths) => runUploadFolderCommand(node, paths));
+    } catch (err) {
+      await showCommandError(err, { retry: () => runUploadFolderCommand(node), connection });
+    }
+  };
+
+  /**
+   * Read-only compare (spec §2.2): diff the local tmp copy against the
+   * server's current bytes with no push decision attached. Unlike the
+   * conflict flow this never offers Overwrite -- it is for looking, and a
+   * file that was never downloaded has nothing to look at yet.
+   */
+  const runCompareFileCommand = async (node?: RemoteTreeNode): Promise<void> => {
+    const connection = resolveConnection(node);
+    if (!connection) return;
+    if (node?.entry?.isDirectory) {
+      await vscode.window.showWarningMessage('Compare works on files, not folders.');
+      return;
+    }
+    let remotePath = node?.entry?.path;
+    if (!remotePath) {
+      const activeEditor = vscode.window.activeTextEditor;
+      if (!activeEditor) {
+        await vscode.window.showWarningMessage('No active editor to compare. Open a Gangway-downloaded file first.');
+        return;
+      }
+      const sidecar = await readSidecar(activeEditor.document.uri.fsPath);
+      if (!sidecar) {
+        await vscode.window.showWarningMessage('This file is not a Gangway-managed file (no sidecar metadata found).');
+        return;
+      }
+      if (sidecar.connectionId !== connection.id) {
+        await vscode.window.showWarningMessage('This file belongs to a different connection than the active one.');
+        return;
+      }
+      remotePath = sidecar.remotePath;
+    }
+    const fs = (await import('node:fs/promises')).default;
+    try {
+      const localPath = tmpFilePathFor(connection, remotePath);
+      try {
+        await fs.stat(localPath);
+      } catch {
+        await vscode.window.showWarningMessage(`${remotePath} has no local copy yet. Download it first, then compare.`);
+        return;
+      }
+      const adapter = await getAdapter(connection);
+      const serverCopyPath = `${localPath}.gangway-compare-fresh`;
+      try {
+        await adapter.fastGet(remotePath, serverCopyPath);
+        await vscode.commands.executeCommand(
+          'vscode.diff',
+          vscode.Uri.file(localPath),
+          vscode.Uri.file(serverCopyPath),
+          `${path.posix.basename(remotePath)}: local (Gangway) ↔ server (current)`,
+        );
+      } finally {
+        await fs.rm(serverCopyPath, { force: true }).catch(() => {});
+      }
+    } catch (err) {
+      await showCommandError(err, { retry: () => runCompareFileCommand(node), connection });
+    }
+  };
+
   context.subscriptions.push(
     output,
     treeView,
     dirtyDecorationRegistration,
     saveListener,
-    vscode.commands.registerCommand('gangway.downloadFile', async (node?: RemoteTreeNode) => {
-      const connection = resolveConnection(node);
-      if (!connection) return;
-
-      let remotePath = node?.entry?.path;
-
-      // Real keybinding invocation (Alt+Shift+W) supplies no arguments at
-      // all -- a keybinding can only pass a static `args` value declared in
-      // package.json, never "the tree item that's currently selected". The
-      // actual context is "re-download whatever tmp file is open right now,
-      // discarding local edits": derive the remote path from the active
-      // editor's own sidecar, symmetric to how gangway.uploadFile derives
-      // its arguments from the active editor.
-      if (!remotePath) {
-        const activeEditor = vscode.window.activeTextEditor;
-        if (!activeEditor) {
-          await vscode.window.showWarningMessage(
-            'No active editor to download. Select a file in the Gangway Remote Explorer, or open a Gangway-downloaded file first.',
-          );
-          return;
-        }
-        const localPath = activeEditor.document.uri.fsPath;
-        const sidecar = await readSidecar(localPath);
-        if (!sidecar) {
-          await vscode.window.showWarningMessage(
-            `${localPath} is not a Gangway-managed file (no sidecar metadata found).`,
-          );
-          return;
-        }
-        if (sidecar.connectionId !== connection.id) {
-          // A tmp file left open from a previously-bound connection would
-          // otherwise run against whatever connection is active now: pushing
-          // a hotfix to the wrong server is the worst outcome this tool can
-          // produce, so it stops here rather than issuing any network call.
-          await vscode.window.showWarningMessage(
-            `${localPath} belongs to a different connection than the one currently active for this workspace ` +
-              `("${connection.name}"). Bind that connection to this workspace before continuing.`,
-          );
-          return;
-        }
-        remotePath = sidecar.remotePath;
-      }
-
-      try {
-        const { localPath } = await vscode.window.withProgress(
-          { location: vscode.ProgressLocation.Notification, title: `Gangway: downloading ${remotePath}` },
-          async () => {
-            const adapter = await getAdapter(connection);
-            return downloadFile(adapter, connection, remotePath);
-          },
-        );
-        createTmpStatusBarItem(connection.name, remotePath);
-        dirtyDecorations.refresh(vscode.Uri.file(localPath));
-        await vscode.window.showTextDocument(vscode.Uri.file(localPath) as never);
-      } catch (err) {
-        const mapped = mapSftpError(err);
-        await vscode.window.showErrorMessage(mapped.message, ...mapped.actions.map(actionLabel));
-      }
-    }),
-    vscode.commands.registerCommand('gangway.uploadFile', async (localPathArg?: string, remotePathArg?: string) => {
-      const connection = requireActiveConnection();
-      if (!connection) return;
-
-      let localPath = localPathArg;
-      let remotePath = remotePathArg;
-
-      // Real keybinding invocation (Alt+Shift+Q) supplies no arguments at
-      // all -- VS Code keybindings can only pass a static `args` value
-      // declared in package.json, never "the currently active file". The
-      // actual context is simply "whatever tmp file is open right now":
-      // derive both the local path and its remote counterpart from the
-      // active editor + that file's own sidecar metadata.
-      if (!localPath) {
-        const activeEditor = vscode.window.activeTextEditor;
-        if (!activeEditor) {
-          await vscode.window.showWarningMessage('No active editor to upload. Open a Gangway-downloaded file first.');
-          return;
-        }
-        localPath = activeEditor.document.uri.fsPath;
-        const sidecar = await readSidecar(localPath);
-        if (!sidecar) {
-          await vscode.window.showWarningMessage(
-            `${localPath} is not a Gangway-managed file (no sidecar metadata found).`,
-          );
-          return;
-        }
-        if (sidecar.connectionId !== connection.id) {
-          // A tmp file left open from a previously-bound connection would
-          // otherwise run against whatever connection is active now: pushing
-          // a hotfix to the wrong server is the worst outcome this tool can
-          // produce, so it stops here rather than issuing any network call.
-          await vscode.window.showWarningMessage(
-            `${localPath} belongs to a different connection than the one currently active for this workspace ` +
-              `("${connection.name}"). Bind that connection to this workspace before continuing.`,
-          );
-          return;
-        }
-        remotePath = sidecar.remotePath;
-      }
-
-      if (!remotePath) {
-        await vscode.window.showWarningMessage('Upload requires a remote path; none was provided or derived.');
-        return;
-      }
-
-      try {
-        const adapter = await getAdapter(connection);
-        const sidecar = await readSidecar(localPath);
-        const freshStat = await adapter.stat(remotePath);
-        if (sidecar && checkConflict(sidecar, freshStat) === 'conflict') {
-          const decision = await resolveFileConflict(adapter, connection.id, localPath, remotePath, conflictUi);
-          if (decision === 'keepServer') {
-            await vscode.window.showInformationMessage(
-              `Local edits discarded: ${localPath} now matches the server copy of ${remotePath}.`,
-            );
-            return;
-          }
-          if (decision !== 'overwrite') return;
-        }
-        const bytes = await (await import('node:fs/promises')).default.stat(localPath).then((s) => s.size);
-        await vscode.window.withProgress(
-          { location: vscode.ProgressLocation.Notification, title: `Gangway: uploading ${remotePath}` },
-          () => uploadFile(adapter, connection.id, localPath, remotePath, bytes, auditLog, (message) => output.appendLine(message)),
-        );
-        dirtyDecorations.refresh(vscode.Uri.file(localPath));
-      } catch (err) {
-        const mapped = mapSftpError(err);
-        await vscode.window.showErrorMessage(mapped.message, ...mapped.actions.map(actionLabel));
-      }
-    }),
+    tmpStatusBar,
+    editorSwitchListener,
+    // Pooled sockets and idle timers are extension-host resources: dropping
+    // them here keeps a window reload from orphaning live connections.
+    { dispose: () => void pool.dispose() },
+    vscode.commands.registerCommand('gangway.downloadFile', runDownloadFileCommand),
+    vscode.commands.registerCommand('gangway.uploadFile', (nodeOrLocalPath?: RemoteTreeNode | string, remotePathArg?: string) => runUploadFileCommand(nodeOrLocalPath, remotePathArg)),
     vscode.commands.registerCommand('gangway.manageRemotes', () => openManageRemotesPanel(getActiveConnection())),
     vscode.commands.registerCommand('gangway.pickConnection', async () => {
       // The native analogue of PhpStorm's host dropdown: VS Code has no
@@ -469,105 +819,10 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       const connection = requireActiveConnection();
       if (connection) await purgeExpiredTmp(tmpRootFor(connection), 0);
     }),
-    vscode.commands.registerCommand('gangway.downloadFolder', async (node?: RemoteTreeNode) => {
-      if (!node?.entry?.path) {
-        await vscode.window.showWarningMessage('Select a folder in the Gangway Remote Explorer to download it.');
-        return;
-      }
-      const connection = resolveConnection(node);
-      if (!connection) return;
-      const remotePath = node.entry.path;
-      try {
-        const adapter = await getAdapter(connection);
-        const result = await withCancellableProgress(`Downloading ${remotePath}`, (signal, reportProgress) =>
-          runFolderDownload(
-            { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 },
-            async (dirPath) => mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName),
-            async (file) => {
-              const { localPath } = await downloadFile(adapter, connection, file);
-              dirtyDecorations.refresh(vscode.Uri.file(localPath));
-            },
-            reportProgress,
-            { signal },
-          ),
-        );
-        await vscode.window.showInformationMessage(
-          result.cancelled
-            ? `Cancelled after downloading ${result.downloaded.length} file(s).`
-            : `Downloaded ${result.downloaded.length} file(s).`,
-        );
-      } catch (err) {
-        const mapped = mapSftpError(err);
-        await vscode.window.showErrorMessage(mapped.message, ...mapped.actions.map(actionLabel));
-      }
-    }),
-    vscode.commands.registerCommand('gangway.uploadFolder', async (node?: RemoteTreeNode) => {
-      if (!node?.entry?.path) {
-        await vscode.window.showWarningMessage('Select a folder in the Gangway Remote Explorer to upload it.');
-        return;
-      }
-      const connection = resolveConnection(node);
-      if (!connection) return;
-      const remotePath = node.entry.path;
-      try {
-        // A tree-view context-menu command only ever receives the one
-        // clicked node -- there is no second free-form argument a real
-        // invocation can supply. Derive the local tmp mirror the same way
-        // single-file downloads do (tmpFilePathFor mirrors
-        // connection.remotePath-relative paths under the per-connection tmp
-        // root). tmpFilePathFor throws on an escaping path (see tmpPath.ts),
-        // and that throw must land in this catch like every other failure
-        // below, not become an unhandled rejection outside it.
-        const localRoot = tmpFilePathFor(connection, remotePath);
-        const adapter = await getAdapter(connection);
-        const result = await withCancellableProgress(`Uploading ${remotePath}`, (signal, reportProgress) =>
-          runFolderUpload(
-            { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 },
-            async (dirPath) => mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName),
-            async (file) => {
-              const relative = file.slice(remotePath.length);
-              const localPath = `${localRoot}${relative}`;
-              const bytes = (await import('node:fs/promises')).default.stat(localPath).then((s) => s.size);
-              await uploadFile(adapter, connection.id, localPath, file, await bytes, auditLog, (message) =>
-                output.appendLine(message),
-              );
-              dirtyDecorations.refresh(vscode.Uri.file(localPath));
-            },
-            async (file) => {
-              const sidecar = await readSidecar(`${localRoot}${file.slice(remotePath.length)}`);
-              if (!sidecar) return false;
-              const freshStat = await adapter.stat(file);
-              return checkConflict(sidecar, freshStat) === 'conflict';
-            },
-            async (conflictedPaths) => {
-              const choice = await vscode.window.showWarningMessage(
-                `${conflictedPaths.length} file(s) changed on the server since download.`,
-                'Review one by one',
-                'Skip conflicted',
-              );
-              return choice === 'Review one by one' ? 'reviewOneByOne' : 'skipConflicted';
-            },
-            // The per-file review. Without this argument runFolderUpload has
-            // nothing to call, so "Review one by one" silently behaved exactly
-            // like "Skip conflicted": the user was offered a choice that did
-            // nothing. Each conflicted file now gets the same diff and
-            // three-way decision as a single-file push.
-            async (file) => {
-              const localPath = `${localRoot}${file.slice(remotePath.length)}`;
-              return resolveFileConflict(adapter, connection.id, localPath, file, conflictUi);
-            },
-            { signal, reportProgress },
-          ),
-        );
-        await vscode.window.showInformationMessage(
-          `${result.cancelled ? 'Cancelled. ' : ''}Uploaded ${result.uploaded.length} file(s). ` +
-            `${result.skippedConflicted.length} skipped (conflicted), ${result.skippedSymlinks.length} skipped (symlinks).`,
-        );
-      } catch (err) {
-        const mapped = mapSftpError(err);
-        await vscode.window.showErrorMessage(mapped.message, ...mapped.actions.map(actionLabel));
-      }
-    }),
+    vscode.commands.registerCommand('gangway.downloadFolder', runDownloadFolderCommand),
+    vscode.commands.registerCommand('gangway.uploadFolder', runUploadFolderCommand),
+    vscode.commands.registerCommand('gangway.compareFile', runCompareFileCommand),
+    vscode.commands.registerCommand('gangway.refreshExplorer', () => treeProvider.refresh()),
   );
 
   // Exported so tests (Task 19's E2E in particular) can set up a real
@@ -577,6 +832,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
 }
 
 export function deactivate(): void {
-  // ConnectionPool.dispose() is invoked via context.subscriptions in a follow-up
-  // hardening pass; no long-lived resources are created outside activate() today.
+  // Pooled sockets and idle timers are dropped through context.subscriptions
+  // (see activate()); nothing else outlives a command today, so deactivation
+  // needs no extra work.
 }

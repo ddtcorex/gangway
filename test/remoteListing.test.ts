@@ -52,4 +52,13 @@ describe('mapListingToEntries', () => {
   it('does not produce a doubled separator when listing the filesystem root', () => {
     expect(mapListingToEntries('/', [{ name: 'srv', type: 'd' }])[0].path).toBe('/srv');
   });
+
+  it('carries real listing sizes through, defaulting a missing size to 0 instead of NaN', () => {
+    const entries = mapListingToEntries('/var/www', [
+      { name: 'big.bin', type: '-', size: 6 * 1024 * 1024 },
+      { name: 'legacy.php', type: '-' },
+    ]);
+    expect(entries.find((e) => e.path === '/var/www/big.bin')?.size).toBe(6 * 1024 * 1024);
+    expect(entries.find((e) => e.path === '/var/www/legacy.php')?.size).toBe(0);
+  });
 });

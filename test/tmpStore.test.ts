@@ -66,4 +66,20 @@ describe('tmpStore', () => {
     await ensureOwnerOnlyPermissions(file);
     expect((await fs.stat(file)).mode & 0o777).toBe(0o600);
   });
+
+  it('reads a torn (invalid-JSON) sidecar as missing instead of throwing', async () => {
+    const file = path.join(tmpDir, 'torn.php');
+    await fs.writeFile(file, 'content');
+    await fs.writeFile(`${file}.meta.json`, '{"connectionId": "c1", "remotePath": "/x', 'utf8');
+
+    await expect(readSidecar(file)).resolves.toBeUndefined();
+  });
+
+  it('reads a well-formed JSON sidecar of the wrong shape as missing instead of throwing', async () => {
+    const file = path.join(tmpDir, 'foreign.php');
+    await fs.writeFile(file, 'content');
+    await fs.writeFile(`${file}.meta.json`, JSON.stringify({ not: 'a sidecar' }), 'utf8');
+
+    await expect(readSidecar(file)).resolves.toBeUndefined();
+  });
 });

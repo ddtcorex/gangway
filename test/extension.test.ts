@@ -9,7 +9,7 @@ import * as vscode from 'vscode';
 // bodies can reference the exact same object (assert on its vi.fn() calls,
 // reset it between tests). Its shape matches `RawSftpClient`
 // (src/transfer/sftpClientAdapter.ts): connect/end/stat/fastGet/fastPut/
-// posixRename/list. Real SFTP `stat()` returns `modifyTime`, never `mtime` --
+// posixRename/delete/mkdir/list. Real SFTP `stat()` returns `modifyTime`, never `mtime` --
 // `SftpClientAdapter` translates it, so this fake returns `modifyTime` too,
 // exercising the same translation path a real connection would.
 const fakeRawClient = vi.hoisted(() => ({
@@ -24,6 +24,7 @@ const fakeRawClient = vi.hoisted(() => ({
   fastPut: vi.fn().mockResolvedValue(undefined),
   posixRename: vi.fn().mockResolvedValue(undefined),
   delete: vi.fn().mockResolvedValue(undefined),
+  mkdir: vi.fn().mockResolvedValue(undefined),
 }));
 
 function resetFakeClient(): void {
@@ -35,6 +36,7 @@ function resetFakeClient(): void {
   fakeRawClient.fastPut.mockClear();
   fakeRawClient.posixRename.mockClear();
   fakeRawClient.delete.mockClear();
+  fakeRawClient.mkdir.mockClear();
 }
 
 // activate() builds its own ConnectionPool internally (not injectable), and
@@ -46,10 +48,13 @@ function resetFakeClient(): void {
 vi.mock('../src/transfer/connectionPool', () => ({
   ConnectionPool: vi.fn().mockImplementation(() => ({
     getClient: vi.fn().mockResolvedValue(fakeRawClient),
+    invalidate: vi.fn(),
+    dispose: vi.fn().mockResolvedValue(undefined),
   })),
 }));
 
 import { activate } from '../src/extension';
+import { ConnectionPool } from '../src/transfer/connectionPool';
 import { writeSidecar } from '../src/tmpStore';
 import { tmpFilePathFor } from '../src/tmpPath';
 import type { ConnectionConfig } from '../src/types';
@@ -636,6 +641,282 @@ describe('activate - realistic command invocation', () => {
     expect(registerSpy).toHaveBeenCalledWith(
       expect.objectContaining({ provideFileDecoration: expect.any(Function) }),
     );
+  });
+
+  /**
+   * Command-layer wiring from the review pass: error actions that act,
+   * single-item status bar, compare/refresh commands, upload-from-node, the
+   * >5MB/binary open prompt, folder failure reports, and the keep-server
+   * decoration refresh. Same track-and-restore discipline as the conflict
+   * suite above (no global restore: the hoisted fakes must survive).
+   */
+  describe('command-layer wiring (review fixes)', () => {
+    const spies: Array<{ mockRestore: () => void }> = [];
+    function track<T extends { mockRestore: () => void }>(spy: T): T {
+      spies.push(spy);
+      return spy;
+    }
+    afterEach(() => {
+      while (spies.length) spies.pop()!.mockRestore();
+    });
+
+    function nodeFor(remotePath: string, isDirectory = false) {
+      return {
+        connectionId: connection.id,
+        entry: { path: remotePath, isDirectory, isSymbolicLink: false, size: 0 },
+      };
+    }
+
+    function poolInstance(): { invalidate: ReturnType<typeof vi.fn> } {
+      const mocked = vi.mocked(ConnectionPool);
+      return mocked.mock.results[mocked.mock.results.length - 1].value as {
+        invalidate: ReturnType<typeof vi.fn>;
+      };
+    }
+
+    it('Retry from the error dialog re-runs the failed download and invalidates the dead client first', async () => {
+      fakeRawClient.fastGet.mockRejectedValueOnce(
+        Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }),
+      );
+      track(vi.spyOn(vscode.window, 'showErrorMessage').mockResolvedValue('Retry' as never));
+
+      await handlers.get('gangway.downloadFile')!(nodeFor('/var/www/app/config.php'));
+
+      expect(fakeRawClient.fastGet).toHaveBeenCalledTimes(2);
+      expect(poolInstance().invalidate).toHaveBeenCalledWith(connection.id);
+    });
+
+    it('Disconnect from the error dialog drops the client without retrying', async () => {
+      fakeRawClient.fastGet.mockRejectedValueOnce(
+        Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }),
+      );
+      track(vi.spyOn(vscode.window, 'showErrorMessage').mockResolvedValue('Disconnect' as never));
+
+      await handlers.get('gangway.downloadFile')!(nodeFor('/var/www/app/config.php'));
+
+      expect(fakeRawClient.fastGet).toHaveBeenCalledTimes(1);
+      expect(poolInstance().invalidate).toHaveBeenCalledWith(connection.id);
+    });
+
+    it('Open Output from the error dialog reveals the Gangway channel', async () => {
+      const createSpy = track(vi.spyOn(vscode.window, 'createOutputChannel'));
+      const second = activate(fakeContext());
+      const conn2 = await second.connectionManager.add({
+        name: 'staging2',
+        host: 'example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'password',
+      });
+      await second.connectionManager.setWorkspaceBinding(conn2.id);
+      const channel = createSpy.mock.results[createSpy.mock.results.length - 1].value as {
+        show: () => void;
+      };
+      const showSpy = track(vi.spyOn(channel, 'show'));
+      track(vi.spyOn(vscode.window, 'showErrorMessage').mockResolvedValue('Open Output' as never));
+      fakeRawClient.fastGet.mockRejectedValueOnce(new Error('something exotic'));
+
+      await handlers.get('gangway.downloadFile')!({
+        connectionId: conn2.id,
+        entry: { path: '/var/www/app/config.php', isDirectory: false, isSymbolicLink: false, size: 0 },
+      });
+
+      expect(showSpy).toHaveBeenCalledTimes(1);
+      expect(fakeRawClient.fastGet).toHaveBeenCalledTimes(1);
+    });
+
+    it('gangway.compareFile diffs the tmp copy against fresh server bytes without pushing', async () => {
+      const localFile = tmpFilePathFor(connection, '/var/www/app/config.php');
+      await fs.mkdir(path.dirname(localFile), { recursive: true });
+      await fs.writeFile(localFile, 'local content');
+      const execSpy = track(vi.spyOn(vscode.commands, 'executeCommand'));
+
+      await handlers.get('gangway.compareFile')!(nodeFor('/var/www/app/config.php'));
+
+      expect(execSpy).toHaveBeenCalledWith(
+        'vscode.diff',
+        expect.objectContaining({ fsPath: localFile }),
+        expect.objectContaining({ fsPath: `${localFile}.gangway-compare-fresh` }),
+        expect.stringContaining('config.php'),
+      );
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+    });
+
+    it('gangway.compareFile warns instead of diffing a file that was never downloaded', async () => {
+      const warnSpy = track(vi.spyOn(vscode.window, 'showWarningMessage'));
+      const execSpy = track(vi.spyOn(vscode.commands, 'executeCommand'));
+
+      await handlers.get('gangway.compareFile')!(nodeFor('/var/www/app/never.php'));
+
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('no local copy'));
+      expect(execSpy).not.toHaveBeenCalledWith('vscode.diff', expect.anything(), expect.anything(), expect.anything());
+    });
+
+    it('gangway.refreshExplorer refreshes the tree provider', async () => {
+      const createSpy = track(vi.spyOn(vscode.window, 'createTreeView'));
+      activate(fakeContext());
+      const provider = (
+        createSpy.mock.calls[createSpy.mock.calls.length - 1][1] as unknown as {
+          treeDataProvider: { refresh: () => void };
+        }
+      ).treeDataProvider;
+      const refreshSpy = track(vi.spyOn(provider, 'refresh'));
+
+      await handlers.get('gangway.refreshExplorer')!();
+
+      expect(refreshSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('gangway.uploadFile accepts a tree file node, resolving paths through the tmp mirror', async () => {
+      const localFile = tmpFilePathFor(connection, '/var/www/app/config.php');
+      await fs.mkdir(path.dirname(localFile), { recursive: true });
+      await fs.writeFile(localFile, 'edited content');
+      await writeSidecar(localFile, {
+        connectionId: connection.id,
+        remotePath: '/var/www/app/config.php',
+        mtime: 1700000000000,
+        size: 14,
+        downloadedAt: Date.now(),
+      });
+      fakeRawClient.stat.mockResolvedValue({ size: 14, modifyTime: 1700000000000, isDirectory: false, isSymbolicLink: false });
+
+      await handlers.get('gangway.uploadFile')!(nodeFor('/var/www/app/config.php'));
+
+      expect(fakeRawClient.fastPut).toHaveBeenCalledWith(localFile, '/var/www/app/config.php.tmp');
+    });
+
+    it('gangway.uploadFile warns instead of pushing a tree file that was never downloaded', async () => {
+      const warnSpy = track(vi.spyOn(vscode.window, 'showWarningMessage'));
+
+      await handlers.get('gangway.uploadFile')!(nodeFor('/var/www/app/never.php'));
+
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('no local copy'));
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+    });
+
+    it('gangway.uploadFile refuses an explicit path whose sidecar belongs to another connection', async () => {
+      const localPath = path.join(tmpHome, 'foreign-explicit.php');
+      await fs.writeFile(localPath, 'content from another server');
+      await writeSidecar(localPath, {
+        connectionId: 'a-different-connection-id',
+        remotePath: '/var/www/app/config.php',
+        mtime: 1700000000000,
+        size: 5,
+        downloadedAt: Date.now(),
+      });
+      const warnSpy = track(vi.spyOn(vscode.window, 'showWarningMessage'));
+
+      await handlers.get('gangway.uploadFile')!(localPath, '/var/www/app/config.php');
+
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('different connection'));
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+    });
+
+    it('prompts instead of auto-opening a download over 5MB, and opens on confirmation', async () => {
+      fakeRawClient.stat.mockResolvedValue({
+        size: 6 * 1024 * 1024,
+        modifyTime: 1700000000000,
+        isDirectory: false,
+        isSymbolicLink: false,
+      });
+      const warnSpy = track(vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue(undefined as never));
+      const showDocSpy = track(vi.spyOn(vscode.window, 'showTextDocument'));
+
+      await handlers.get('gangway.downloadFile')!(nodeFor('/var/www/app/big.bin'));
+
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('exceeds the 5 MB'), 'Open anyway', 'Keep closed');
+      expect(showDocSpy).not.toHaveBeenCalled();
+
+      warnSpy.mockResolvedValue('Open anyway' as never);
+      await handlers.get('gangway.downloadFile')!(nodeFor('/var/www/app/big.bin'));
+      expect(showDocSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('prompts instead of auto-opening a binary download even when it is small', async () => {
+      fakeRawClient.stat.mockResolvedValue({ size: 64, modifyTime: 1700000000000, isDirectory: false, isSymbolicLink: false });
+      fakeRawClient.fastGet.mockImplementationOnce(async (_remotePath: string, localPath: string) => {
+        await fs.mkdir(path.dirname(localPath), { recursive: true });
+        await fs.writeFile(localPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00, 0x01]));
+      });
+      const warnSpy = track(vi.spyOn(vscode.window, 'showWarningMessage'));
+      const showDocSpy = track(vi.spyOn(vscode.window, 'showTextDocument'));
+
+      await handlers.get('gangway.downloadFile')!(nodeFor('/var/www/app/app.bin'));
+
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('binary'), 'Open anyway', 'Keep closed');
+      expect(showDocSpy).not.toHaveBeenCalled();
+    });
+
+    it('refreshes the dirty badge when Keep server discards local edits', async () => {
+      const { DirtyDecorationProvider } = await import('../src/ui/dirtyDecoration');
+      const localPath = path.join(tmpHome, 'keepserver.php');
+      await fs.writeFile(localPath, 'local edit');
+      await writeSidecar(localPath, {
+        connectionId: connection.id,
+        remotePath: '/var/www/app/config.php',
+        mtime: 1700000000000,
+        size: 5,
+        downloadedAt: Date.now(),
+      });
+      fakeRawClient.stat.mockResolvedValue({ size: 14, modifyTime: 1900000000000, isDirectory: false, isSymbolicLink: false });
+      vscode.window.activeTextEditor = { document: { uri: { fsPath: localPath } } } as unknown as vscode.TextEditor;
+      track(
+        vi.spyOn(vscode.window, 'showWarningMessage').mockImplementation((async (_msg: string, ...items: string[]) =>
+          items.find((item) => /keep server/i.test(item))) as never),
+      );
+      const refreshSpy = track(vi.spyOn(DirtyDecorationProvider.prototype, 'refresh'));
+
+      await handlers.get('gangway.uploadFile')!();
+
+      expect(refreshSpy).toHaveBeenCalled();
+    });
+
+    it('owns a single status item across downloads and hides it when leaving tmp files', async () => {
+      const createSpy = track(vi.spyOn(vscode.window, 'createStatusBarItem'));
+
+      await handlers.get('gangway.downloadFile')!(nodeFor('/var/www/app/a.php'));
+      await handlers.get('gangway.downloadFile')!(nodeFor('/var/www/app/b.php'));
+
+      expect(createSpy).toHaveBeenCalledTimes(1);
+      const item = createSpy.mock.results[0].value as { hide: () => void; show: () => void };
+      const hideSpy = track(vi.spyOn(item, 'hide'));
+      (vscode.window as unknown as { __test_fireDidChangeActiveTextEditor: (e: unknown) => void }).__test_fireDidChangeActiveTextEditor(undefined);
+      expect(hideSpy).toHaveBeenCalled();
+    });
+
+    it('reports per-file folder failures and retries only the failed subset', async () => {
+      fakeRawClient.list.mockImplementation(async (dirPath: string) =>
+        dirPath === '/var/www/app'
+          ? [
+              { name: 'bad.php', type: '-' },
+              { name: 'ok.php', type: '-' },
+            ]
+          : [],
+      );
+      fakeRawClient.fastGet.mockRejectedValueOnce(new Error('fastGet: Failure'));
+      track(vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue('Retry failed' as never));
+
+      await handlers.get('gangway.downloadFolder')!(nodeFor('/var/www/app', true));
+
+      const badCalls = (fakeRawClient.fastGet.mock.calls as Array<[string, string]>).filter(([r]) => r === '/var/www/app/bad.php');
+      const okCalls = (fakeRawClient.fastGet.mock.calls as Array<[string, string]>).filter(([r]) => r === '/var/www/app/ok.php');
+      expect(badCalls).toHaveLength(2);
+      expect(okCalls).toHaveLength(1);
+    });
+
+    it('warns that downloaded symlinks arrived as plain files', async () => {
+      fakeRawClient.list.mockImplementation(async (dirPath: string) =>
+        dirPath === '/var/www/app' ? [{ name: 'link.php', type: 'l' }] : [],
+      );
+      const warnSpy = track(vi.spyOn(vscode.window, 'showWarningMessage'));
+      const infoSpy = track(vi.spyOn(vscode.window, 'showInformationMessage'));
+
+      await handlers.get('gangway.downloadFolder')!(nodeFor('/var/www/app', true));
+
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('plain files'));
+      expect(infoSpy).not.toHaveBeenCalled();
+    });
   });
 });
 

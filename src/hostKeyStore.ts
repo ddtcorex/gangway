@@ -10,8 +10,14 @@ interface HostKeyRecord {
 export class HostKeyStore {
   constructor(private readonly globalState: KeyValueStore) {}
 
+  /**
+   * Host spellings of the same machine (EXAMPLE.com vs example.com. vs
+   * example.com) must map to one record: otherwise each spelling prompts a
+   * fresh TOFU trust for a key that was already trusted, training the user
+   * to click through the very warning that protects them.
+   */
   private keyFor(host: string, port: number): string {
-    return `gangway.hostKey.${host}:${port}`;
+    return `gangway.hostKey.${host.toLowerCase().replace(/\.+$/, '')}:${port}`;
   }
 
   getRecorded(host: string, port: number): HostKeyRecord | undefined {

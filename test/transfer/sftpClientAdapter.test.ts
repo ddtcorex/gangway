@@ -11,6 +11,7 @@ function fakeRawClient(overrides: Partial<RawSftpClient> = {}): RawSftpClient {
     fastPut: async () => undefined,
     posixRename: async () => undefined,
     delete: async () => undefined,
+    mkdir: async () => undefined,
     list: async () => [],
     ...overrides,
   };
@@ -53,7 +54,7 @@ describe('SftpClientAdapter', () => {
     expect(stat.isSymbolicLink).toBe(true);
   });
 
-  it('passes through connect/end/fastGet/fastPut/posixRename/delete/list to the raw client unchanged', async () => {
+  it('passes through connect/end/fastGet/fastPut/posixRename/delete/mkdir/list to the raw client unchanged', async () => {
     const calls: string[] = [];
     const listEntries: RawSftpListEntry[] = [{ name: 'a.txt', type: '-' }];
     const adapter = new SftpClientAdapter(
@@ -80,6 +81,10 @@ describe('SftpClientAdapter', () => {
           calls.push(`delete:${p}`);
           return 'delete-result';
         },
+        mkdir: async (p, recursive) => {
+          calls.push(`mkdir:${p}:${recursive}`);
+          return 'mkdir-result';
+        },
         list: async (p) => {
           calls.push(`list:${p}`);
           return listEntries;
@@ -93,6 +98,7 @@ describe('SftpClientAdapter', () => {
     expect(await adapter.fastPut('/local', '/remote')).toBe('put-result');
     expect(await adapter.posixRename('/a', '/b')).toBe('posixRename-result');
     expect(await adapter.delete('/a.tmp')).toBe('delete-result');
+    expect(await adapter.mkdir('/var/www/app', true)).toBe('mkdir-result');
     expect(await adapter.list('/dir')).toEqual(listEntries);
 
     expect(calls).toEqual([
@@ -102,6 +108,7 @@ describe('SftpClientAdapter', () => {
       'fastPut:/local:/remote',
       'posixRename:/a:/b',
       'delete:/a.tmp',
+      'mkdir:/var/www/app:true',
       'list:/dir',
     ]);
   });

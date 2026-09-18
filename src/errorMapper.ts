@@ -35,14 +35,46 @@ export function mapSftpError(err: unknown): MappedError {
     return { message: rawMessage, actions: ['openOutput'] };
   }
 
-  if (code === 'ENOENT') {
+  if (code === 'ENOENT' || code === '2') {
     return { message: 'The requested path does not exist on the server.', actions: ['retry'] };
   }
   if (code === 'ECONNRESET') {
     return { message: 'The connection was reset by the server.', actions: ['retry', 'disconnect'] };
   }
-  if (/permission denied|\b4\d{2}\b/i.test(rawMessage)) {
-    return { message: `Permission denied by the server: ${rawMessage}`, actions: ['openOutput'] };
+  // SFTP status codes arrive NUMERIC on err.code (verified against
+  // ssh2/ssh2-sftp-client: 2 NO_SUCH_FILE, 3 PERMISSION_DENIED, 4 FAILURE,
+  // ...), while system errors arrive named. A numeric 3 is therefore the
+  // same fact as the words "Permission denied", even when the message text
+  // itself is barren.
+  if (code === '3' || /permission denied|\b4\d{2}\b/i.test(rawMessage)) {
+    return { message: `Permission denied by the server: ${redactSecrets(rawMessage)}`, actions: ['openOutput'] };
   }
-  return { message: rawMessage, actions: ['retry', 'openOutput'] };
+  return { message: redactSecrets(rawMessage), actions: ['retry', 'openOutput'] };
+}
+
+/**
+ * Connection-level failures -- the pooled client for this connection can no
+ * longer be trusted, and the caller should pool.invalidate() it so the next
+ * command reconnects instead of reusing a dead socket. Anything else (a
+ * missing path, a denied permission) says nothing about the health of the
+ * connection itself.
+ */
+export function isConnectionError(err: unknown): boolean {
+  const code = codeOf(err);
+  if (code && ['ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', '6', '7'].includes(code)) return true;
+  const message = err instanceof Error ? err.message : String(err);
+  return /socket hang up|connection (was )?(reset|closed|aborted|lost)|no connection/i.test(message);
+}
+
+/**
+ * Best-effort credential scrubber for server/transport text echoed to the
+ * user. Safety here is layered: nothing in the product logs secrets in the
+ * first place, and this is the backstop for text we did not author (server
+ * banners, transport errors) that might embed a URL with userinfo or a
+ * password assignment.
+ */
+export function redactSecrets(text: string): string {
+  return text
+    .replace(/(\w+:\/\/[^/:@\s]+:)[^@\s]+@/g, '$1***@')
+    .replace(/password\s*[:=]\s*(['"]?)\S+\1/gi, 'password: ***');
 }

@@ -22,6 +22,17 @@ const BACKOFF_MS = [1000, 2000, 4000];
 const IDLE_TIMEOUT_MS = 60_000;
 
 /**
+ * ssh-level keepalive for a pooled client that otherwise sits silent between
+ * hotfixes: without it, a stateful middlebox or the server's own idle
+ * timeout can drop the TCP connection while the pool still considers the
+ * client alive, and the next command fails on a dead socket. 10s interval
+ * with 3 missed replies is chatty enough to hold NAT mappings yet quiet
+ * enough to never matter on any real link.
+ */
+const KEEPALIVE_INTERVAL_MS = 10_000;
+const KEEPALIVE_COUNT_MAX = 3;
+
+/**
  * `ssh2-sftp-client` retries connect() on its own (`retries: 1` with a 25s
  * `retry_minTimeout`, verified in node_modules/ssh2-sftp-client/src/index.js).
  * Nested inside this pool's own 3-attempt 1/2/4s backoff that is two
@@ -115,6 +126,14 @@ function createHostVerifier(
 
 export class ConnectionPool {
   private readonly entries = new Map<string, PooledEntry>();
+  /**
+   * Connects currently being established, keyed by connection id. Two
+   * commands racing the first getClient() for the same connection must
+   * share one handshake: without this, each creates its own client and the
+   * loser's entry overwrites the winner's, orphaning a live socket plus its
+   * idle timer. Cleared on settle; success moves the client to `entries`.
+   */
+  private readonly pending = new Map<string, Promise<SftpClientLike>>();
 
   constructor(
     private readonly clientFactory: SftpClientFactory,
@@ -136,6 +155,9 @@ export class ConnectionPool {
       return Promise.resolve(existing.client);
     }
 
+    const inFlight = this.pending.get(connection.id);
+    if (inFlight) return inFlight;
+
     const result = this.connectWithRetry(connection);
     // Attaching a handler in the same synchronous tick the promise is
     // created marks it "handled" for Node's unhandled-rejection tracking,
@@ -148,7 +170,31 @@ export class ConnectionPool {
     // and logs. This no-op subscriber never runs ahead of, replaces, or
     // consumes the rejection for actual callers.
     result.catch(() => {});
+    this.pending.set(connection.id, result);
+    // then(onFulfilled, onRejected) -- never bare .then(cleanup): the
+    // derived promise must settle successfully either way, or a failed
+    // connect surfaces as a second, unhandled rejection from this line.
+    result.then(
+      () => this.pending.delete(connection.id),
+      () => this.pending.delete(connection.id),
+    );
     return result;
+  }
+
+  /**
+   * Drops whatever is pooled for this connection and best-effort ends it.
+   * The stale-client contract: commands that catch a connection-level
+   * failure (reset, dropped socket) call this, so the failure is a
+   * one-command event -- the next getClient() reconnects instead of reusing
+   * the dead socket. Sync API by design (it is called from catch blocks);
+   * the end() runs detached and can never throw here.
+   */
+  invalidate(connectionId: string): void {
+    const entry = this.entries.get(connectionId);
+    if (!entry) return;
+    this.entries.delete(connectionId);
+    clearTimeout(entry.idleTimer);
+    void entry.client.end().catch(() => {});
   }
 
   private async connectWithRetry(connection: ConnectionConfig): Promise<SftpClientLike> {
@@ -159,6 +205,8 @@ export class ConnectionPool {
       ...baseOptions,
       retries: LIBRARY_INTERNAL_RETRIES,
       readyTimeout: READY_TIMEOUT_MS,
+      keepaliveInterval: KEEPALIVE_INTERVAL_MS,
+      keepaliveCountMax: KEEPALIVE_COUNT_MAX,
       hostHash: 'sha256' as const,
       hostVerifier: createHostVerifier(
         this.hostKeyStore,
@@ -181,11 +229,18 @@ export class ConnectionPool {
         // blip: never retry it, and never re-prompt for the same connect()
         // call. Covers both a user declining and a trust decision that could
         // not be persisted.
-        if (hostVerifierState.blockedByHostKey) throw err;
+        if (hostVerifierState.blockedByHostKey) {
+          await endQuietly(client);
+          throw err;
+        }
         lastError = err;
         if (attempt < BACKOFF_MS.length - 1) await sleep(BACKOFF_MS[attempt]);
       }
     }
+    // Every attempt failed: the client never connected, but the factory
+    // handed us a live object holding a socket/timer. Ending it here keeps
+    // a failing server from leaking one client per retry cycle.
+    await endQuietly(client);
     throw lastError;
   }
 
@@ -202,15 +257,32 @@ export class ConnectionPool {
     const entry = this.entries.get(connectionId);
     if (!entry) return;
     this.entries.delete(connectionId);
-    void entry.client.end();
+    // Timer-driven and detached: a failing end() must not surface as an
+    // unhandled rejection from a setTimeout callback.
+    void entry.client.end().catch(() => {});
   }
 
   async dispose(): Promise<void> {
-    for (const [id, entry] of this.entries) {
+    const closings = [...this.entries.values()].map(async (entry) => {
       clearTimeout(entry.idleTimer);
-      this.entries.delete(id);
-      await entry.client.end();
-    }
+      // One already-dead client must never strand the rest: each close is
+      // independent, so await them all and swallow individually.
+      try {
+        await entry.client.end();
+      } catch {
+        /* already gone */
+      }
+    });
+    this.entries.clear();
+    await Promise.all(closings);
+  }
+}
+
+async function endQuietly(client: SftpClientLike): Promise<void> {
+  try {
+    await client.end();
+  } catch {
+    /* best effort: the connect already failed, there is nothing useful to report about the teardown */
   }
 }
 

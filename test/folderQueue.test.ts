@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildDownloadPlan, buildUploadPlan, TransferCancelledError } from '../src/folderQueue';
+import { buildDownloadPlan, buildUploadPlan, TransferCancelledError, isProbablyBinary, AUTO_OPEN_PROMPT_THRESHOLD_BYTES } from '../src/folderQueue';
 import type { RemoteEntry } from '../src/folderQueue';
 
 function listRemoteFixture(tree: Record<string, RemoteEntry[]>) {
@@ -17,8 +17,8 @@ describe('buildDownloadPlan', () => {
     };
     const plan = await buildDownloadPlan({ path: '/var/www', isDirectory: true, isSymbolicLink: false, size: 0 }, listRemoteFixture(tree));
 
-    expect(plan.map((t) => t.remotePath).sort()).toEqual(['/var/www/app/config.php', '/var/www/shared.php']);
-    const symlinkTask = plan.find((t) => t.remotePath === '/var/www/shared.php');
+    expect(plan.tasks.map((t) => t.remotePath).sort()).toEqual(['/var/www/app/config.php', '/var/www/shared.php']);
+    const symlinkTask = plan.tasks.find((t) => t.remotePath === '/var/www/shared.php');
     expect(symlinkTask?.isSymlink).toBe(true);
   });
 
@@ -26,7 +26,7 @@ describe('buildDownloadPlan', () => {
     const bigFile: RemoteEntry = { path: '/var/www/big.bin', isDirectory: false, isSymbolicLink: false, size: 6 * 1024 * 1024 };
     const tree: Record<string, RemoteEntry[]> = { '/var/www': [bigFile] };
     const plan = await buildDownloadPlan({ path: '/var/www', isDirectory: true, isSymbolicLink: false, size: 0 }, listRemoteFixture(tree));
-    expect(plan[0].promptBeforeAutoOpen).toBe(true);
+    expect(plan.tasks[0].promptBeforeAutoOpen).toBe(true);
   });
 
   it('respects cancellation mid-traversal', async () => {
@@ -66,11 +66,44 @@ describe('buildDownloadPlan', () => {
       listRemote,
     );
     // Plan should include the directory symlink as a leaf entry (not recursed into)
-    expect(plan.map((t) => t.remotePath).sort()).toEqual(['/var/www/app/config.php', '/var/www/self']);
-    const symlinkTask = plan.find((t) => t.remotePath === '/var/www/self');
+    expect(plan.tasks.map((t) => t.remotePath).sort()).toEqual(['/var/www/app/config.php', '/var/www/self']);
+    const symlinkTask = plan.tasks.find((t) => t.remotePath === '/var/www/self');
     expect(symlinkTask?.isSymlink).toBe(true);
     // listRemote should only be called twice: /var/www and /var/www/app (never /var/www/self)
     expect(listRemoteCallCount).toBe(2);
+  });
+
+  it('collects every traversed directory, including empty ones a file-only walk would drop', async () => {
+    const tree: Record<string, RemoteEntry[]> = {
+      '/var/www': [
+        { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 },
+        { path: '/var/www/empty', isDirectory: true, isSymbolicLink: false, size: 0 },
+      ],
+      '/var/www/app': [{ path: '/var/www/app/config.php', isDirectory: false, isSymbolicLink: false, size: 1 }],
+      '/var/www/empty': [],
+    };
+    const plan = await buildDownloadPlan(
+      { path: '/var/www', isDirectory: true, isSymbolicLink: false, size: 0 },
+      listRemoteFixture(tree),
+    );
+    expect(plan.dirs.sort()).toEqual(['/var/www', '/var/www/app', '/var/www/empty']);
+    expect(plan.tasks.map((t) => t.remotePath)).toEqual(['/var/www/app/config.php']);
+  });
+
+  it('restricts tasks to onlyPaths when retrying a failed subset', async () => {
+    const tree: Record<string, RemoteEntry[]> = {
+      '/var/www': [
+        { path: '/var/www/a.php', isDirectory: false, isSymbolicLink: false, size: 1 },
+        { path: '/var/www/b.php', isDirectory: false, isSymbolicLink: false, size: 1 },
+      ],
+    };
+    const plan = await buildDownloadPlan(
+      { path: '/var/www', isDirectory: true, isSymbolicLink: false, size: 0 },
+      listRemoteFixture(tree),
+      undefined,
+      { onlyPaths: new Set(['/var/www/b.php']) },
+    );
+    expect(plan.tasks.map((t) => t.remotePath)).toEqual(['/var/www/b.php']);
   });
 });
 
@@ -106,5 +139,39 @@ describe('buildUploadPlan', () => {
     expect(tasks.map((t) => t.remotePath)).toEqual(['/var/www/app/config.php']);
     // The directory symlink itself should be in skippedSymlinks, not in tasks
     expect(skippedSymlinks).toEqual(['/var/www/shared-dir']);
+  });
+
+  it('collects traversed directories for the caller to ensure remotely', async () => {
+    const tree: Record<string, RemoteEntry[]> = {
+      '/var/www': [{ path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 }],
+      '/var/www/app': [{ path: '/var/www/app/config.php', isDirectory: false, isSymbolicLink: false, size: 1 }],
+    };
+    const { dirs } = await buildUploadPlan(
+      { path: '/var/www', isDirectory: true, isSymbolicLink: false, size: 0 },
+      listRemoteFixture(tree),
+    );
+    expect(dirs.sort()).toEqual(['/var/www', '/var/www/app']);
+  });
+});
+
+describe('isProbablyBinary', () => {
+  it('treats a NUL byte in the head sample as binary', () => {
+    expect(isProbablyBinary(new Uint8Array([0x3c, 0x3f, 0x70, 0x00, 0x68, 0x70]))).toBe(true);
+  });
+
+  it('treats plain text and empty samples as text', () => {
+    expect(isProbablyBinary(new TextEncoder().encode("<?php echo 'hi';"))).toBe(false);
+    expect(isProbablyBinary(new Uint8Array(0))).toBe(false);
+  });
+
+  it('only scans the first 8KB', () => {
+    const sample = new Uint8Array(9000);
+    sample.fill(0x41);
+    sample[8999] = 0;
+    expect(isProbablyBinary(sample)).toBe(false);
+  });
+
+  it('exports a 5MB auto-open prompt threshold', () => {
+    expect(AUTO_OPEN_PROMPT_THRESHOLD_BYTES).toBe(5 * 1024 * 1024);
   });
 });

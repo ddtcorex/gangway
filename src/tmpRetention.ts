@@ -9,7 +9,13 @@ async function collectFiles(dir: string, out: string[]): Promise<void> {
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       await collectFiles(fullPath, out);
-    } else if (!entry.name.endsWith('.meta.json')) {
+    } else if (!entry.isSymbolicLink() && !entry.name.endsWith('.meta.json')) {
+      // Symlinks are never Gangway downloads (fastGet writes regular files),
+      // so anything link-shaped in the tmp root is foreign: leave it alone
+      // rather than purging (or following) something the user did not put
+      // there through this tool. Dirent.isDirectory() is false for a symlink
+      // pointing at a directory, so without this guard such a link would be
+      // collected as a *file* and unlinked below.
       out.push(fullPath);
     }
   }

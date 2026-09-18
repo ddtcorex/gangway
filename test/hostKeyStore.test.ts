@@ -35,4 +35,11 @@ describe('HostKeyStore', () => {
     await store.record('example.com', 22, 'fp-abc');
     expect(store.verify('example.com', 2222, 'fp-abc')).toBe('trusted-new');
   });
+
+  it('treats case and trailing-dot spellings of the same host as one record', async () => {
+    const store = new HostKeyStore(fakeStore());
+    await store.record('Example.COM.', 22, 'fp-abc');
+    expect(store.verify('example.com', 22, 'fp-abc')).toBe('match');
+    expect(store.verify('EXAMPLE.com.', 22, 'fp-abc')).toBe('match');
+  });
 });

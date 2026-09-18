@@ -1,4 +1,20 @@
-const AUTO_OPEN_PROMPT_THRESHOLD_BYTES = 5 * 1024 * 1024;
+export const AUTO_OPEN_PROMPT_THRESHOLD_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Binary sniff for the auto-open prompt (spec §2.3: files >5MB *or binary*
+ * prompt before auto-open; the download itself always proceeds). A NUL byte
+ * in the first 8KB is the standard binary tell for source-ish payloads; an
+ * empty sample is text by definition. Conservative on purpose: a false
+ * "binary" only costs the user one prompt, while a false "text" opens a
+ * 200MB minified bundle or a keystore in the editor.
+ */
+export function isProbablyBinary(sample: Uint8Array): boolean {
+  const limit = Math.min(sample.length, 8192);
+  for (let i = 0; i < limit; i++) {
+    if (sample[i] === 0) return true;
+  }
+  return false;
+}
 
 export interface RemoteEntry {
   path: string;
@@ -14,6 +30,27 @@ export interface TransferTask {
   promptBeforeAutoOpen: boolean;
 }
 
+export interface DownloadPlan {
+  tasks: TransferTask[];
+  /**
+   * Every real directory traversed (root first), so the caller can recreate
+   * the tree even where it holds no files: a walk that only returns files
+   * silently drops empty directories.
+   */
+  dirs: string[];
+}
+
+export interface UploadPlan {
+  tasks: TransferTask[];
+  skippedSymlinks: string[];
+  dirs: string[];
+}
+
+export interface PlanFilter {
+  /** Retry-a-subset: when present, only these remote paths become tasks. */
+  onlyPaths?: ReadonlySet<string>;
+}
+
 export class TransferCancelledError extends Error {
   constructor() {
     super('Transfer was cancelled.');
@@ -26,50 +63,63 @@ function checkCancelled(signal?: AbortSignal): void {
   if (signal?.aborted) throw new TransferCancelledError();
 }
 
-async function walk(root: RemoteEntry, listRemote: ListRemote, signal: AbortSignal | undefined, out: RemoteEntry[]): Promise<void> {
+async function walk(
+  root: RemoteEntry,
+  listRemote: ListRemote,
+  signal: AbortSignal | undefined,
+  out: { files: RemoteEntry[]; dirs: string[] },
+): Promise<void> {
   checkCancelled(signal);
+  out.dirs.push(root.path);
   const children = await listRemote(root.path);
   checkCancelled(signal);
   for (const child of children) {
     if (child.isDirectory && !child.isSymbolicLink) {
       await walk(child, listRemote, signal, out);
     } else {
-      out.push(child);
+      out.files.push(child);
     }
   }
 }
 
-export async function buildDownloadPlan(root: RemoteEntry, listRemote: ListRemote, signal?: AbortSignal): Promise<TransferTask[]> {
-  const entries: RemoteEntry[] = [];
-  await walk(root, listRemote, signal, entries);
-  return entries.map((entry) => ({
+function toTask(entry: RemoteEntry): TransferTask {
+  return {
     remotePath: entry.path,
     size: entry.size,
     isSymlink: entry.isSymbolicLink,
     promptBeforeAutoOpen: entry.size > AUTO_OPEN_PROMPT_THRESHOLD_BYTES,
-  }));
+  };
+}
+
+export async function buildDownloadPlan(
+  root: RemoteEntry,
+  listRemote: ListRemote,
+  signal?: AbortSignal,
+  filter?: PlanFilter,
+): Promise<DownloadPlan> {
+  const collected = { files: [] as RemoteEntry[], dirs: [] as string[] };
+  await walk(root, listRemote, signal, collected);
+  const tasks = collected.files.map(toTask).filter((t) => !filter?.onlyPaths || filter.onlyPaths.has(t.remotePath));
+  return { tasks, dirs: collected.dirs };
 }
 
 export async function buildUploadPlan(
   root: RemoteEntry,
   listRemote: ListRemote,
   signal?: AbortSignal,
-): Promise<{ tasks: TransferTask[]; skippedSymlinks: string[] }> {
-  const entries: RemoteEntry[] = [];
-  await walk(root, listRemote, signal, entries);
+  filter?: PlanFilter,
+): Promise<UploadPlan> {
+  const collected = { files: [] as RemoteEntry[], dirs: [] as string[] };
+  await walk(root, listRemote, signal, collected);
   const tasks: TransferTask[] = [];
   const skippedSymlinks: string[] = [];
-  for (const entry of entries) {
+  for (const entry of collected.files) {
+    if (filter?.onlyPaths && !filter.onlyPaths.has(entry.path)) continue;
     if (entry.isSymbolicLink) {
       skippedSymlinks.push(entry.path);
       continue;
     }
-    tasks.push({
-      remotePath: entry.path,
-      size: entry.size,
-      isSymlink: false,
-      promptBeforeAutoOpen: entry.size > AUTO_OPEN_PROMPT_THRESHOLD_BYTES,
-    });
+    tasks.push(toTask(entry));
   }
-  return { tasks, skippedSymlinks };
+  return { tasks, skippedSymlinks, dirs: collected.dirs };
 }

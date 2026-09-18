@@ -46,7 +46,10 @@ export function mapListingToEntries(
       path: `${base}/${entry.name}`,
       isDirectory: entry.type === 'd',
       isSymbolicLink: entry.type === 'l',
-      size: 0,
+      // Real list entries carry attrs.size (0 for directories); older
+      // fixtures omit it. A missing size must stay 0, never NaN/undefined:
+      // folderQueue's promptBeforeAutoOpen compares against it.
+      size: entry.size ?? 0,
     });
   }
   return safe;

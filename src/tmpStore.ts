@@ -14,11 +14,34 @@ export async function writeSidecar(tmpFilePath: string, meta: SidecarMeta): Prom
 }
 
 export async function readSidecar(tmpFilePath: string): Promise<SidecarMeta | undefined> {
+  let raw: string;
   try {
-    const raw = await fs.readFile(sidecarPathFor(tmpFilePath), 'utf8');
-    return JSON.parse(raw) as SidecarMeta;
+    raw = await fs.readFile(sidecarPathFor(tmpFilePath), 'utf8');
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throw err;
   }
+  // A torn write (crash between writeFile's open and flush) leaves invalid
+  // JSON; a foreign file leaves valid JSON of the wrong shape. Both must
+  // read as "no usable baseline" rather than throw: every caller already
+  // handles undefined (warn-and-stop for derived paths, push-with-fresh-
+  // check for explicit ones), while a throw aborts the command AND the
+  // retention sweep that also reads sidecars.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    typeof (parsed as SidecarMeta).mtime !== 'number' ||
+    typeof (parsed as SidecarMeta).size !== 'number' ||
+    typeof (parsed as SidecarMeta).remotePath !== 'string' ||
+    typeof (parsed as SidecarMeta).connectionId !== 'string'
+  ) {
+    return undefined;
+  }
+  return parsed as SidecarMeta;
 }

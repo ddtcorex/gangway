@@ -98,6 +98,8 @@ export interface MockTextEditor {
   document: { uri: { fsPath: string } };
 }
 
+const onDidChangeActiveTextEditorEmitter = new EventEmitter<MockTextEditor | undefined>();
+
 export const window = {
   // Mutable so tests can simulate "the user has this file open" by
   // assigning `vscode.window.activeTextEditor = { document: { uri: { fsPath: '...' } } }`
@@ -136,6 +138,10 @@ export const window = {
     ) => Promise<T>,
   ) => task({ report: () => {} }, { isCancellationRequested: false, onCancellationRequested: () => new Disposable() }),
   registerFileDecorationProvider: (_provider: unknown) => new Disposable(),
+  onDidChangeActiveTextEditor: onDidChangeActiveTextEditorEmitter.event,
+  /** Test-only: simulates the user switching editor tabs. */
+  __test_fireDidChangeActiveTextEditor: (editor: MockTextEditor | undefined) =>
+    onDidChangeActiveTextEditorEmitter.fire(editor),
 };
 
 const onDidSaveTextDocumentEmitter = new EventEmitter<{ uri: { fsPath: string } }>();

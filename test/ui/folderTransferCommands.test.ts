@@ -140,3 +140,122 @@ describe('runFolderUpload', () => {
     expect(result.skippedConflicted).toEqual(['/var/www/conflicted.php']);
   });
 });
+
+describe('folder transfer failure isolation', () => {
+  const tree: Record<string, RemoteEntry[]> = {
+    '/var/www': [
+      { path: '/var/www/a.php', isDirectory: false, isSymbolicLink: false, size: 10 },
+      { path: '/var/www/b.php', isDirectory: false, isSymbolicLink: false, size: 20 },
+      { path: '/var/www/c.php', isDirectory: false, isSymbolicLink: false, size: 30 },
+    ],
+  };
+
+  it('keeps downloading the rest when one file fails, and reports the failure instead of throwing', async () => {
+    const downloadFile = vi.fn().mockImplementation(async (remotePath: string) => {
+      if (remotePath === '/var/www/b.php') throw new Error('fastGet: Failure');
+    });
+    const reportProgress = vi.fn();
+
+    const result = await runFolderDownload(root, listRemoteFixture(tree), downloadFile, reportProgress);
+
+    expect(downloadFile).toHaveBeenCalledTimes(3);
+    expect(result.downloaded).toEqual(['/var/www/a.php', '/var/www/c.php']);
+    expect(result.failed).toEqual([{ remotePath: '/var/www/b.php', message: 'fastGet: Failure' }]);
+    expect(result.cancelled).toBe(false);
+    expect(reportProgress).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps uploading the rest when one file fails, and reports the failure instead of throwing', async () => {
+    const uploadFile = vi.fn().mockImplementation(async (remotePath: string) => {
+      if (remotePath === '/var/www/b.php') throw new Error('fastPut: Permission denied');
+    });
+
+    const result = await runFolderUpload(
+      root,
+      listRemoteFixture(tree),
+      uploadFile,
+      vi.fn().mockResolvedValue(false),
+      vi.fn(),
+    );
+
+    expect(uploadFile).toHaveBeenCalledTimes(3);
+    expect(result.uploaded).toEqual(['/var/www/a.php', '/var/www/c.php']);
+    expect(result.failed).toEqual([{ remotePath: '/var/www/b.php', message: 'fastPut: Permission denied' }]);
+  });
+
+  it('records an unreadable file as failed instead of aborting the whole upload on a stat error', async () => {
+    const uploadFile = vi.fn().mockResolvedValue(undefined);
+    const checkForConflict = vi.fn().mockImplementation(async (remotePath: string) => {
+      if (remotePath === '/var/www/a.php') throw new Error('stat: No such file');
+      return false;
+    });
+
+    const result = await runFolderUpload(
+      root,
+      listRemoteFixture(tree),
+      uploadFile,
+      checkForConflict,
+      vi.fn(),
+    );
+
+    expect(result.uploaded).toEqual(['/var/www/b.php', '/var/www/c.php']);
+    expect(result.failed).toEqual([{ remotePath: '/var/www/a.php', message: 'stat: No such file' }]);
+    expect(uploadFile).not.toHaveBeenCalledWith('/var/www/a.php');
+  });
+
+  it('reports downloaded symlinks separately so the caller can warn they arrived as plain files', async () => {
+    const symlinkTree: Record<string, RemoteEntry[]> = {
+      '/var/www': [
+        { path: '/var/www/real.php', isDirectory: false, isSymbolicLink: false, size: 1 },
+        { path: '/var/www/link.php', isDirectory: false, isSymbolicLink: true, size: 1 },
+      ],
+    };
+    const result = await runFolderDownload(root, listRemoteFixture(symlinkTree), vi.fn(), vi.fn());
+
+    expect(result.downloaded).toEqual(['/var/www/real.php', '/var/www/link.php']);
+    expect(result.symlinked).toEqual(['/var/www/link.php']);
+  });
+
+  it('ensures every plan directory through the caller-supplied callback', async () => {
+    const dirTree: Record<string, RemoteEntry[]> = {
+      '/var/www': [{ path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 }],
+      '/var/www/app': [{ path: '/var/www/app/config.php', isDirectory: false, isSymbolicLink: false, size: 1 }],
+    };
+    const ensureDir = vi.fn().mockResolvedValue(undefined);
+
+    await runFolderDownload(root, listRemoteFixture(dirTree), vi.fn(), vi.fn(), { ensureDir });
+    expect(ensureDir).toHaveBeenCalledWith('/var/www');
+    expect(ensureDir).toHaveBeenCalledWith('/var/www/app');
+
+    ensureDir.mockClear();
+    await runFolderUpload(
+      root,
+      listRemoteFixture(dirTree),
+      vi.fn(),
+      vi.fn().mockResolvedValue(false),
+      vi.fn(),
+      undefined,
+      { ensureDir },
+    );
+    expect(ensureDir).toHaveBeenCalledWith('/var/www');
+    expect(ensureDir).toHaveBeenCalledWith('/var/www/app');
+  });
+
+  it('retries only the failed subset when onlyPaths is given', async () => {
+    const uploadFile = vi.fn().mockResolvedValue(undefined);
+
+    const result = await runFolderUpload(
+      root,
+      listRemoteFixture(tree),
+      uploadFile,
+      vi.fn().mockResolvedValue(false),
+      vi.fn(),
+      undefined,
+      { onlyPaths: new Set(['/var/www/b.php']) },
+    );
+
+    expect(uploadFile).toHaveBeenCalledTimes(1);
+    expect(uploadFile).toHaveBeenCalledWith('/var/www/b.php');
+    expect(result.uploaded).toEqual(['/var/www/b.php']);
+  });
+});

@@ -20,7 +20,9 @@
       { "command": "gangway.uploadFile", "title": "Gangway: Upload File" },
       { "command": "gangway.cleanupCache", "title": "Gangway: Cleanup Cache (Remove All Local Tmp Files for This Connection)" },
       { "command": "gangway.downloadFolder", "title": "Gangway: Download Folder" },
-      { "command": "gangway.uploadFolder", "title": "Gangway: Upload Folder" }
+      { "command": "gangway.uploadFolder", "title": "Gangway: Upload Folder" },
+      { "command": "gangway.compareFile", "title": "Gangway: Compare File with Server" },
+      { "command": "gangway.refreshExplorer", "title": "Gangway: Refresh Explorer", "icon": "$(refresh)" }
     ],
     "keybindings": [
       { "command": "gangway.uploadFile", "key": "alt+shift+q", "mac": "option+shift+q", "when": "editorTextFocus && resourceScheme == file" },
@@ -28,12 +30,15 @@
     ],
     "menus": {
       "view/title": [
-        { "command": "gangway.manageRemotes", "when": "view == gangway.remoteExplorer", "group": "navigation" }
+        { "command": "gangway.manageRemotes", "when": "view == gangway.remoteExplorer", "group": "navigation" },
+        { "command": "gangway.refreshExplorer", "when": "view == gangway.remoteExplorer", "group": "navigation" }
       ],
       "view/item/context": [
         { "command": "gangway.downloadFolder", "when": "view == gangway.remoteExplorer && viewItem == gangway.folder" },
         { "command": "gangway.uploadFolder", "when": "view == gangway.remoteExplorer && viewItem == gangway.folder" },
-        { "command": "gangway.downloadFile", "when": "view == gangway.remoteExplorer && viewItem == gangway.file" }
+        { "command": "gangway.downloadFile", "when": "view == gangway.remoteExplorer && viewItem == gangway.file" },
+        { "command": "gangway.uploadFile", "when": "view == gangway.remoteExplorer && viewItem == gangway.file" },
+        { "command": "gangway.compareFile", "when": "view == gangway.remoteExplorer && viewItem == gangway.file" }
       ]
     },
     "views": {

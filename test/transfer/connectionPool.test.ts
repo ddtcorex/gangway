@@ -167,4 +167,95 @@ describe('ConnectionPool', () => {
     expect(connectMock).toHaveBeenCalledTimes(3);
     vi.useRealTimers();
   });
+
+  it('creates only one client when getClient is called concurrently before the first connect settles', async () => {
+    let resolveConnect!: () => void;
+    const client = {
+      connect: vi.fn().mockImplementation(() => new Promise<void>((resolve) => (resolveConnect = resolve))),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    const factory = { create: vi.fn().mockReturnValue(client) };
+    const prompt = { confirmNewOrChangedKey: vi.fn().mockResolvedValue('accept') };
+    const pool = new ConnectionPool(factory, hostKeyStore, prompt, secrets);
+
+    const first = pool.getClient(connection);
+    const second = pool.getClient(connection);
+    // connectWithRetry awaits secret resolution before touching the client,
+    // so the connect call itself lands a few microtasks later: wait for it
+    // rather than assuming it happened synchronously.
+    await vi.waitFor(() => expect(client.connect).toHaveBeenCalledTimes(1));
+    resolveConnect();
+    await expect(first).resolves.toBe(client);
+    await expect(second).resolves.toBe(client);
+    expect(factory.create).toHaveBeenCalledTimes(1);
+    expect(client.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('ends the client when all connect attempts fail, instead of leaking it', async () => {
+    vi.useFakeTimers();
+    const client = {
+      connect: vi.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    const factory = { create: vi.fn().mockReturnValue(client) };
+    const prompt = { confirmNewOrChangedKey: vi.fn().mockResolvedValue('accept') };
+    const pool = new ConnectionPool(factory, hostKeyStore, prompt, secrets);
+
+    const first = pool.getClient(connection);
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(4000);
+    await expect(first).rejects.toThrow('ECONNREFUSED');
+    expect(client.end).toHaveBeenCalledTimes(1);
+    // A failed connect must not leave a pooled entry behind either.
+    const second = pool.getClient(connection);
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(4000);
+    await expect(second).rejects.toThrow('ECONNREFUSED');
+    expect(factory.create).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it('invalidate() drops and ends the pooled client so the next call reconnects', async () => {
+    const client = clientThatInvokesHostVerifier(Buffer.from('deadbeef', 'hex'));
+    const factory = { create: vi.fn().mockReturnValue(client) };
+    const prompt = { confirmNewOrChangedKey: vi.fn().mockResolvedValue('accept') };
+    const pool = new ConnectionPool(factory, hostKeyStore, prompt, secrets);
+
+    await pool.getClient(connection);
+    pool.invalidate(connection.id);
+    expect(client.end).toHaveBeenCalledTimes(1);
+    await pool.getClient(connection);
+    expect(factory.create).toHaveBeenCalledTimes(2);
+  });
+
+  it('dispose() ends every client even when one of them rejects', async () => {
+    const good = clientThatInvokesHostVerifier(Buffer.from('a'));
+    const bad = clientThatInvokesHostVerifier(Buffer.from('b'));
+    bad.end = vi.fn().mockRejectedValue(new Error('already closed'));
+    const factory = { create: vi.fn().mockReturnValueOnce(good).mockReturnValueOnce(bad) };
+    const prompt = { confirmNewOrChangedKey: vi.fn().mockResolvedValue('accept') };
+    const pool = new ConnectionPool(factory, hostKeyStore, prompt, secrets);
+
+    await pool.getClient(connection);
+    await pool.getClient({ ...connection, id: 'c2' });
+    await pool.dispose();
+
+    expect(good.end).toHaveBeenCalledTimes(1);
+    expect(bad.end).toHaveBeenCalledTimes(1);
+  });
+
+  it('enables ssh-level keepalive so an idle pooled client is not silently dropped server-side', async () => {
+    const client = clientThatInvokesHostVerifier(Buffer.from('deadbeef', 'hex'));
+    const factory = { create: vi.fn().mockReturnValue(client) };
+    const prompt = { confirmNewOrChangedKey: vi.fn().mockResolvedValue('accept') };
+    const pool = new ConnectionPool(factory, hostKeyStore, prompt, secrets);
+
+    await pool.getClient(connection);
+
+    const options = client.connect.mock.calls[0][0] as { keepaliveInterval: number; keepaliveCountMax: number };
+    expect(options.keepaliveInterval).toBeGreaterThan(0);
+    expect(options.keepaliveCountMax).toBeGreaterThan(0);
+  });
 });

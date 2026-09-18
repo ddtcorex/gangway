@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mapSftpError, actionLabel } from '../src/errorMapper';
+import { mapSftpError, actionLabel, isConnectionError, redactSecrets } from '../src/errorMapper';
 import { AuthResolutionError } from '../src/authResolver';
 
 describe('actionLabel', () => {
@@ -67,5 +67,64 @@ describe('mapSftpError', () => {
     const mapped = mapSftpError(err);
     expect(mapped.message).toMatch(/permission denied/i);
     expect(mapped.actions).toEqual(['openOutput']);
+  });
+
+  it('maps numeric SFTP status code 3 (PERMISSION_DENIED) even when the message text is barren', () => {
+    const err = Object.assign(new Error('fastPut failed'), { code: 3 });
+    const mapped = mapSftpError(err);
+    expect(mapped.message).toMatch(/permission denied/i);
+    expect(mapped.actions).toEqual(['openOutput']);
+  });
+
+  it('maps numeric SFTP status code 2 (NO_SUCH_FILE) to the not-exist message with Retry', () => {
+    const err = Object.assign(new Error('stat failed'), { code: 2 });
+    const mapped = mapSftpError(err);
+    expect(mapped.message).toMatch(/does not exist on the server/i);
+    expect(mapped.actions).toContain('retry');
+  });
+
+  it('leaves other numeric SFTP status codes on the generic path with their message intact', () => {
+    const err = Object.assign(new Error('rename failed'), { code: 4 });
+    const mapped = mapSftpError(err);
+    expect(mapped.message).toContain('rename failed');
+    expect(mapped.actions).toEqual(expect.arrayContaining(['retry', 'openOutput']));
+  });
+
+  it('redacts embedded credentials before echoing server text to the user', () => {
+    const err = new Error('connect failed for sftp://deploy:hunter2@example.com/var/www');
+    const mapped = mapSftpError(err);
+    expect(mapped.message).not.toContain('hunter2');
+    expect(mapped.message).toContain('deploy:***@');
+  });
+});
+
+describe('isConnectionError', () => {
+  it.each(['ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND'])('treats %s as connection-level', (code) => {
+    expect(isConnectionError(Object.assign(new Error('x'), { code }))).toBe(true);
+  });
+
+  it('treats numeric SFTP NO_CONNECTION/CONNECTION_LOST as connection-level', () => {
+    expect(isConnectionError(Object.assign(new Error('x'), { code: 6 }))).toBe(true);
+    expect(isConnectionError(Object.assign(new Error('x'), { code: 7 }))).toBe(true);
+  });
+
+  it('does not treat application errors as connection-level', () => {
+    expect(isConnectionError(Object.assign(new Error('no such file'), { code: 'ENOENT' }))).toBe(false);
+    expect(isConnectionError(new Error('Permission denied'))).toBe(false);
+    expect(isConnectionError(Object.assign(new Error('rename failed'), { code: 4 }))).toBe(false);
+  });
+});
+
+describe('redactSecrets', () => {
+  it('masks userinfo passwords in URLs', () => {
+    expect(redactSecrets('open sftp://deploy:hunter2@example.com/x')).toBe('open sftp://deploy:***@example.com/x');
+  });
+
+  it('masks password assignments', () => {
+    expect(redactSecrets('save failed: password=hunter2')).toBe('save failed: password: ***');
+  });
+
+  it('leaves ordinary messages untouched', () => {
+    expect(redactSecrets('Permission denied by the server')).toBe('Permission denied by the server');
   });
 });
