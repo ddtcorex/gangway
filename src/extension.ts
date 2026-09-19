@@ -38,6 +38,7 @@ import {
   emptyTrash,
   guardUploadTarget,
   inventoryTrash,
+  isNotFoundError,
   moveToTrash,
   parseUriList,
   pasteEntries,
@@ -1484,7 +1485,10 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       try {
         entries = mapListingToEntries(dir, await adapter.list(dir), reportUnsafeListingName);
       } catch (err) {
-        if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
+        // A sync root that does not exist yet on the server (e.g. a fresh
+        // workspace mapping) scans as empty, not as a failure. Numeric SFTP
+        // codes included (see isNotFoundError): the real server reports '2'.
+        if (isNotFoundError(err)) continue;
         throw err;
       }
       for (const entry of entries) {

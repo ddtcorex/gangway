@@ -849,6 +849,20 @@ describe('activate - realistic command invocation', () => {
       infoSpy.mockRestore();
     });
 
+    it('treats a missing remote root as empty, including numeric SFTP codes', async () => {
+      await fs.writeFile(path.join(workRoot, 'hello.php'), '<?php');
+      fakeRawClient.list.mockRejectedValue(Object.assign(new Error('list: No such file /var/www'), { code: '2' }));
+      mockWindow.__test_queuePick((items: unknown[]) => items);
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.syncWorkspaceUp')!();
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Synced 1'));
+      const puts = (fakeRawClient.fastPut as ReturnType<typeof vi.fn>).mock.calls as Array<[string, string]>;
+      expect(puts.some(([local]) => local === path.join(workRoot, 'hello.php'))).toBe(true);
+      infoSpy.mockRestore();
+    });
+
     it('picks between explicit mappings when several match', async () => {
       const subDir = path.join(workRoot, 'sub');
       await fs.mkdir(subDir, { recursive: true });

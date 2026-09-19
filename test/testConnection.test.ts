@@ -87,7 +87,10 @@ describe('testConnection cancellation', () => {
       readFile: async () => Buffer.from(''),
       signal: controller.signal,
     };
-    const pending = testConnection(deps as never, { host: 'h', port: 22, username: 'u', authMethod: 'agent' as const });
+    // Password auth: option resolution is local-only with no environment
+    // reads (agent auth depends on SSH_AUTH_SOCK, which CI does not set —
+    // the dial would resolve before the abort ever fires).
+    const pending = testConnection(deps as never, { host: 'h', port: 22, username: 'u', authMethod: 'password' as const, password: 'x' });
     setTimeout(() => controller.abort(), 10);
     await expect(pending).rejects.toBeInstanceOf(TransferCancelledError);
     expect(end).toHaveBeenCalledTimes(1);
