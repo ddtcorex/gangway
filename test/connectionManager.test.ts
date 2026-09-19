@@ -91,7 +91,6 @@ describe('ConnectionManager', () => {
     expect(manager.getWorkspaceBinding()).toBeUndefined();
   });
 
-<<<<<<< HEAD
   describe('scope: workspace vs global', () => {
     it('defaults a new connection to global scope when none is given', async () => {
       const created = await manager.add({

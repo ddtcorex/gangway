@@ -119,6 +119,11 @@ function runConnectionFormScript(options: {
     'addRemote',
     'formHeading',
     'remotesList',
+    'testConnection',
+    'testResult',
+    'mappingsRows',
+    'mappingAdd',
+    'mappingsError',
   ];
   const elements = new Map<string, FakeElement>();
   for (const id of ids) {
@@ -508,6 +513,66 @@ describe('connection form webview script', () => {
 
       expect(dom.elements.get('formHeading')!.textContent).toBe('Edit Connection: staging');
       expect(dom.remoteRows()).toHaveLength(1);
+    });
+  });
+
+  describe('test connection button', () => {
+    it('sends the unsaved draft with no id when Test is clicked', () => {
+      const dom = runConnectionFormScript({
+        nonce: 'n',
+        values: { host: 'h', port: '22', username: 'u', authMethod: 'password', password: 'x' },
+      });
+
+      dom.elements.get('testConnection')!.emit('click');
+
+      expect(dom.posted).toEqual([
+        {
+          nonce: 'n',
+          type: 'testConnection',
+          payload: {
+            draft: { host: 'h', port: 22, username: 'u', authMethod: 'password', password: 'x' },
+          },
+        },
+      ]);
+    });
+
+    it('renders the classified result inline without touching the form', () => {
+      const dom = runConnectionFormScript({ nonce: 'n', values: { host: 'h' } });
+
+      dom.emitWindowMessage({ nonce: 'n', type: 'testConnectionResult', ok: false, kind: 'auth-failed', message: 'bad password' });
+
+      expect(dom.elements.get('testResult')!.textContent).toBe('bad password');
+      expect(dom.elements.get('host')!.value).toBe('h');
+    });
+  });
+
+  describe('path mappings table', () => {
+    function setMappingRow(dom: ReturnType<typeof runConnectionFormScript>, index: number, local: string, remote: string): void {
+      const row = dom.elements.get('mappingsRows')!.children[index];
+      (row.children[0] as { value: string }).value = local;
+      (row.children[1] as { value: string }).value = remote;
+    }
+
+    it('includes complete mappings in the save payload and drops blank rows', () => {
+      const dom = runConnectionFormScript({ nonce: 'n', values: { authMethod: 'agent' } });
+      setMappingRow(dom, 0, '/w', '/srv/app');
+      dom.elements.get('mappingAdd')!.emit('click');
+
+      dom.elements.get('save')!.emit('click');
+
+      expect(dom.posted[0].payload).toMatchObject({
+        mappings: [{ localPath: '/w', remotePath: '/srv/app' }],
+      });
+    });
+
+    it('blocks save with an inline error on a half-filled row', () => {
+      const dom = runConnectionFormScript({ nonce: 'n', values: { authMethod: 'agent' } });
+      setMappingRow(dom, 0, '/w', '');
+
+      dom.elements.get('save')!.emit('click');
+
+      expect(dom.posted).toHaveLength(0);
+      expect(dom.elements.get('mappingsError')!.textContent).toMatch(/row 1/i);
     });
   });
 });

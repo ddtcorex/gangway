@@ -268,9 +268,18 @@
     <vscode-text-field id="remotePath" placeholder="/var/www" value="{{REMOTE_PATH}}"></vscode-text-field>
   </div>
 
+  <h2>Path Mappings</h2>
+  <div class="field">
+    <div id="mappingsRows"></div>
+    <vscode-button id="mappingAdd" appearance="secondary">+ Add mapping</vscode-button>
+    <div id="mappingsError" role="alert"></div>
+  </div>
+
   <div class="actions">
     <vscode-button id="save">Save</vscode-button>
+    <vscode-button id="testConnection" appearance="secondary">Test Connection</vscode-button>
   </div>
+  <div id="testResult" role="status"></div>
 </form>
 </div>
 </div>

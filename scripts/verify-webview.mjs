@@ -258,8 +258,13 @@ async function main() {
 
     const beforeSwitch = await authFieldsVisible();
 
-    // Real mouse click on the Save button, not element.click().
+    // Real mouse click on the Save button, not element.click(). The button
+    // sits below the headless viewport fold, where synthetic mouse events
+    // hit nothing (elementFromPoint returns null there): scroll it into view
+    // first, or every click silently misses and zero messages get posted.
     const clickSave = async () => {
+      await cdp.evaluate(`document.getElementById('save').scrollIntoView({ block: 'center' });`);
+      await sleep(200);
       const rect = await cdp.evaluate(`
         (() => { const r = document.getElementById('save').getBoundingClientRect();
                  return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()
