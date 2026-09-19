@@ -198,6 +198,48 @@ const TEMPLATE = `<!DOCTYPE html>
   .two-up .field {
     flex: 1;
   }
+  /* Path-mapping rows: one row per line (local | remote | Browse | remove)
+     with the note spanning the full width below. The DOM stays the flat
+     [local, remote, browse, remove, note] tree main.js reads positionally,
+     so this is layout only -- no script change. */
+  .mappings-header,
+  .mapping-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto auto;
+    gap: 8px;
+    align-items: center;
+  }
+  .mappings-header {
+    margin-bottom: 4px;
+  }
+  .mappings-header span {
+    font-size: 0.9em;
+    opacity: 0.85;
+  }
+  .mapping-row {
+    margin-bottom: 6px;
+  }
+  .mapping-note {
+    grid-column: 1 / -1;
+    font-size: 0.85em;
+    color: var(--vscode-descriptionForeground);
+  }
+  /* An empty note still creates a grid track (plus its row gap), so hide it
+     instead of leaving dead space under every note-less row. */
+  .mapping-note:empty {
+    display: none;
+  }
+  #mappingAdd {
+    margin-top: 6px;
+  }
+  @media (max-width: 480px) {
+    .mappings-header {
+      display: none;
+    }
+    .mapping-row {
+      grid-template-columns: 1fr;
+    }
+  }
   .field-checkbox {
     margin-bottom: 12px;
   }
@@ -386,6 +428,7 @@ const TEMPLATE = `<!DOCTYPE html>
 
   <h2>Path Mappings</h2>
   <div class="field">
+    <div class="mappings-header" aria-hidden="true"><span>Local folder</span><span>Remote path</span><span></span><span></span></div>
     <div id="mappingsRows"></div>
     <vscode-button id="mappingAdd" appearance="secondary">+ Add mapping</vscode-button>
     <div id="mappingsError" role="alert"></div>
