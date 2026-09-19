@@ -729,6 +729,83 @@ describe('activate - realistic command invocation', () => {
     );
   });
 
+  describe('sync folder', () => {
+    async function activateFrozenConnection() {
+      const fresh = activate(fakeContext());
+      const frozen = await fresh.connectionManager.add({
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'password',
+        frozen: true,
+      });
+      await fresh.connectionManager.setWorkspaceBinding(frozen.id);
+      return frozen;
+    }
+
+    afterEach(() => {
+      mockWindow.__test_resetAnswers();
+    });
+
+    it('gangway.syncFolder blocks the up direction on a frozen connection', async () => {
+      const frozen = await activateFrozenConnection();
+      resetFakeClient();
+      mockWindow.__test_queuePick('Upload (local → server)');
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.syncFolder')!({
+        connectionId: frozen.id,
+        entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 },
+      });
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('frozen'));
+      expect(fakeRawClient.list).not.toHaveBeenCalled();
+      infoSpy.mockRestore();
+    });
+
+    it('gangway.syncFolder allows the down direction on a frozen connection', async () => {
+      const frozen = await activateFrozenConnection();
+      resetFakeClient();
+      mockWindow.__test_queuePick('Download (server → local)');
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.syncFolder')!({
+        connectionId: frozen.id,
+        entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 },
+      });
+
+      expect(fakeRawClient.list).toHaveBeenCalled();
+      expect(infoSpy).not.toHaveBeenCalledWith(expect.stringContaining('frozen'));
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('No differences'));
+      infoSpy.mockRestore();
+    });
+
+    it('gangway.syncFolder states the excluded count and uploads only the picked files', async () => {
+      const { tmpFilePathFor } = await import('../src/tmpPath');
+      const localRoot = tmpFilePathFor(connection, '/var/www/app');
+      await fs.mkdir(path.join(localRoot, 'node_modules'), { recursive: true });
+      await fs.writeFile(path.join(localRoot, 'keep.php'), '<?php');
+      await fs.writeFile(path.join(localRoot, 'node_modules', 'skip.js'), 'x');
+      mockWindow.__test_queuePick('Upload (local → server)');
+      mockWindow.__test_queueWarning('Proceed-excluded');
+      mockWindow.__test_queuePick((items: unknown[]) => items);
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.syncFolder')!({
+        connectionId: connection.id,
+        entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 },
+      });
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Synced 1'));
+      const puts = (fakeRawClient.fastPut as ReturnType<typeof vi.fn>).mock.calls as Array<[string, string]>;
+      expect(puts.some(([local]) => local.endsWith('keep.php'))).toBe(true);
+      expect(puts.some(([local, remote]) => local.includes('skip.js') || remote.includes('skip.js'))).toBe(false);
+      infoSpy.mockRestore();
+    });
+  });
+
   /**
    * Conflict Guard, second half. Before this, a detected conflict showed a
    * warning telling the user to "Open the diff and choose Overwrite, Keep

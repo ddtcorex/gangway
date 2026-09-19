@@ -110,6 +110,10 @@
         "title": "Gangway: Empty Trash (Permanent)"
       },
       {
+        "command": "gangway.syncFolder",
+        "title": "Gangway: Sync Folder with Preview"
+      },
+      {
         "command": "gangway.refreshExplorer",
         "title": "Gangway: Refresh Explorer",
         "icon": "$(refresh)"
@@ -165,6 +169,10 @@
         },
         {
           "command": "gangway.pasteEntries",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
+        },
+        {
+          "command": "gangway.syncFolder",
           "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
         },
         {
