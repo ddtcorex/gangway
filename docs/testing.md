@@ -8,7 +8,7 @@ defines what "tested" means here.
 | Layer | Runner | Scope | Gate |
 |---|---|---|---|
 | Unit | `vitest run` (`pnpm test`) | `test/**/*.test.ts` mirroring `src/`; `vscode` resolves to `test/mocks/vscode.ts` (see `vitest.config.ts`) | CI `verify` job, must be green |
-| Docker-integration | `vitest run` + `test/fixtures/docker-compose.sftp.yml` (`atmoz/sftp`, port 2223) | Real `ssh2-sftp-client` semantics the mocks cannot express (rename-exists, partial `fastGet`, `stat` sizes) | Required locally for transfer changes; e2e job in CI |
+| Docker-integration | `vitest run` + `test/fixtures/docker-compose.sftp.yml` (`atmoz/sftp`, port 2223), enabled by `GANGWAY_SFTP` (`test/*.integration.test.ts`: remoteOps trash/backup/restore, mapping sync, sync walk) | Real `ssh2-sftp-client` semantics the mocks cannot express (rename-exists, partial `fastGet`, `stat` sizes, numeric SFTP error codes) | Required locally for transfer changes; e2e job in CI |
 | E2E | `pnpm run build:e2e && pnpm run test:e2e` (`@vscode/test-electron`, needs display — `xvfb-run` in CI) | Full hotfix flow: form → connect → download → edit → `Alt+Shift+Q` → verify bytes; conflict path with out-of-band server edit | CI `e2e` job, must be green |
 | Webview (real browser) | `node scripts/verify-webview.mjs` (headless Chrome over CDP, needs `Emulation.setDeviceMetricsOverride` before any real-click test or `Input.dispatchMouseEvent` silently lands on the wrong pixel) | The Save button actually posts, for both password and key auth, driven with real mouse events against the shipped `dist/media` bundle — jsdom cannot execute a `<script type="module">` at all | CI `e2e` job (separate step), must be green |
 
@@ -70,6 +70,21 @@ host-only dir appears.
    listener was ever attached. Both bugs predated this repo's CI entirely
    (the script was never wired into anything, so nobody ran it) -- it is now
    gated in CI's `e2e` job specifically so that stops happening again.
+8. **A real SFTP server speaks numeric codes, never `ENOENT`.**
+   `ssh2-sftp-client` surfaces failures like `'2'` (= NO_SUCH_FILE) with
+   no `code`/`errno` fields, so any not-found check that only matches
+   `ENOENT` passes against mocks and dies on the first live run (found
+   2026-09-19: trash/inventory/sweep + the sync walk all broke in CI's
+   e2e while every unit test stayed green). Centralize the spelling in
+   one helper (`isNotFoundError`: `ENOENT` | `'2'` | `/no such file/`)
+   and prove it with a docker-integration or e2e run -- mocks encode the
+   author's assumption, which is exactly what is being tested.
+9. **jsdom mocks can mask real-DOM behavior.** `test/mocks/vscode.ts` is
+   not the only fake: any hand-rolled DOM stand-in (e.g. `children` as a
+   plain Array) hides APIs the production DOM lacks
+   (`HTMLCollection` has no `.find` -- found 2026-09-19, green in jsdom,
+   thrown in the real form). Webview logic that touches the live DOM
+   must pass `scripts/verify-webview.mjs`, not just jsdom.
 
 ## 3. Coverage expectations
 

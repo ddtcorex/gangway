@@ -24,32 +24,50 @@ artifact is `dist/extension.js` (esbuild) via `vsce`.
   `SidecarMeta`). `src/ssh2-sftp-client.d.ts` — local structural types for
   `ssh2-sftp-client` (do not import from the lib's internals).
 - `src/transfer/` — `connectionPool.ts` (one pooled client per connection,
-  60s idle evict, 3x backoff), `sftpClientAdapter.ts` (raw-listing mapping),
-  `downloadFile.ts` (stage + atomic rename + sidecar write),
-  `uploadFile.ts` (temp + rename + baseline refresh).
+  60s idle evict, 3x backoff), `sftpClientAdapter.ts` (raw-listing mapping,
+  plus `rmdir`/`chmod`), `downloadFile.ts` (stage + atomic rename + sidecar
+  write), `uploadFile.ts` (backup-before-overwrite + temp + rename +
+  baseline refresh).
 - `src/` transfer plumbing — `remoteListing.ts`, `folderQueue.ts` (recursive
   walk, abortable), `tmpPath.ts` (slug + containment), `tmpStore.ts`
   (sidecar), `tmpRetention.ts` (7-day auto-purge), `connectionManager.ts`
   (connections split across globalState/workspaceState by scope --
   'global' vs 'workspace', see `types.ts`'s `ConnectionScope` -- plus the
-  workspace binding key), `govardImport.ts` (`.govard.yml` remote import,
-  defaults to workspace scope), `editSession.ts` (cross-window edit-lock:
+  workspace binding key; `ConnectionConfig` also carries `frozen`,
+  `excludePatterns`, `mappings`), `govardImport.ts` (`.govard.yml` remote
+  import, defaults to workspace scope, `protected` remotes import frozen),
+  `editSession.ts` (cross-window edit-lock:
   warns before opening a file another live Gangway session already has
   open), `secretStore.ts` (SecretStorage only), `authResolver.ts` (exact
-  selected method, no fallback), `hostKeyStore.ts` (TOFU), `conflictGuard.ts`
+  selected method, no fallback), `hostKeyStore.ts` (TOFU) +
+  `hostVerifier.ts` (shared verifier extracted for reuse),
+  `conflictGuard.ts`
   (stat-compare, no bulk overwrite by design), `dirtyState.ts`,
   `errorMapper.ts` (human messages + actions), `auditLog.ts` (append-only
-  upload log), `withTimeout.ts` (bounds on secret-store calls).
+  op log, versioned entries), `withTimeout.ts` (bounds on secret-store calls).
+- `src/` safe remote ops — `remoteOps.ts` (the choke point for every
+  mutating op: freeze gate, trash/backup movers with sibling-first +
+  in-root fallback, create/rename/duplicate/chmod, clipboard paste,
+  trash inventory/restore/empty, 30-day sweep, typed-confirm +
+  uri-list/drop helpers), `pathMapping.ts` (longest-prefix
+  workspace↔remote resolution, overlap notes), `syncPreview.ts`
+  (tree compare + sidecar-aware classify + bounded-parallel walk),
+  `excludes.ts` (exclude-pattern matcher),
+  `testConnection.ts` (one-off draft dial, 15s bound, static messages).
 - `src/ui/` — `gangwayTreeProvider.ts` (lazy explorer, double-click to
-  open), `connectionFormPanel.ts` + `connectionFormHtml.ts` +
-  `media/connectionForm/` (Webview UI Toolkit form), `conflictResolution.ts`
+  open, drag & drop controller), `connectionFormPanel.ts` +
+  `connectionFormHtml.ts` +
+  `media/connectionForm/` (Webview UI Toolkit form with Test button +
+  mappings table), `conflictResolution.ts`
   (fresh-copy diff flow), `folderTransferCommands.ts`,
+  `treeClipboard.ts` (remote-tree cut/copy state),
   `dirtyDecoration.ts`, `statusBar.ts`, `cancellable.ts` (races a task
   against a VS Code cancellation token).
 - `test/` — vitest suites mirroring `src/` (+ `mocks/vscode.ts`, aliased as
-  `vscode` in `vitest.config.ts`); `test/e2e/` runs only inside a real
-  extension host (excluded from vitest); `test/fixtures/` holds the docker
-  sftp fixture (gitignored seed data, reset per run).
+  `vscode` in `vitest.config.ts`); `test/*.integration.test.ts` runs only
+  with `GANGWAY_SFTP` set (docker sftp fixture); `test/e2e/` runs only
+  inside a real extension host (excluded from vitest); `test/fixtures/`
+  holds the docker sftp fixture (gitignored seed data, reset per run).
 - `scripts/verify-webview.mjs` — real-browser CSP/nonce/Save-flow check for
   the form, gated in CI's `e2e` job (see `docs/testing.md`).
 - `esbuild.js` → `dist/extension.js` (shipped). `tsc` → `out/` (e2e only).
