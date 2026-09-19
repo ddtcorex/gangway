@@ -69,3 +69,21 @@ describe('classifyRow', () => {
     ).toBe('Only-remote');
   });
 });
+
+describe('mapLimit', () => {
+  it('parallelizes with a cap while preserving order', async () => {
+    const { mapLimit } = await import('../src/syncPreview');
+    let running = 0;
+    let peak = 0;
+    const out = await mapLimit([1, 2, 3, 4, 5], 2, async (n: number) => {
+      running += 1;
+      peak = Math.max(peak, running);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      running -= 1;
+      return n * 10;
+    });
+    expect(out).toEqual([10, 20, 30, 40, 50]);
+    expect(peak).toBeLessThanOrEqual(2);
+    expect(peak).toBeGreaterThan(1);
+  });
+});

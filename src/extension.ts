@@ -49,7 +49,7 @@ import {
   typedConfirmMatches,
 } from './remoteOps';
 import { clearClipboard, copyToClipboard, cutToClipboard, type ClipboardState } from './ui/treeClipboard';
-import { classifyRow, describeExcludedSelection, toQuickPickRow, type SyncRow } from './syncPreview';
+import { classifyRow, describeExcludedSelection, mapLimit, toQuickPickRow, type SyncRow } from './syncPreview';
 import { effectiveExcludes, matchesExcludes } from './excludes';
 import { defaultMapping, isRemoteInsideRoot } from './pathMapping';
 import type { FileConflictDecision } from './conflictGuard';
@@ -1474,6 +1474,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     excludedCounter: { count: number },
   ): Promise<SyncWalkRemote[]> {
     const out: SyncWalkRemote[] = [];
+    const pendingStats: Array<{ rel: string; size: number; remotePath: string }> = [];
     const seen = new Set<string>([syncRoot]);
     // Like the local walk, excluded subtrees are descended (list only, no
     // stats) so the excluded-files count stays honest. Reserved dirs are
@@ -1509,11 +1510,16 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         if (entry.isSymbolicLink) {
           skippedSymlinks.push(entry.path);
         } else {
-          const stat = await adapter.stat(entry.path);
-          out.push({ rel, size: entry.size, mtime: stat.mtime });
+          pendingStats.push({ rel, size: entry.size, remotePath: entry.path });
         }
       }
     }
+    // One round-trip per file would serialize a big folder; stat with bounded
+    // parallelism instead (order irrelevant — rows sort later by path).
+    await mapLimit(pendingStats, 8, async (file) => {
+      const stat = await adapter.stat(file.remotePath);
+      out.push({ rel: file.rel, size: file.size, mtime: stat.mtime });
+    });
     return out;
   }
 
@@ -1834,6 +1840,16 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
             return fallback ? [{ localRoot: fallback.local, remoteRoot: fallback.remote }] : [];
           })();
     if (candidates.length === 0) return;
+    // Workspace-contained mappings sort first: a local path outside every
+    // open folder still syncs when picked, but open-folder mappings lead.
+    const normLocal = (p: string): string => (p.length > 1 && p.endsWith(path.sep) ? p.slice(0, -1) : p);
+    const contained = (localRoot: string): boolean =>
+      roots.some((root) => {
+        const peer = normLocal(localRoot);
+        const base = normLocal(root);
+        return peer === base || peer.startsWith(`${base}${path.sep}`);
+      });
+    candidates.sort((a, b) => Number(contained(b.localRoot)) - Number(contained(a.localRoot)));
     let choice = candidates[0];
     if (candidates.length > 1) {
       type MappingRow = vscode.QuickPickItem & { localRoot: string; remoteRoot: string };

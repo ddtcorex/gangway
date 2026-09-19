@@ -127,3 +127,27 @@ export function classifyRow(input: ClassifyInput): SyncVerdict {
   // happen here (both sides exist) — unreachable by construction.
   return 'Conflict';
 }
+
+/**
+ * Bounded-parallel map: results keep input order, at most `limit`
+ * callbacks run at once. Used for per-file remote stats in sync walks so a
+ * big folder does not pay one round-trip at a time. Single-threaded
+ * index-handoff is race-free (no await between read and increment).
+ */
+export async function mapLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(Math.max(limit, 1), items.length) }, async () => {
+    while (next < items.length) {
+      const current = next;
+      next += 1;
+      results[current] = await fn(items[current], current);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}

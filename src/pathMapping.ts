@@ -8,13 +8,19 @@ import type { ConnectionConfig, PathMapping } from './types';
  */
 function normalize(p: string): string {
   const forward = p.replace(/\\/g, '/');
-  if (forward.length > 1 && forward.endsWith('/')) return forward.slice(0, -1);
-  return forward;
+  return forward.replace(/\/+$/, '') || '/';
 }
 
 function isWithinOrEqual(candidate: string, prefix: string): boolean {
   if (prefix === '/') return candidate.startsWith('/');
   return candidate === prefix || candidate.startsWith(`${prefix}/`);
+}
+
+/** Joins a matched base with the unmatched remainder (which starts with '/'
+ * or is empty by the prefix rule), without doubling a '/' root. */
+function joinRemainder(base: string, rest: string): string {
+  if (base === '/') return rest.startsWith('/') ? rest : `/${rest}`;
+  return base + rest;
 }
 
 /**
@@ -63,10 +69,10 @@ export function resolveLocalToRemote(
     .sort((a, b) => b.local.length - a.local.length);
   const match = candidates[0];
   if (!match) return undefined;
-  const remote = match.remote + local.slice(match.local.length);
+  const remote = joinRemainder(match.remote, local.slice(match.local.length));
   // A resolved remote outside the connection root is refused (spec §2.4):
   // the form may hold such a draft (red violation), but sync never runs it.
-  if (!isWithinOrEqual(remote, normalize(connection.remotePath))) return undefined;
+  if (!isRemoteInsideRoot(connection, remote)) return undefined;
   return remote;
 }
 
@@ -85,7 +91,11 @@ export function resolveRemoteToLocal(
     .sort((a, b) => b.remote.length - a.remote.length);
   const match = candidates[0];
   if (!match) return undefined;
-  return match.local + remote.slice(match.remote.length);
+  const local = joinRemainder(match.local, remote.slice(match.remote.length));
+  // Symmetric with resolveLocalToRemote: a resolved local is only usable
+  // when the matched remote itself sits inside the connection root.
+  if (!isRemoteInsideRoot(connection, match.remote)) return undefined;
+  return local;
 }
 
 /**

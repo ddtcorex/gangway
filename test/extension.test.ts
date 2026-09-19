@@ -898,6 +898,27 @@ describe('activate - realistic command invocation', () => {
       expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
       errSpy.mockRestore();
     });
+
+    it('sorts workspace-contained mappings ahead of outside ones', async () => {
+      const outsideDir = path.join(tmpHome, 'outside');
+      await fs.mkdir(outsideDir, { recursive: true });
+      await connectionManager.update(connection.id, {
+        mappings: [
+          { localPath: outsideDir, remotePath: '/var/www/out' },
+          { localPath: workRoot, remotePath: '/var/www/in' },
+        ],
+      });
+      let offered: string[] = [];
+      mockWindow.__test_queuePick((items: unknown[]) => {
+        offered = (items as Array<{ label: string }>).map((i) => i.label);
+        return (items as unknown[])[0];
+      });
+
+      await handlers.get('gangway.syncWorkspaceUp')!();
+
+      expect(offered[0]).toContain(workRoot);
+      expect(offered[1]).toContain(outsideDir);
+    });
   });
 
   describe('freeze toggle', () => {

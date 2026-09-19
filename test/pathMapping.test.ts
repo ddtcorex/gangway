@@ -84,3 +84,21 @@ describe('isRemoteInsideRoot', () => {
     expect(isRemoteInsideRoot(rooted, '/anything/at/all')).toBe(true);
   });
 });
+
+describe('pathMapping hardening', () => {
+  it('strips all trailing slashes and keeps the root intact', async () => {
+    const { resolveLocalToRemote } = await import('../src/pathMapping');
+    const conn = { id: 'c', name: 'p', host: 'h', port: 22, username: 'u', remotePath: '/srv/app', authMethod: 'agent' as const };
+    expect(resolveLocalToRemote(conn, ['/home/u/proj//'], '/home/u/proj/a.php')).toBe('/srv/app/a.php');
+    expect(resolveLocalToRemote({ ...conn, remotePath: '/' }, ['/w'], '/w/a.php')).toBe('/a.php');
+  });
+
+  it('resolveRemoteToLocal refuses matches outside the connection root', async () => {
+    const { resolveRemoteToLocal } = await import('../src/pathMapping');
+    const rogue = {
+      id: 'c', name: 'p', host: 'h', port: 22, username: 'u', remotePath: '/srv/app', authMethod: 'agent' as const,
+      mappings: [{ localPath: '/w', remotePath: '/other/place' }],
+    };
+    expect(resolveRemoteToLocal(rogue, ['/w'], '/other/place/a.php')).toBeUndefined();
+  });
+});
