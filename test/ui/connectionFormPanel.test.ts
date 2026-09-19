@@ -676,3 +676,26 @@ describe('ConnectionFormPanel test connection and mappings', () => {
     );
   });
 });
+
+describe('ConnectionFormPanel test cancellation', () => {
+  it('stays silent when the user cancels the dial', async () => {
+    const { TransferCancelledError } = await import('../../src/folderQueue');
+    const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+    const secrets = new ConnectionSecretStore(fakeSecretStore());
+    const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+    const runConnectionTest = vi.fn().mockRejectedValue(new TransferCancelledError());
+    const panel = new ConnectionFormPanel(
+      rawPanel as never, manager, secrets,
+      () => {}, async () => undefined, async () => true, () => {}, runConnectionTest,
+    );
+    const postMessage = vi.spyOn(rawPanel.webview, 'postMessage');
+
+    await (rawPanel as unknown as { __test_fireMessage: (m: unknown) => Promise<void> }).__test_fireMessage({
+      nonce: panel.nonce,
+      type: 'testConnection',
+      payload: { draft: { host: 'h', port: 22, username: 'u', authMethod: 'agent' } },
+    });
+
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+});

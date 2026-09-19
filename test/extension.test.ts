@@ -855,8 +855,8 @@ describe('activate - realistic command invocation', () => {
       await fs.writeFile(path.join(subDir, 'f.php'), '<?php');
       await connectionManager.update(connection.id, {
         mappings: [
-          { localPath: workRoot, remotePath: '/srv/app' },
-          { localPath: subDir, remotePath: '/srv/other' },
+          { localPath: workRoot, remotePath: '/var/www/app' },
+          { localPath: subDir, remotePath: '/var/www/other' },
         ],
       });
       mockWindow.__test_queuePick((items: unknown[]) => (items as unknown[])[1]);
@@ -866,9 +866,23 @@ describe('activate - realistic command invocation', () => {
       await handlers.get('gangway.syncWorkspaceUp')!();
 
       const puts = (fakeRawClient.fastPut as ReturnType<typeof vi.fn>).mock.calls as Array<[string, string]>;
-      expect(puts.some(([, remote]) => remote.startsWith('/srv/other/'))).toBe(true);
-      expect(puts.some(([, remote]) => remote.startsWith('/srv/app/'))).toBe(false);
+      expect(puts.some(([, remote]) => remote.startsWith('/var/www/other/'))).toBe(true);
+      expect(puts.some(([, remote]) => remote.startsWith('/var/www/app/'))).toBe(false);
       infoSpy.mockRestore();
+    });
+
+    it('refuses a mapping whose remote sits outside the connection root', async () => {
+      await connectionManager.update(connection.id, {
+        mappings: [{ localPath: workRoot, remotePath: '/other/place' }],
+      });
+      const errSpy = vi.spyOn(vscode.window, 'showErrorMessage');
+
+      await handlers.get('gangway.syncWorkspaceUp')!();
+
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('outside'));
+      expect(fakeRawClient.list).not.toHaveBeenCalled();
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+      errSpy.mockRestore();
     });
   });
 

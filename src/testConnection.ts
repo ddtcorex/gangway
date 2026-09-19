@@ -1,4 +1,4 @@
-import { withTimeout } from './withTimeout';
+import { TransferCancelledError } from './folderQueue';
 import { createHostVerifier, type HostKeyPrompt, type HostVerifierState } from './hostVerifier';
 import type { HostKeyStore } from './hostKeyStore';
 import type { AuthMethod } from './types';
@@ -28,6 +28,12 @@ export interface TestConnectionDeps {
   hostKeyStore: HostKeyStore;
   prompt: HostKeyPrompt;
   readFile(path: string): Promise<Buffer>;
+  /**
+   * Cooperative cancellation (the extension wires VS Code's cancellation
+   * token here): aborting destroys the in-flight handshake and rejects with
+   * TransferCancelledError, which callers must let through unclassified.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -63,19 +69,23 @@ export async function testConnection(deps: TestConnectionDeps, draft: TestDraft)
     return classifyTestError(err, state, draft);
   }
   try {
-    await withTimeout(
-      client.connect({
+    await dialWithTimeout(
+      client,
+      deps,
+      {
         ...options,
         retries: 0,
         readyTimeout: TEST_TIMEOUT_MS,
         hostHash: 'sha256' as const,
         hostVerifier: createHostVerifier(deps.hostKeyStore, deps.prompt, draft.host, draft.port, state),
-      }),
-      TEST_TIMEOUT_MS,
-      'Timed out while connecting',
+      },
+      state,
     );
     return { ok: true, fingerprint };
   } catch (err) {
+    // Cancellations propagate unclassified: the user asked to stop, and a
+    // failure verdict for that would be a lie.
+    if (err instanceof TransferCancelledError) throw err;
     return classifyTestError(err, state, draft);
   } finally {
     try {
@@ -84,6 +94,43 @@ export async function testConnection(deps: TestConnectionDeps, draft: TestDraft)
       /* best effort: the dial already failed or succeeded, teardown must not mask it */
     }
   }
+}
+
+/**
+ * One connect attempt bounded for a test button (the pool's 120s
+ * readyTimeout is for real commands, not a UI affordance) and abortable:
+ * cancelling destroys the handshake client-side and rejects promptly
+ * instead of leaving the attempt running behind a dismissed dialog.
+ */
+function dialWithTimeout(
+  client: TestClient,
+  deps: TestConnectionDeps,
+  options: Record<string, unknown>,
+  state: HostVerifierState,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (deps.signal?.aborted) {
+      reject(new TransferCancelledError());
+      return;
+    }
+    const timer = setTimeout(() => reject(new Error('Timed out while connecting')), TEST_TIMEOUT_MS);
+    const settle = (outcome: () => void): void => {
+      clearTimeout(timer);
+      deps.signal?.removeEventListener('abort', onAbort);
+      outcome();
+    };
+    const onAbort = (): void => {
+      // No client.end() here: the outer finally owns teardown (single end,
+      // best-effort). Rejecting unblocks the race immediately; the finally
+      // destroys the handshake socket on the way out, so nothing leaks.
+      settle(() => reject(new TransferCancelledError()));
+    };
+    deps.signal?.addEventListener('abort', onAbort, { once: true });
+    client.connect(options).then(
+      () => settle(resolve),
+      (err: unknown) => settle(() => reject(err instanceof Error ? err : new Error(String(err)))),
+    );
+  });
 }
 
 async function resolveDraftOptions(

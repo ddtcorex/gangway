@@ -574,5 +574,35 @@ describe('connection form webview script', () => {
       expect(dom.posted).toHaveLength(0);
       expect(dom.elements.get('mappingsError')!.textContent).toMatch(/row 1/i);
     });
+
+    function mappingNote(dom: ReturnType<typeof runConnectionFormScript>, index: number): string {
+      const row = dom.elements.get('mappingsRows')!.children[index];
+      const note = row.children.find((child) => child.className === 'mapping-note');
+      return note ? note.textContent : '';
+    }
+
+    function inputMappingRow(dom: ReturnType<typeof runConnectionFormScript>, index: number): void {
+      const row = dom.elements.get('mappingsRows')!.children[index];
+      row.children[0].emit('input');
+    }
+
+    it('shows the losing note on the shadowed row when mappings nest', () => {
+      const dom = runConnectionFormScript({ nonce: 'n', values: { authMethod: 'agent', remotePath: '/srv/app' } });
+      setMappingRow(dom, 0, '/w', '/srv/app');
+      dom.elements.get('mappingAdd')!.emit('click');
+      setMappingRow(dom, 1, '/w/sub', '/srv/app/other');
+      inputMappingRow(dom, 1);
+
+      expect(mappingNote(dom, 0)).toMatch(/row 2/i);
+      expect(mappingNote(dom, 1)).toBe('');
+    });
+
+    it('flags a remote outside the connection root', () => {
+      const dom = runConnectionFormScript({ nonce: 'n', values: { authMethod: 'agent', remotePath: '/srv/app' } });
+      setMappingRow(dom, 0, '/w', '/other/place');
+      inputMappingRow(dom, 0);
+
+      expect(mappingNote(dom, 0)).toMatch(/outside/i);
+    });
   });
 });

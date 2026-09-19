@@ -71,3 +71,16 @@ describe('overlapNotes', () => {
     );
   });
 });
+
+describe('isRemoteInsideRoot', () => {
+  it('refuses outside-root remotes and accepts the root itself', async () => {
+    const { isRemoteInsideRoot } = await import('../src/pathMapping');
+    const conn = { id: 'c', name: 'p', host: 'h', port: 22, username: 'u', remotePath: '/srv/app', authMethod: 'agent' as const };
+    expect(isRemoteInsideRoot(conn, '/srv/app/x.php')).toBe(true);
+    expect(isRemoteInsideRoot(conn, '/srv/app')).toBe(true);
+    expect(isRemoteInsideRoot(conn, '/other/place')).toBe(false);
+    expect(isRemoteInsideRoot(conn, '/srv/app2/x.php')).toBe(false);
+    const rooted = { ...conn, remotePath: '/' };
+    expect(isRemoteInsideRoot(rooted, '/anything/at/all')).toBe(true);
+  });
+});

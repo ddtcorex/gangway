@@ -13,6 +13,7 @@ function normalize(p: string): string {
 }
 
 function isWithinOrEqual(candidate: string, prefix: string): boolean {
+  if (prefix === '/') return candidate.startsWith('/');
   return candidate === prefix || candidate.startsWith(`${prefix}/`);
 }
 
@@ -85,6 +86,15 @@ export function resolveRemoteToLocal(
   const match = candidates[0];
   if (!match) return undefined;
   return match.local + remote.slice(match.remote.length);
+}
+
+/**
+ * Sync-time gate (spec §2.4): a resolved remote outside the connection root
+ * is refused even if the form holds it as a draft. The form itself only
+ * hints (see main.js); this is the enforcement.
+ */
+export function isRemoteInsideRoot(connection: ConnectionConfig, remotePath: string): boolean {
+  return isWithinOrEqual(normalize(remotePath), normalize(connection.remotePath));
 }
 
 /**

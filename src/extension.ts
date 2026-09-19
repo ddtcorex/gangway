@@ -50,7 +50,7 @@ import {
 import { clearClipboard, copyToClipboard, cutToClipboard, type ClipboardState } from './ui/treeClipboard';
 import { classifyRow, describeExcludedSelection, toQuickPickRow, type SyncRow } from './syncPreview';
 import { effectiveExcludes, matchesExcludes } from './excludes';
-import { defaultMapping } from './pathMapping';
+import { defaultMapping, isRemoteInsideRoot } from './pathMapping';
 import type { FileConflictDecision } from './conflictGuard';
 import type { ConnectionConfig, SidecarMeta } from './types';
 import { testConnection } from './testConnection';
@@ -551,16 +551,21 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       },
       // Test Connection dials the unsaved draft exactly once: same host-key
       // prompt as real connects (so TOFU mismatches surface), same factory,
-      // but nothing pooled, persisted, or secret-stored.
+      // but nothing pooled, persisted, or secret-stored. Cancellable with
+      // progress: a 15s dial with no cancel affordance violates the repo's
+      // >~5s rule.
       async (draft) =>
-        testConnection(
-          {
-            createClient: () => new Client() as never,
-            hostKeyStore,
-            prompt: { confirmNewOrChangedKey },
-            readFile: async (filePath) => (await import('node:fs/promises')).default.readFile(filePath),
-          },
-          draft,
+        withCancellableProgress('Testing connection', (signal) =>
+          testConnection(
+            {
+              createClient: () => new Client() as never,
+              hostKeyStore,
+              prompt: { confirmNewOrChangedKey },
+              readFile: async (filePath) => (await import('node:fs/promises')).default.readFile(filePath),
+              signal,
+            },
+            draft,
+          ),
         ),
       async () => {
         const picked = await vscode.window.showOpenDialog({
@@ -1834,6 +1839,14 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       );
       if (!picked) return;
       choice = { localRoot: picked.localRoot, remoteRoot: picked.remoteRoot };
+    }
+    // Spec §2.4: a resolved remote outside the connection root is refused
+    // even when the form holds it as a draft — the editor only hints.
+    if (!isRemoteInsideRoot(connection, choice.remoteRoot)) {
+      await vscode.window.showErrorMessage(
+        `Mapping "${choice.localRoot} → ${choice.remoteRoot}" points outside the connection remote path (${connection.remotePath}). Fix the mapping first.`,
+      );
+      return;
     }
     const fs = (await import('node:fs/promises')).default;
     try {

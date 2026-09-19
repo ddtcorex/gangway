@@ -4,6 +4,7 @@ import type { ConnectionManager } from '../connectionManager';
 import type { ConnectionSecretStore, SecretKind } from '../secretStore';
 import type { AuthMethod, ConnectionConfig, ConnectionScope, PathMapping } from '../types';
 import { withTimeout } from '../withTimeout';
+import { TransferCancelledError } from '../folderQueue';
 import type { TestDraft, TestResult } from '../testConnection';
 
 interface SaveConnectionPayload {
@@ -177,7 +178,10 @@ export class ConnectionFormPanel {
       let result: TestResult;
       try {
         result = await this.runConnectionTest(draft);
-      } catch {
+      } catch (err) {
+        // User-cancelled dials stay silent: reporting a failure for an
+        // explicit Cancel would be a lie. Anything else is unreachable.
+        if (err instanceof TransferCancelledError) return;
         result = { ok: false, kind: 'unreachable', message: 'Test failed before connecting.' };
       }
       await this.panel.webview.postMessage({ nonce: this.nonce, type: 'testConnectionResult', ...result });

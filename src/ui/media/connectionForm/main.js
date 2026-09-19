@@ -214,6 +214,7 @@ function renderRemotesList() {
 }
 
 document.getElementById('authMethod').addEventListener('change', applyAuthVisibility);
+document.getElementById('remotePath').addEventListener('input', refreshMappingNotes);
 
 /**
  * Path mappings table (remote ↔ local pairs). Rows are plain element trees
@@ -226,9 +227,11 @@ function createMappingRow(mapping) {
   const local = document.createElement('vscode-text-field');
   local.placeholder = '/home/you/proj';
   local.value = mapping.localPath || '';
+  local.addEventListener('input', refreshMappingNotes);
   const remote = document.createElement('vscode-text-field');
   remote.placeholder = '/srv/app';
   remote.value = mapping.remotePath || '';
+  remote.addEventListener('input', refreshMappingNotes);
   const browse = document.createElement('vscode-button');
   browse.textContent = 'Browse…';
   browse.appearance = 'secondary';
@@ -248,11 +251,16 @@ function createMappingRow(mapping) {
     container.textContent = '';
     for (const child of kept) container.appendChild(child);
     if (kept.length === 0) container.appendChild(createMappingRow({ localPath: '', remotePath: '' }));
+    refreshMappingNotes();
   });
   row.appendChild(local);
   row.appendChild(remote);
   row.appendChild(browse);
   row.appendChild(remove);
+  const note = document.createElement('div');
+  note.className = 'mapping-note';
+  note.textContent = '';
+  row.appendChild(note);
   return row;
 }
 
@@ -272,6 +280,44 @@ function renderMappingRows(mappings) {
   container.textContent = '';
   const rows = mappings.length > 0 ? mappings : [{ localPath: '', remotePath: '' }];
   for (const mapping of rows) container.appendChild(createMappingRow(mapping));
+  refreshMappingNotes();
+}
+
+/**
+ * Per-row notes, recomputed on every edit: overlap (the same longest-prefix
+ * rule as pathMapping.ts overlapNotes, duplicated here because the webview
+ * cannot import host modules) and remote-outside-connection-root. The
+ * connection root comes from the Remote Path field itself, so the hint
+ * follows what the user is typing.
+ */
+function refreshMappingNotes() {
+  const norm = (p) => (p || '').replace(/\\/g, '/').replace(/\/+$/, '') || '/';
+  const within = (candidate, prefix) => candidate === prefix || candidate.startsWith(prefix + '/');
+  const container = document.getElementById('mappingsRows');
+  const rows = [...container.children].map((row) => ({
+    local: norm(row.children[0] ? row.children[0].value : ''),
+    remote: norm(row.children[1] ? row.children[1].value : ''),
+  }));
+  const root = norm(fieldValue('remotePath'));
+  [...container.children].forEach((row, index) => {
+    const notes = [];
+    rows.forEach((other, otherIndex) => {
+      if (otherIndex === index) return;
+      if (
+        (other.local !== rows[index].local && within(other.local, rows[index].local)) ||
+        (other.remote !== rows[index].remote && within(other.remote, rows[index].remote))
+      ) {
+        notes.push(`Overlapped by row ${otherIndex + 1} — the longer prefix wins`);
+      }
+    });
+    if (rows[index].remote && root && !within(rows[index].remote, root)) {
+      const rawRemote = (row.children[1] && row.children[1].value) || '';
+      // Blank rows are handled by the save-time half-filled check, not here.
+      if (rawRemote) notes.push('Remote path is outside the connection remote path — sync will refuse it.');
+    }
+    const noteEl = row.children.find((child) => child.className === 'mapping-note');
+    if (noteEl) noteEl.textContent = notes.join(' ');
+  });
 }
 
 function clearTestResult() {

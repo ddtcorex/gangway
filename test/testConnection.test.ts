@@ -73,3 +73,23 @@ describe('testConnection secret hygiene', () => {
     expect(JSON.stringify(failing)).not.toContain(CANARY);
   });
 });
+
+describe('testConnection cancellation', () => {
+  it('aborts a hanging dial when the signal fires and ends the client', async () => {
+    const { TransferCancelledError } = await import('../src/folderQueue');
+    const end = vi.fn().mockResolvedValue(undefined);
+    const connect = vi.fn().mockReturnValue(new Promise(() => {}));
+    const controller = new AbortController();
+    const deps = {
+      createClient: () => ({ connect, end }),
+      hostKeyStore: { verify: () => 'match' as const },
+      prompt: { confirmNewOrChangedKey: async () => 'accept' as const },
+      readFile: async () => Buffer.from(''),
+      signal: controller.signal,
+    };
+    const pending = testConnection(deps as never, { host: 'h', port: 22, username: 'u', authMethod: 'agent' as const });
+    setTimeout(() => controller.abort(), 10);
+    await expect(pending).rejects.toBeInstanceOf(TransferCancelledError);
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+});
