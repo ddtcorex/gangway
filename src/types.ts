@@ -23,6 +23,10 @@ export interface ConnectionConfig {
    * back, so any *newly constructed* ConnectionConfig in the codebase after
    * that point can rely on it being set. */
   scope?: ConnectionScope;
+  /** When true, all mutating remote ops are hard-blocked until explicit unlock (spec §5). Absent = false. */
+  frozen?: boolean;
+  /** Glob patterns excluded from recursive walks. Absent = DEFAULT_EXCLUDES (spec §2.3). */
+  excludePatterns?: string[];
 }
 
 export interface SidecarMeta {

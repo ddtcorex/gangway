@@ -10,6 +10,8 @@ export interface ConnectionFormPrefill {
   authMethod: AuthMethod;
   keyPath?: string;
   scope?: ConnectionScope;
+  /** Mirrors ConnectionConfig.frozen for the read-only badge in the heading. */
+  frozen?: boolean;
 }
 
 export interface ConnectionFormHtmlInput {
@@ -91,7 +93,12 @@ export function resolveConnectionFormFields(
   const selected = (expected: AuthMethod) => (authMethod === expected ? ' selected' : '');
   const blankHint = c ? ' (leave blank to keep the current one)' : '';
   return {
-    heading: c ? `Edit Connection: ${escapeHtml(c.name)}` : 'New Connection',
+    heading:
+      c && c.frozen === true
+        ? `Edit Connection: ${escapeHtml(c.name)} (frozen — unlock via Gangway: Toggle Freeze)`
+        : c
+          ? `Edit Connection: ${escapeHtml(c.name)}`
+          : 'New Connection',
     connectionId: c ? escapeHtml(c.id) : '',
     name: c ? escapeHtml(c.name) : '',
     host: c ? escapeHtml(c.host) : '',
