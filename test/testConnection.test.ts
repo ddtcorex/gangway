@@ -55,3 +55,21 @@ describe('testConnection classification', () => {
     expect(result).toMatchObject({ ok: true });
   });
 });
+
+describe('testConnection secret hygiene', () => {
+  it('never leaks the draft password through classification or replies', async () => {
+    const CANARY = 'hunter2-canary-draft';
+    const failing = await testConnection(
+      {
+        createClient: () => {
+          throw new Error(`All configured authentication methods failed for ${CANARY}`);
+        },
+        hostKeyStore: { verify: () => 'match' as const },
+        prompt: { confirmNewOrChangedKey: async () => 'accept' as const },
+        readFile: async () => Buffer.from(''),
+      } as never,
+      { host: 'h', port: 22, username: 'u', authMethod: 'password' as const, password: CANARY },
+    );
+    expect(JSON.stringify(failing)).not.toContain(CANARY);
+  });
+});

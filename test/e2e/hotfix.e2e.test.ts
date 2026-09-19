@@ -214,5 +214,70 @@ export async function run(): Promise<void> {
     'expected the blocked upload to leave the server-side (out-of-band) content untouched, proving the block ' +
       'actually prevented the write and was not just a warning shown alongside a silent overwrite',
   );
+  log('conflict block verified: server content untouched');
+
+  // --- Workspace mapping sync path -----------------------------------------
+  // A subdir of the real workspace folder maps to a fresh remote dir, so the
+  // sync only ever touches files this section owns (never the whole repo).
+  // Sync modals that would hang headless are stubbed here like the warning
+  // stubs above: showQuickPick auto-picks everything offered,
+  // showInformationMessage auto-dismisses (and logs, so the summary is still
+  // asserted through the server-side bytes, not the modal text).
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  assert.ok(workspaceFolders && workspaceFolders.length > 0, 'expected the e2e host to open a workspace folder');
+  const e2eWsDir = path.join(workspaceFolders[0].uri.fsPath, 'e2e-ws-tmp');
+  await fs.mkdir(e2eWsDir, { recursive: true });
+  await fs.writeFile(path.join(e2eWsDir, 'mapped.php'), "<?php echo 'w1';");
+  await api.connectionManager.update(connection.id, {
+    mappings: [{ localPath: e2eWsDir, remotePath: '/var/www/e2e-ws' }],
+  });
+  log('workspace mapping set for e2e-ws-tmp');
+
+  type QuickPick = typeof vscode.window.showQuickPick;
+  const patchablePick = vscode.window as unknown as { showQuickPick: QuickPick };
+  patchablePick.showQuickPick = (async (items: unknown) => items) as unknown as QuickPick;
+  const infoMessages: string[] = [];
+  const patchableInfo = vscode.window as unknown as { showInformationMessage: ShowMessage };
+  patchableInfo.showInformationMessage = (async (msg: string) => {
+    log(`showInformationMessage stub called: "${msg}"`);
+    infoMessages.push(msg);
+    return undefined;
+  }) as unknown as ShowMessage;
+
+  const hostMappedPath = path.join(repoRoot(), 'test', 'fixtures', 'sftp-data', 'e2e-ws', 'mapped.php');
+  log('invoking gangway.syncWorkspaceUp');
+  await vscode.commands.executeCommand('gangway.syncWorkspaceUp');
+  log('gangway.syncWorkspaceUp returned');
+  assert.strictEqual(
+    await fs.readFile(hostMappedPath, 'utf8'),
+    "<?php echo 'w1';",
+    'expected the workspace file to land on the server through the mapping',
+  );
+  log('workspace up verified on the real server-side file');
+
+  // Same-size out-of-band server edit, but the no-sidecar fallback compares
+  // mtimes with a 2s tolerance: sleep past it so the download direction is
+  // unambiguous instead of flaky.
+  log('sleeping 2600ms to clear the no-baseline mtime tolerance');
+  await sleep(2600);
+  await fs.writeFile(hostMappedPath, "<?php echo 'w2';", 'utf8');
+  log('wrote out-of-band server edit');
+  log('invoking gangway.syncWorkspaceDown');
+  await vscode.commands.executeCommand('gangway.syncWorkspaceDown');
+  log('gangway.syncWorkspaceDown returned');
+  assert.strictEqual(
+    await fs.readFile(path.join(e2eWsDir, 'mapped.php'), 'utf8'),
+    "<?php echo 'w2';",
+    'expected the server edit to land back in the workspace file',
+  );
+  assert.ok(
+    infoMessages.some((msg) => msg.includes(e2eWsDir)),
+    'expected the sync summary to name the mapped workspace root',
+  );
+  log('workspace down verified in the local file');
+
+  await fs.rm(path.join(repoRoot(), 'test', 'fixtures', 'sftp-data', 'e2e-ws'), { recursive: true, force: true });
+  await fs.rm(e2eWsDir, { recursive: true, force: true });
+  log('mapping fixture cleaned up');
   log('run() complete: all assertions passed');
 }
