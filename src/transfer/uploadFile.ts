@@ -84,7 +84,7 @@ export async function uploadFile(
   // of the push, not part of it: a failure to write it is reported on its own
   // channel and never rewrites the outcome of the upload itself.
   try {
-    await auditLog.append({ connectionId, remotePath, timestamp: Date.now(), byteSize });
+    await auditLog.append({ connectionId, remotePath, timestamp: Date.now(), byteSize, op: 'upload' });
   } catch (err) {
     logWarning(
       `Uploaded ${remotePath}, but could not write the audit log entry: ${err instanceof Error ? err.message : String(err)}`,

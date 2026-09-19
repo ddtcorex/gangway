@@ -58,6 +58,7 @@ describe('uploadFile', () => {
       remotePath: '/var/www/app/config.php',
       timestamp: expect.any(Number),
       byteSize: 128,
+      op: 'upload',
     });
   });
 
