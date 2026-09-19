@@ -2,8 +2,9 @@ import crypto from 'node:crypto';
 import type * as vscode from 'vscode';
 import type { ConnectionManager } from '../connectionManager';
 import type { ConnectionSecretStore, SecretKind } from '../secretStore';
-import type { AuthMethod, ConnectionConfig, ConnectionScope } from '../types';
+import type { AuthMethod, ConnectionConfig, ConnectionScope, PathMapping } from '../types';
 import { withTimeout } from '../withTimeout';
+import type { TestDraft, TestResult } from '../testConnection';
 
 interface SaveConnectionPayload {
   /** Present only when this save is editing an existing connection. */
@@ -23,12 +24,16 @@ interface SaveConnectionPayload {
    * already defaults a missing scope to 'global', so no fallback is needed
    * here too. */
   scope?: ConnectionScope;
+  /** Complete rows only — the webview drops blank rows and blocks half-filled ones. */
+  mappings?: PathMapping[];
 }
 
 type IncomingMessage =
   | { nonce: string; type: 'saveConnection'; payload: SaveConnectionPayload }
   | { nonce: string; type: 'deleteConnection'; payload: { id: string } }
-  | { nonce: string; type: 'browseKeyPath' };
+  | { nonce: string; type: 'browseKeyPath' }
+  | { nonce: string; type: 'testConnection'; payload: { draft: TestDraft } }
+  | { nonce: string; type: 'browseMappingFolder'; row: number };
 
 /**
  * The OS secret store (SecretStorage's backing keyring/keychain) is a system
@@ -44,6 +49,18 @@ type IncomingMessage =
  * cost a warning, never the rest of the save.
  */
 const SECRET_STORE_TIMEOUT_MS = 5_000;
+
+/** Minimal shape check for an unsaved test draft: malformed payloads are dropped silently. */
+function isTestDraft(value: unknown): value is TestDraft {
+  if (typeof value !== 'object' || value === null) return false;
+  const draft = value as Record<string, unknown>;
+  return (
+    typeof draft['host'] === 'string' &&
+    typeof draft['port'] === 'number' &&
+    typeof draft['username'] === 'string' &&
+    (draft['authMethod'] === 'password' || draft['authMethod'] === 'key' || draft['authMethod'] === 'agent')
+  );
+}
 
 /**
  * Backs the Manage Remotes page (src/ui/manageRemotesHtml.ts): a single
@@ -92,6 +109,22 @@ export class ConnectionFormPanel {
      * believes is gone is worse than a warning.
      */
     private readonly onSecretStoreError: (message: string) => void = () => {},
+    /**
+     * Dials an unsaved draft for the Test Connection button. Injected (the
+     * panel never dials itself): production passes a closure over the pool
+     * factory, host-key store, and prompt; tests inject fakes. A throw from
+     * the runner is caught and reported as unreachable — a test must never
+     * crash the panel.
+     */
+    private readonly runConnectionTest: (draft: TestDraft) => Promise<TestResult> = async () => {
+      throw new Error('Test Connection is not wired up.');
+    },
+    /**
+     * Shows a native folder picker for a mappings row's Browse button.
+     * Resolves the chosen local path, or undefined on cancel (then nothing
+     * is posted back and the row keeps its value).
+     */
+    private readonly chooseFolder: () => Promise<string | undefined> = async () => undefined,
   ) {
     this.panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(message as IncomingMessage));
   }
@@ -126,6 +159,28 @@ export class ConnectionFormPanel {
       if (chosen) {
         await this.panel.webview.postMessage({ nonce: this.nonce, type: 'keyPathSelected', path: chosen });
       }
+      return;
+    }
+
+    if (message.type === 'browseMappingFolder') {
+      const row = typeof message.row === 'number' ? message.row : 0;
+      const chosen = await this.chooseFolder();
+      if (chosen) {
+        await this.panel.webview.postMessage({ nonce: this.nonce, type: 'mappingFolderSelected', row, path: chosen });
+      }
+      return;
+    }
+
+    if (message.type === 'testConnection') {
+      const draft = message.payload?.draft;
+      if (!isTestDraft(draft)) return;
+      let result: TestResult;
+      try {
+        result = await this.runConnectionTest(draft);
+      } catch {
+        result = { ok: false, kind: 'unreachable', message: 'Test failed before connecting.' };
+      }
+      await this.panel.webview.postMessage({ nonce: this.nonce, type: 'testConnectionResult', ...result });
       return;
     }
 

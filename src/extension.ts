@@ -52,6 +52,7 @@ import { classifyRow, describeExcludedSelection, toQuickPickRow, type SyncRow } 
 import { effectiveExcludes, matchesExcludes } from './excludes';
 import type { FileConflictDecision } from './conflictGuard';
 import type { ConnectionConfig, SidecarMeta } from './types';
+import { testConnection } from './testConnection';
 
 export function activate(context: vscode.ExtensionContext): { connectionManager: ConnectionManager; secrets: ConnectionSecretStore } {
   const connectionManager = new ConnectionManager(context.globalState, context.workspaceState);
@@ -69,20 +70,26 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
    */
   const auditLog = new AuditLog(path.join(context.globalStorageUri.fsPath, 'sftp-hotfix-uploads.log'));
 
+  const confirmNewOrChangedKey = async (
+    host: string,
+    port: number,
+    fingerprint: string,
+    isChange: boolean,
+  ): Promise<'accept' | 'reject'> => {
+    const choice = await vscode.window.showWarningMessage(
+      isChange
+        ? `Host key for ${host}:${port} changed to ${fingerprint}. Trust it?`
+        : `First connection to ${host}:${port}. Trust host key ${fingerprint}?`,
+      'Trust',
+      'Cancel',
+    );
+    return choice === 'Trust' ? 'accept' : 'reject';
+  };
+
   const pool = new ConnectionPool(
     { create: () => new Client() as never },
     hostKeyStore,
-    { confirmNewOrChangedKey: async (host, port, fingerprint, isChange) => {
-        const choice = await vscode.window.showWarningMessage(
-          isChange
-            ? `Host key for ${host}:${port} changed to ${fingerprint}. Trust it?`
-            : `First connection to ${host}:${port}. Trust host key ${fingerprint}?`,
-          'Trust',
-          'Cancel',
-        );
-        return choice === 'Trust' ? 'accept' : 'reject';
-      },
-    },
+    { confirmNewOrChangedKey },
     secrets,
   );
 
@@ -540,6 +547,29 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       },
       (message) => {
         void vscode.window.showWarningMessage(`Gangway: ${message}`);
+      },
+      // Test Connection dials the unsaved draft exactly once: same host-key
+      // prompt as real connects (so TOFU mismatches surface), same factory,
+      // but nothing pooled, persisted, or secret-stored.
+      async (draft) =>
+        testConnection(
+          {
+            createClient: () => new Client() as never,
+            hostKeyStore,
+            prompt: { confirmNewOrChangedKey },
+            readFile: async (filePath) => (await import('node:fs/promises')).default.readFile(filePath),
+          },
+          draft,
+        ),
+      async () => {
+        const picked = await vscode.window.showOpenDialog({
+          canSelectFiles: false,
+          canSelectFolders: true,
+          canSelectMany: false,
+          title: 'Select Local Folder for Mapping',
+          openLabel: 'Select Folder',
+        });
+        return picked?.[0]?.fsPath;
       },
     );
     rawPanel.webview.html = buildConnectionFormHtml({
