@@ -91,6 +91,7 @@ describe('ConnectionManager', () => {
     expect(manager.getWorkspaceBinding()).toBeUndefined();
   });
 
+<<<<<<< HEAD
   describe('scope: workspace vs global', () => {
     it('defaults a new connection to global scope when none is given', async () => {
       const created = await manager.add({
@@ -178,5 +179,21 @@ describe('ConnectionManager', () => {
       expect(manager.list()).toEqual([]);
       expect(workspaceState.get('gangway.connections')).toEqual([]);
     });
+  });
+
+  it('round-trips mappings through add/update', async () => {
+    const created = await manager.add({
+      name: 'p',
+      host: 'h',
+      port: 22,
+      username: 'u',
+      remotePath: '/srv/app',
+      authMethod: 'agent',
+    });
+    expect(created.mappings).toBeUndefined();
+    const updated = await manager.update(created.id, {
+      mappings: [{ localPath: '/home/u/proj', remotePath: '/srv/app' }],
+    });
+    expect(updated.mappings).toEqual([{ localPath: '/home/u/proj', remotePath: '/srv/app' }]);
   });
 });

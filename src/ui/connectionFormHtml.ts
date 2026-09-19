@@ -1,4 +1,4 @@
-import type { AuthMethod, ConnectionScope } from '../types';
+import type { AuthMethod, ConnectionScope, PathMapping } from '../types';
 
 export interface ConnectionFormPrefill {
   id: string;
@@ -12,6 +12,8 @@ export interface ConnectionFormPrefill {
   scope?: ConnectionScope;
   /** Mirrors ConnectionConfig.frozen for the read-only badge in the heading. */
   frozen?: boolean;
+  /** Mirrors ConnectionConfig.mappings for the sidebar JSON and the mappings editor. */
+  mappings?: PathMapping[];
 }
 
 export interface ConnectionFormHtmlInput {
