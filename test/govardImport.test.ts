@@ -75,7 +75,6 @@ describe('mapGovardRemote', () => {
     );
   });
 
-<<<<<<< HEAD
   it('maps an explicit password auth method to the password authMethod, not agent', () => {
     expect(mapGovardRemote('myshop', 'staging', { host: 's.example.com', user: 'd', path: '/srv', auth: { method: 'password' } })).toEqual(
       expect.objectContaining({ ok: true, connection: expect.objectContaining({ authMethod: 'password' }) }),
