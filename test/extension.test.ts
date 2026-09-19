@@ -3,6 +3,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import * as vscode from 'vscode';
+// Relative mock import for the test-only answer queues (__test_queue*):
+// same runtime instance the handlers use, full types under tsc.
+import { window as mockWindow } from './mocks/vscode';
 
 // Shared fake raw SFTP client, created via vi.hoisted so both the
 // vi.mock('../src/transfer/connectionPool', ...) factory below and the test
@@ -527,6 +530,82 @@ describe('activate - realistic command invocation', () => {
       expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
       expect(fakeRawClient.fastGet).not.toHaveBeenCalled();
       expect(fakeRawClient.stat).not.toHaveBeenCalled();
+      infoSpy.mockRestore();
+    });
+  });
+
+  describe('file commands', () => {
+    function fileNode(remotePath: string) {
+      return { connectionId: connection.id, entry: { path: remotePath, isDirectory: false, isSymbolicLink: false, size: 5 } };
+    }
+
+    function folderNode(remotePath: string) {
+      return { connectionId: connection.id, entry: { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 } };
+    }
+
+    async function activateFrozenConnection() {
+      const fresh = activate(fakeContext());
+      const frozen = await fresh.connectionManager.add({
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'password',
+        frozen: true,
+      });
+      await fresh.connectionManager.setWorkspaceBinding(frozen.id);
+      return frozen;
+    }
+
+    afterEach(() => {
+      mockWindow.__test_resetAnswers();
+    });
+
+    it('gangway.deleteRemote cancels a folder delete when the typed name does not match', async () => {
+      mockWindow.__test_queueInput('wrong-name');
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.deleteRemote')!(folderNode('/var/www/app/dir'));
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Delete cancelled'));
+      expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+      infoSpy.mockRestore();
+    });
+
+    it('gangway.deleteRemote retries the trash move when the user picks Retry', async () => {
+      mockWindow.__test_queueWarning('Move to Trash', 'Move to Trash');
+      mockWindow.__test_queueError('Retry');
+      fakeRawClient.posixRename.mockRejectedValueOnce(new Error('boom'));
+      fakeRawClient.stat.mockResolvedValue({ size: 5, modifyTime: 1, isDirectory: false, isSymbolicLink: false });
+
+      await handlers.get('gangway.deleteRemote')!(fileNode('/var/www/app/a.php'));
+
+      expect(fakeRawClient.posixRename).toHaveBeenCalledTimes(2);
+      expect(fakeRawClient.posixRename).toHaveBeenLastCalledWith(
+        '/var/www/app/a.php',
+        expect.stringMatching(/\.gangway-trash-[0-9a-f]{10}\//),
+      );
+    });
+
+    it.each([
+      ['gangway.newFile', { isDirectory: true, path: '/var/www/app' }],
+      ['gangway.newFolder', { isDirectory: true, path: '/var/www/app' }],
+      ['gangway.renameRemote', { isDirectory: false, path: '/var/www/app/a.php' }],
+      ['gangway.deleteRemote', { isDirectory: false, path: '/var/www/app/a.php' }],
+      ['gangway.duplicateRemote', { isDirectory: false, path: '/var/www/app/a.php' }],
+      ['gangway.chmodRemote', { isDirectory: false, path: '/var/www/app/a.php' }],
+    ])('%s stops on a frozen connection before any prompt or network call', async (commandId, entry) => {
+      const frozen = await activateFrozenConnection();
+      resetFakeClient();
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get(commandId)!({ connectionId: frozen.id, entry });
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('frozen'));
+      expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+      expect(fakeRawClient.mkdir).not.toHaveBeenCalled();
       infoSpy.mockRestore();
     });
   });

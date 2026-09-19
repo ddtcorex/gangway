@@ -66,6 +66,30 @@
         "title": "Gangway: Compare File with Server"
       },
       {
+        "command": "gangway.newFile",
+        "title": "Gangway: New Remote File"
+      },
+      {
+        "command": "gangway.newFolder",
+        "title": "Gangway: New Remote Folder"
+      },
+      {
+        "command": "gangway.renameRemote",
+        "title": "Gangway: Rename Remote File/Folder"
+      },
+      {
+        "command": "gangway.deleteRemote",
+        "title": "Gangway: Delete Remote File/Folder (to Trash)"
+      },
+      {
+        "command": "gangway.duplicateRemote",
+        "title": "Gangway: Duplicate Remote File"
+      },
+      {
+        "command": "gangway.chmodRemote",
+        "title": "Gangway: Change Remote Permissions"
+      },
+      {
         "command": "gangway.refreshExplorer",
         "title": "Gangway: Refresh Explorer",
         "icon": "$(refresh)"
@@ -104,6 +128,41 @@
       ],
       "view/item/context": [
         {
+          "command": "gangway.newFile",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
+        },
+        {
+          "command": "gangway.newFolder",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
+        },
+        {
+          "command": "gangway.renameRemote",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file"
+        },
+        {
+          "command": "gangway.renameRemote",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
+        },
+        {
+          "command": "gangway.deleteRemote",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file"
+        },
+        {
+          "command": "gangway.deleteRemote",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
+        },
+        {
+          "command": "gangway.duplicateRemote",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file"
+        },
+        {
+          "command": "gangway.chmodRemote",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file"
+        },
+        {
+          "command": "gangway.chmodRemote",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
+        },        {
           "command": "gangway.downloadFolder",
           "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
         },

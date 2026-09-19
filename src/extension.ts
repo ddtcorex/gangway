@@ -27,7 +27,20 @@ import { raceWithCancellation } from './ui/cancellable';
 import { TransferCancelledError } from './folderQueue';
 import { resolveFileConflict, type ConflictResolutionUi } from './ui/conflictResolution';
 import { checkEditSession, acquireEditSession, releaseEditSession } from './editSession';
-import { FrozenError, assertMutatingAllowed, guardUploadTarget } from './remoteOps';
+import {
+  FrozenError,
+  assertMutatingAllowed,
+  chmodRemote,
+  collectDropUploads,
+  createRemote,
+  duplicateRemote,
+  guardUploadTarget,
+  moveToTrash,
+  parseUriList,
+  renameRemote,
+  typedConfirmMatches,
+} from './remoteOps';
+>>>>>>> 9ba45ee (feat(remoteops): add new rename delete duplicate chmod drop commands)
 import type { FileConflictDecision } from './conflictGuard';
 import type { ConnectionConfig } from './types';
 
@@ -326,9 +339,15 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       // tree instead of leaving the node failed.
       void showCommandError(err, { retry: () => Promise.resolve(treeProvider.refresh()) });
     },
+    // Local-Explorer/OS drops land here with the tree node they were dropped
+    // on (or undefined for empty tree space). The closure runs long after
+    // activate() finishes, so referencing handleLocalDrop (defined below)
+    // is safe despite the textual order.
+    (node, uriListValue) => handleLocalDrop(node, uriListValue),
   );
   const treeView = vscode.window.createTreeView('gangway.remoteExplorer', {
     treeDataProvider: treeProvider as never,
+    dragAndDropController: treeProvider as never,
   });
 
   /**
@@ -937,6 +956,244 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   };
 
   /**
+   * File-command guard shared by every Task 5/6 mutating tree command:
+   * resolve the node's own connection, then stop frozen connections with an
+   * info message before any prompt or network call.
+   */
+  async function requireMutableConnection(node?: RemoteTreeNode): Promise<ConnectionConfig | undefined> {
+    const connection = resolveConnection(node);
+    if (!connection) return undefined;
+    try {
+      assertMutatingAllowed(connection);
+    } catch (err) {
+      if (err instanceof FrozenError) {
+        await vscode.window.showInformationMessage(err.message);
+        return undefined;
+      }
+      throw err;
+    }
+    return connection;
+  }
+
+  async function runNewRemoteCommand(kind: 'file' | 'dir', node?: RemoteTreeNode): Promise<void> {
+    const connection = await requireMutableConnection(node);
+    if (!connection) return;
+    let dirPath = node?.entry?.path;
+    if (node?.entry && !node.entry.isDirectory) dirPath = path.posix.dirname(node.entry.path);
+    if (!dirPath) {
+      await vscode.window.showWarningMessage('Select a folder in the Gangway Remote Explorer first.');
+      return;
+    }
+    const name = await vscode.window.showInputBox({ prompt: `Name of the new ${kind} in ${dirPath}` });
+    if (!name) return;
+    try {
+      const adapter = await getAdapter(connection);
+      const { path: created } = await createRemote(adapter, connection, dirPath, name, kind, auditLog, {
+        onAuditError: (message) => output.appendLine(message),
+      });
+      treeProvider.refresh();
+      if (kind === 'file') {
+        const choice = await vscode.window.showInformationMessage(`Created ${created}.`, 'Download for editing');
+        if (choice === 'Download for editing') {
+          await runDownloadFileCommand({
+            connectionId: connection.id,
+            entry: { path: created, isDirectory: false, isSymbolicLink: false, size: 0 },
+          });
+        }
+      } else {
+        await vscode.window.showInformationMessage(`Created folder ${created}.`);
+      }
+    } catch (err) {
+      await showCommandError(err, { retry: () => runNewRemoteCommand(kind, node), connection });
+    }
+  }
+
+  async function runRenameRemoteCommand(node?: RemoteTreeNode): Promise<void> {
+    if (!node?.entry?.path) {
+      await vscode.window.showWarningMessage('Select a file or folder in the Gangway Remote Explorer to rename it.');
+      return;
+    }
+    const connection = await requireMutableConnection(node);
+    if (!connection) return;
+    const oldPath = node.entry.path;
+    const newName = await vscode.window.showInputBox({
+      prompt: `Rename ${oldPath} to`,
+      value: path.posix.basename(oldPath),
+    });
+    if (!newName) return;
+    try {
+      const adapter = await getAdapter(connection);
+      const { newPath } = await renameRemote(adapter, connection, oldPath, newName, auditLog, {
+        onAuditError: (message) => output.appendLine(message),
+      });
+      treeProvider.refresh();
+      await vscode.window.showInformationMessage(`Renamed to ${newPath}.`);
+    } catch (err) {
+      await showCommandError(err, { retry: () => runRenameRemoteCommand(node), connection });
+    }
+  }
+
+  async function countRemoteFiles(adapter: SftpClientAdapter, dirPath: string): Promise<number> {
+    const entries = mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName);
+    let count = 0;
+    for (const entry of entries) {
+      if (entry.isDirectory) count += await countRemoteFiles(adapter, entry.path);
+      else count += 1;
+    }
+    return count;
+  }
+
+  async function runDeleteRemoteCommand(node?: RemoteTreeNode): Promise<void> {
+    if (!node?.entry?.path) {
+      await vscode.window.showWarningMessage('Select a file or folder in the Gangway Remote Explorer to delete it.');
+      return;
+    }
+    const connection = await requireMutableConnection(node);
+    if (!connection) return;
+    const target = node.entry.path;
+    try {
+      const adapter = await getAdapter(connection);
+      if (!node.entry.isDirectory) {
+        const choice = await vscode.window.showWarningMessage(
+          `Move ${target} to the Gangway trash on the server?`,
+          'Move to Trash',
+          'Cancel',
+        );
+        if (choice !== 'Move to Trash') return;
+        await moveToTrash(adapter, connection, target, auditLog, {
+          onAuditError: (message) => output.appendLine(message),
+        });
+      } else {
+        const fileCount = await countRemoteFiles(adapter, target);
+        const base = path.posix.basename(target);
+        const typed = await vscode.window.showInputBox({
+          prompt: `Type "${base}" to move this folder (${fileCount} file(s)) to the Gangway trash`,
+        });
+        if (!typedConfirmMatches(base, typed)) {
+          await vscode.window.showInformationMessage('Delete cancelled: the typed name did not match.');
+          return;
+        }
+        await moveToTrash(adapter, connection, target, auditLog, {
+          count: fileCount,
+          onAuditError: (message) => output.appendLine(message),
+        });
+      }
+      treeProvider.refresh();
+      await vscode.window.showInformationMessage(`Moved ${target} to trash.`);
+    } catch (err) {
+      await showCommandError(err, { retry: () => runDeleteRemoteCommand(node), connection });
+    }
+  }
+
+  async function runDuplicateRemoteCommand(node?: RemoteTreeNode): Promise<void> {
+    if (!node?.entry?.path || node.entry.isDirectory) {
+      await vscode.window.showWarningMessage('Select a file in the Gangway Remote Explorer to duplicate it.');
+      return;
+    }
+    const connection = await requireMutableConnection(node);
+    if (!connection) return;
+    try {
+      const adapter = await getAdapter(connection);
+      const { path: dupPath } = await duplicateRemote(adapter, connection, node.entry.path, auditLog, {
+        onAuditError: (message) => output.appendLine(message),
+      });
+      treeProvider.refresh();
+      await vscode.window.showInformationMessage(`Duplicated to ${dupPath}.`);
+    } catch (err) {
+      await showCommandError(err, { retry: () => runDuplicateRemoteCommand(node), connection });
+    }
+  }
+
+  const CHMOD_PRESETS = ['644 (files)', '755 (folders)', '600', '640', 'Custom…'];
+
+  async function runChmodRemoteCommand(node?: RemoteTreeNode): Promise<void> {
+    if (!node?.entry?.path) {
+      await vscode.window.showWarningMessage('Select a file or folder in the Gangway Remote Explorer first.');
+      return;
+    }
+    const connection = await requireMutableConnection(node);
+    if (!connection) return;
+    const picked = await vscode.window.showQuickPick(CHMOD_PRESETS, { placeHolder: 'Choose a mode' });
+    if (!picked) return;
+    let mode: string | undefined;
+    if (picked === 'Custom…') {
+      mode = await vscode.window.showInputBox({ prompt: 'Octal mode (e.g. 644)', value: '644' });
+      if (!mode) return;
+    } else {
+      const match = /^(\d{3,4})\b/.exec(picked);
+      mode = match ? match[1] : undefined;
+    }
+    if (!mode) return;
+    try {
+      const adapter = await getAdapter(connection);
+      await chmodRemote(adapter, connection, node.entry.path, mode, auditLog, {
+        onAuditError: (message) => output.appendLine(message),
+      });
+      treeProvider.refresh();
+      await vscode.window.showInformationMessage(`Changed mode of ${node.entry.path} to ${mode}.`);
+    } catch (err) {
+      await showCommandError(err, { retry: () => runChmodRemoteCommand(node), connection });
+    }
+  }
+
+  /**
+   * Local-Explorer/OS drop onto a remote node. Every dropped path is
+   * inspected first (missing paths and folders fail fast); large or binary
+   * files get one combined prompt; the upload loop reuses backup-first
+   * uploadFile with progress + cancel.
+   */
+  async function handleLocalDrop(targetNode: RemoteTreeNode | undefined, uriListValue: string): Promise<void> {
+    const connection = await requireMutableConnection(targetNode);
+    if (!connection) return;
+    const fsPaths = parseUriList(uriListValue);
+    if (fsPaths.length === 0) return;
+    let collected;
+    try {
+      collected = await collectDropUploads(fsPaths);
+    } catch (err) {
+      await showCommandError(err as Error, { connection });
+      return;
+    }
+    const flagged = collected.filter((c) => c.needsPrompt);
+    if (flagged.length > 0) {
+      const choice = await vscode.window.showWarningMessage(
+        `${flagged.length} of ${collected.length} dropped file(s) are large or look binary. Upload them anyway?`,
+        'Upload all',
+        'Skip flagged',
+      );
+      if (choice !== 'Upload all' && choice !== 'Skip flagged') return;
+      if (choice === 'Skip flagged') collected = collected.filter((c) => !c.needsPrompt);
+    }
+    if (collected.length === 0) return;
+    const targetDir =
+      targetNode?.entry && targetNode.entry.isDirectory
+        ? targetNode.entry.path
+        : targetNode?.entry
+          ? path.posix.dirname(targetNode.entry.path)
+          : connection.remotePath;
+    try {
+      const adapter = await getAdapter(connection);
+      await withCancellableProgress(`Uploading ${collected.length} dropped file(s)`, (signal, reportProgress) =>
+        (async () => {
+          for (const item of collected) {
+            if (signal.aborted) throw new TransferCancelledError();
+            const remotePath = `${targetDir}/${path.posix.basename(item.localPath)}`;
+            reportProgress(remotePath);
+            await uploadFile(adapter, connection.id, item.localPath, remotePath, item.byteSize, auditLog, (message) =>
+              output.appendLine(message),
+              { connection },
+            );
+          }
+        })(),
+      );
+      treeProvider.refresh();
+      await vscode.window.showInformationMessage(`Uploaded ${collected.length} file(s).`);
+    } catch (err) {
+      await showCommandError(err, { retry: () => handleLocalDrop(targetNode, uriListValue), connection });
+    }
+  }
+
+  /**
    * Govard remote import (see docs/specs/2026-09-18-gangway-govard-import-design.md).
    *
    * Workspaces carrying a `.govard.yml` already know their servers, so offer
@@ -1134,6 +1391,12 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     vscode.commands.registerCommand('gangway.downloadFolder', runDownloadFolderCommand),
     vscode.commands.registerCommand('gangway.uploadFolder', runUploadFolderCommand),
     vscode.commands.registerCommand('gangway.compareFile', runCompareFileCommand),
+    vscode.commands.registerCommand('gangway.newFile', (node?: RemoteTreeNode) => runNewRemoteCommand('file', node)),
+    vscode.commands.registerCommand('gangway.newFolder', (node?: RemoteTreeNode) => runNewRemoteCommand('dir', node)),
+    vscode.commands.registerCommand('gangway.renameRemote', runRenameRemoteCommand),
+    vscode.commands.registerCommand('gangway.deleteRemote', runDeleteRemoteCommand),
+    vscode.commands.registerCommand('gangway.duplicateRemote', runDuplicateRemoteCommand),
+    vscode.commands.registerCommand('gangway.chmodRemote', runChmodRemoteCommand),
     vscode.commands.registerCommand('gangway.refreshExplorer', () => treeProvider.refresh()),
     vscode.commands.registerCommand('gangway.importGovardRemotes', () => importGovardRemotes(true)),
     govardFoldersListener,

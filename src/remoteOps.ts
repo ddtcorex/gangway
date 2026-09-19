@@ -1,7 +1,10 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { connectionSlug } from './tmpPath';
+import { connectionSlug, sidecarPathFor, tmpFilePathFor } from './tmpPath';
+import { readSidecar, writeSidecar } from './tmpStore';
+import { isSafeListingName } from './remoteListing';
+import { isProbablyBinary } from './folderQueue';
 import type { AuditLog } from './auditLog';
 import type { ConnectionConfig, RemoteStat, SidecarMeta } from './types';
 import type { RawSftpListEntry } from './transfer/sftpClientAdapter';
@@ -136,8 +139,19 @@ function opStamp(now: number): string {
   );
 }
 
+/**
+ * The minimal surface backupFile needs. SftpClientAdapter and UploadClient
+ * both satisfy it; kept narrow so uploadFile.ts does not have to widen its
+ * own client contract for one backup call.
+ */
+export interface BackupClient {
+  mkdir(remotePath: string, recursive: boolean): Promise<unknown>;
+  fastGet(remotePath: string, localPath: string): Promise<unknown>;
+  fastPut(localPath: string, remotePath: string): Promise<unknown>;
+}
+
 async function mkdirWithFallback(
-  client: RemoteOpsClient,
+  client: Pick<RemoteOpsClient, 'mkdir'>,
   primaryDir: string,
   fallbackDir: string,
 ): Promise<TrashRoots> {
@@ -222,7 +236,7 @@ export function defaultBackupStaging(): BackupStaging {
  * the caller's op line (e.g. upload) covers it.
  */
 export async function backupFile(
-  client: RemoteOpsClient,
+  client: BackupClient,
   connection: ConnectionConfig,
   remotePath: string,
   staging: BackupStaging = defaultBackupStaging(),
@@ -302,4 +316,365 @@ export async function sweepOldRemoteDirs(
     removed += 1;
   }
   return { removed };
+}
+
+export interface OpOptions {
+  count?: number;
+  now?: number;
+  onAuditError?: (message: string) => void;
+}
+
+async function appendAudit(
+  auditLog: AuditLog,
+  entry: Parameters<AuditLog['append']>[0],
+  what: string,
+  onAuditError: (message: string) => void,
+): Promise<void> {
+  // The audit log is a record of the op, not part of it: a failure to
+  // write it is reported on its own channel and never rewrites a success.
+  try {
+    await auditLog.append(entry);
+  } catch (err) {
+    onAuditError(
+      `${what}, but could not write the audit log entry: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/** Exact, case-sensitive typed confirmation. Dismissed (undefined) means no. */
+export function typedConfirmMatches(expected: string, input: string | undefined): boolean {
+  return input !== undefined && input === expected;
+}
+
+async function existsOnServer(client: RemoteOpsClient, remotePath: string): Promise<boolean> {
+  try {
+    await client.stat(remotePath);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return false;
+    throw err;
+  }
+}
+
+/**
+ * Creates a file (zero bytes) or folder. The name is validated, clashes
+ * never overwrite, and the audit line carries op 'create'.
+ */
+export async function createRemote(
+  client: RemoteOpsClient,
+  connection: ConnectionConfig,
+  dirPath: string,
+  name: string,
+  kind: 'file' | 'dir',
+  auditLog: AuditLog,
+  options: OpOptions = {},
+): Promise<{ path: string }> {
+  assertMutatingAllowed(connection);
+  assertInsideRoot(connection, dirPath);
+  if (!isSafeListingName(name)) throw new Error(`Refusing to create "${name}": illegal file name.`);
+  const target = dirPath === '/' ? `/${name}` : `${dirPath}/${name}`;
+  assertNotReserved(connection, target);
+  if (await existsOnServer(client, target)) {
+    throw new Error(`"${target}" already exists on the server.`);
+  }
+  if (kind === 'dir') {
+    await client.mkdir(target, false);
+  } else {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'gangway-newfile-'));
+    const tmp = path.join(dir, 'empty');
+    try {
+      await fs.writeFile(tmp, '');
+      await fs.chmod(tmp, 0o600);
+      await client.fastPut(tmp, target);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+  const now = options.now ?? Date.now();
+  await appendAudit(
+    auditLog,
+    { connectionId: connection.id, remotePath: target, timestamp: now, op: 'create' },
+    `Created ${target}`,
+    options.onAuditError ?? noop,
+  );
+  return { path: target };
+}
+
+async function collectLocalFiles(root: string): Promise<string[]> {
+  const out: string[] = [];
+  const stack: string[] = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop() as string;
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
+      throw err;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) stack.push(full);
+      else if (entry.isFile() && !entry.name.endsWith('.meta.json')) out.push(full);
+    }
+  }
+  return out;
+}
+
+/**
+ * Moves every sidecar under the renamed tree to the new remote paths
+ * (single file or whole folder). Tmp files without sidecars move along;
+ * sidecars without tmp files are dropped as stale.
+ */
+async function remapSidecarsForRename(
+  connection: ConnectionConfig,
+  oldPath: string,
+  newPath: string,
+  wasDirectory: boolean,
+): Promise<void> {
+  const pairs: Array<[string, string]> = [];
+  if (wasDirectory) {
+    const oldRoot = tmpFilePathFor(connection, oldPath);
+    const newRoot = tmpFilePathFor(connection, newPath);
+    for (const oldLocal of await collectLocalFiles(oldRoot)) {
+      pairs.push([oldLocal, path.join(newRoot, path.relative(oldRoot, oldLocal))]);
+    }
+  } else {
+    pairs.push([tmpFilePathFor(connection, oldPath), tmpFilePathFor(connection, newPath)]);
+  }
+  for (const [oldLocal, newLocal] of pairs) {
+    const sidecar = await readSidecar(oldLocal);
+    try {
+      await fs.mkdir(path.dirname(newLocal), { recursive: true });
+      await fs.rename(oldLocal, newLocal);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
+      throw err;
+    }
+    if (sidecar) {
+      const newRemote =
+        newPath + sidecar.remotePath.slice(oldPath.length);
+      await writeSidecar(newLocal, { ...sidecar, remotePath: newRemote });
+      await fs.rm(sidecarPathFor(oldLocal), { force: true });
+    }
+  }
+}
+
+/**
+ * Renames a file or folder server-side. Name clashes never overwrite,
+ * symlink destination parents are refused, and local tmp sidecars follow
+ * the rename (whole subtree for folders).
+ */
+export async function renameRemote(
+  client: RemoteOpsClient,
+  connection: ConnectionConfig,
+  oldPath: string,
+  newName: string,
+  auditLog: AuditLog,
+  options: OpOptions = {},
+): Promise<{ newPath: string }> {
+  assertMutatingAllowed(connection);
+  assertInsideRoot(connection, oldPath);
+  assertNotReserved(connection, oldPath);
+  if (path.posix.relative(connection.remotePath, oldPath) === '') {
+    throw new Error(`Refusing to rename the connection root "${connection.remotePath}" itself.`);
+  }
+  if (!isSafeListingName(newName)) throw new Error(`Refusing to rename to "${newName}": illegal file name.`);
+  const parent = parentDir(oldPath);
+  const newPath = joinRoot(parent, newName);
+  assertNotReserved(connection, newPath);
+  let oldStat: RemoteStat;
+  try {
+    oldStat = await client.stat(oldPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      throw new Error(`"${oldPath}" does not exist on the server.`);
+    }
+    throw err;
+  }
+  const parentStat = await client.stat(parent);
+  if (parentStat.isSymbolicLink) {
+    throw new Error(`Refusing to rename into "${parent}": it is a symlink.`);
+  }
+  if (await existsOnServer(client, newPath)) {
+    throw new Error(`"${newPath}" already exists on the server.`);
+  }
+  await client.posixRename(oldPath, newPath);
+  await remapSidecarsForRename(connection, oldPath, newPath, oldStat.isDirectory);
+  const now = options.now ?? Date.now();
+  await appendAudit(
+    auditLog,
+    { connectionId: connection.id, remotePath: newPath, timestamp: now, op: 'rename', note: `${oldPath} -> ${newPath}` },
+    `Renamed ${oldPath}`,
+    options.onAuditError ?? noop,
+  );
+  return { newPath };
+}
+
+function splitCopyStem(base: string): { stem: string; ext: string } {
+  const dot = base.lastIndexOf('.');
+  if (dot <= 0) return { stem: base, ext: '' };
+  return { stem: base.slice(0, dot), ext: base.slice(dot) };
+}
+
+/**
+ * Duplicates one file via local staging (SFTP has no server-side copy).
+ * Files only: folders get a clear error pointing at download-then-upload.
+ * Clashes get numeric suffixes, never overwrites.
+ */
+export async function duplicateRemote(
+  client: RemoteOpsClient,
+  connection: ConnectionConfig,
+  sourcePath: string,
+  auditLog: AuditLog,
+  options: OpOptions = {},
+): Promise<{ path: string }> {
+  assertMutatingAllowed(connection);
+  assertInsideRoot(connection, sourcePath);
+  assertNotReserved(connection, sourcePath);
+  let sourceStat: RemoteStat;
+  try {
+    sourceStat = await client.stat(sourcePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      throw new Error(`"${sourcePath}" does not exist on the server.`);
+    }
+    throw err;
+  }
+  if (sourceStat.isDirectory) {
+    throw new Error('Duplicating folders is not supported yet — download the folder, then upload it where needed.');
+  }
+  if (sourceStat.isSymbolicLink) {
+    throw new Error(`Refusing to duplicate "${sourcePath}": it is a symlink.`);
+  }
+  const parent = parentDir(sourcePath);
+  const { stem, ext } = splitCopyStem(path.posix.basename(sourcePath));
+  let candidate = joinRoot(parent, `${stem} copy${ext}`);
+  let n = 2;
+  while (await existsOnServer(client, candidate)) {
+    if (n > 100) throw new Error(`Too many copies of "${sourcePath}" already exist.`);
+    candidate = joinRoot(parent, `${stem} copy-${n}${ext}`);
+    n += 1;
+  }
+  assertNotReserved(connection, candidate);
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'gangway-duplicate-'));
+  const tmp = path.join(dir, 'copy');
+  try {
+    await client.fastGet(sourcePath, tmp);
+    await fs.chmod(tmp, 0o600);
+    await client.fastPut(tmp, candidate);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+  const now = options.now ?? Date.now();
+  await appendAudit(
+    auditLog,
+    {
+      connectionId: connection.id,
+      remotePath: candidate,
+      timestamp: now,
+      byteSize: sourceStat.size,
+      op: 'duplicate',
+      note: `from ${sourcePath}`,
+    },
+    `Duplicated ${sourcePath}`,
+    options.onAuditError ?? noop,
+  );
+  return { path: candidate };
+}
+
+/**
+ * Changes the remote mode. The mode must be 3-4 octal digits; the raw
+ * string goes straight to ssh2 (verified: passed through verbatim).
+ */
+export async function chmodRemote(
+  client: RemoteOpsClient,
+  connection: ConnectionConfig,
+  remotePath: string,
+  mode: string,
+  auditLog: AuditLog,
+  options: OpOptions = {},
+): Promise<void> {
+  assertMutatingAllowed(connection);
+  assertInsideRoot(connection, remotePath);
+  assertNotReserved(connection, remotePath);
+  if (!/^[0-7]{3,4}$/.test(mode)) {
+    throw new Error(`Invalid mode "${mode}": expected 3-4 octal digits (e.g. 644).`);
+  }
+  try {
+    await client.stat(remotePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      throw new Error(`"${remotePath}" does not exist on the server.`);
+    }
+    throw err;
+  }
+  await client.chmod(remotePath, mode);
+  const now = options.now ?? Date.now();
+  await appendAudit(
+    auditLog,
+    { connectionId: connection.id, remotePath, timestamp: now, op: 'chmod', note: `mode ${mode}` },
+    `Changed mode of ${remotePath}`,
+    options.onAuditError ?? noop,
+  );
+}
+
+/**
+ * Parses a text/uri-list drop payload into local file paths. Only file://
+ * entries survive; anything else (https, comments, garbage) is skipped.
+ */
+export function parseUriList(value: string): string[] {
+  const out: string[] = [];
+  for (const line of value.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('file://')) continue;
+    try {
+      const decoded = decodeURIComponent(trimmed.replace(/^file:\/\/[^/]*/, ''));
+      if (!decoded.startsWith('/')) continue;
+      out.push(decoded);
+    } catch {
+      continue;
+    }
+  }
+  return out;
+}
+
+export interface DropUpload {
+  localPath: string;
+  byteSize: number;
+  needsPrompt: boolean;
+}
+
+const DROP_PROMPT_THRESHOLD_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Inspects dropped local paths: missing paths and directories fail fast
+ * with a clear message; large or binary files are flagged for one prompt.
+ */
+export async function collectDropUploads(fsPaths: string[]): Promise<DropUpload[]> {
+  const out: DropUpload[] = [];
+  for (const localPath of fsPaths) {
+    let st: import('node:fs').Stats;
+    try {
+      st = await fs.stat(localPath);
+    } catch {
+      throw new Error(`Local file "${localPath}" does not exist.`);
+    }
+    if (!st.isFile()) {
+      throw new Error(`"${localPath}" is not a file — dropping folders is not supported yet.`);
+    }
+    let needsPrompt = st.size > DROP_PROMPT_THRESHOLD_BYTES;
+    if (!needsPrompt) {
+      const fh = await fs.open(localPath, 'r');
+      try {
+        const buffer = Buffer.alloc(8192);
+        const { bytesRead } = await fh.read(buffer, 0, 8192, 0);
+        needsPrompt = isProbablyBinary(buffer.subarray(0, bytesRead));
+      } finally {
+        await fh.close();
+      }
+    }
+    out.push({ localPath, byteSize: st.size, needsPrompt });
+  }
+  return out;
 }

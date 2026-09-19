@@ -68,7 +68,27 @@ export class GangwayTreeProvider implements vscode.TreeDataProvider<GangwayTreeN
      * here already does; this stays a plain callback so the provider itself
      * never touches vscode.window directly, matching its existing style. */
     private readonly onRootError: (error: unknown) => void = () => {},
+    /**
+     * Local-Explorer/OS drops onto the tree. Kept as a callback for the same
+     * reason as onRootError: the provider parses the transfer and forwards
+     * it, the extension owns the upload. Undefined disables drops.
+     */
+    private readonly onDrop?: (node: RemoteTreeNode | undefined, uriListValue: string) => Promise<void>,
   ) {}
+
+  /** Drops accepted from the local Explorer and the OS file manager. */
+  readonly dropMimeTypes = ['text/uri-list'];
+
+  async handleDrop(
+    target: GangwayTreeNode | undefined,
+    dataTransfer: vscode.DataTransfer,
+    _token: vscode.CancellationToken,
+  ): Promise<void> {
+    const value = await dataTransfer.get('text/uri-list')?.asString();
+    if (!value || !this.onDrop) return;
+    const node = target !== undefined && !isSelectorNode(target) ? target : undefined;
+    await this.onDrop(node, value);
+  }
 
   private boundConnection(): ConnectionConfig | undefined {
     const id = this.boundConnectionId();
