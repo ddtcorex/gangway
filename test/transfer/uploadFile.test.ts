@@ -205,7 +205,7 @@ describe('uploadFile', () => {
     const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
 
     await uploadFile(client, 'c1', localPath, '/srv/app/a.php', 14, auditLog, () => {}, {
-      connection: backupConnection,
+      backup: { connection: backupConnection },
     });
 
     expect(gets).toEqual(['/srv/app/a.php']);
@@ -230,10 +230,27 @@ describe('uploadFile', () => {
     const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
 
     await uploadFile(client, 'c1', localPath, '/srv/app/new.php', 14, auditLog, () => {}, {
-      connection: backupConnection,
+      backup: { connection: backupConnection },
     });
 
     expect(client.fastGet).not.toHaveBeenCalled();
     expect(client.fastPut).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips the sidecar refresh for workspace uploads, leaving no meta.json behind', async () => {
+    const client = {
+      mkdir: vi.fn().mockResolvedValue(undefined),
+      stat: vi.fn(),
+      fastGet: vi.fn(),
+      fastPut: vi.fn().mockResolvedValue(undefined),
+      posixRename: vi.fn().mockResolvedValue(undefined),
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+    const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
+
+    await uploadFile(client, 'c1', localPath, '/srv/app/a.php', 14, auditLog, () => {}, { writeSidecar: false });
+
+    expect(await readSidecar(localPath)).toBeUndefined();
+    expect(client.stat).not.toHaveBeenCalled();
   });
 });

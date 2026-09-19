@@ -114,6 +114,14 @@
         "title": "Gangway: Sync Folder with Preview"
       },
       {
+        "command": "gangway.syncWorkspaceUp",
+        "title": "Gangway: Sync Workspace Up"
+      },
+      {
+        "command": "gangway.syncWorkspaceDown",
+        "title": "Gangway: Sync Workspace Down"
+      },
+      {
         "command": "gangway.refreshExplorer",
         "title": "Gangway: Refresh Explorer",
         "icon": "$(refresh)"

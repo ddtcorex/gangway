@@ -67,6 +67,7 @@ vi.mock('../src/transfer/connectionPool', () => ({
 
 import { activate } from '../src/extension';
 import { ConnectionPool } from '../src/transfer/connectionPool';
+import type { ConnectionManager } from '../src/connectionManager';
 import { writeSidecar } from '../src/tmpStore';
 import { tmpFilePathFor } from '../src/tmpPath';
 import type { ConnectionConfig } from '../src/types';
@@ -169,6 +170,7 @@ describe('activate - realistic command invocation', () => {
   let tmpHome: string;
   let handlers: Map<string, (...args: unknown[]) => unknown>;
   let connection: ConnectionConfig;
+  let connectionManager: ConnectionManager;
   let osTmpdirSpy: ReturnType<typeof vi.spyOn>;
   let capturedTreeView: { __test_fireDidChangeSelection: (node: unknown) => void } | undefined;
 
@@ -200,6 +202,7 @@ describe('activate - realistic command invocation', () => {
     }) as typeof originalCreateTreeView;
 
     const result = activate(fakeContext());
+    connectionManager = result.connectionManager;
     connection = await result.connectionManager.add({
       name: 'staging',
       host: 'example.com',
@@ -802,6 +805,69 @@ describe('activate - realistic command invocation', () => {
       const puts = (fakeRawClient.fastPut as ReturnType<typeof vi.fn>).mock.calls as Array<[string, string]>;
       expect(puts.some(([local]) => local.endsWith('keep.php'))).toBe(true);
       expect(puts.some(([local, remote]) => local.includes('skip.js') || remote.includes('skip.js'))).toBe(false);
+      infoSpy.mockRestore();
+    });
+  });
+
+  describe('sync workspace', () => {
+    let workRoot: string;
+    let previousFolders: unknown;
+
+    beforeEach(async () => {
+      workRoot = path.join(tmpHome, 'work');
+      await fs.mkdir(workRoot, { recursive: true });
+      previousFolders = vscode.workspace.workspaceFolders;
+      (vscode.workspace as unknown as { workspaceFolders: { uri: { fsPath: string }; name: string }[] }).workspaceFolders = [{ uri: { fsPath: workRoot }, name: 'work' }];
+    });
+
+    afterEach(() => {
+      (vscode.workspace as unknown as { workspaceFolders: unknown }).workspaceFolders = previousFolders;
+      mockWindow.__test_resetAnswers();
+    });
+
+    it('gangway.syncWorkspaceUp uploads a workspace file through the default mapping', async () => {
+      await fs.writeFile(path.join(workRoot, 'hello.php'), '<?php');
+      mockWindow.__test_queuePick((items: unknown[]) => items);
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.syncWorkspaceUp')!();
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Synced 1'));
+      const puts = (fakeRawClient.fastPut as ReturnType<typeof vi.fn>).mock.calls as Array<[string, string]>;
+      expect(puts.some(([local, remote]) => local === path.join(workRoot, 'hello.php') && remote === '/var/www/hello.php.tmp')).toBe(true);
+      infoSpy.mockRestore();
+    });
+
+    it('names the mapped root in the summary so unmapped roots are visible', async () => {
+      await fs.writeFile(path.join(workRoot, 'hello.php'), '<?php');
+      mockWindow.__test_queuePick((items: unknown[]) => items);
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.syncWorkspaceUp')!();
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining(`${workRoot} → /var/www`));
+      infoSpy.mockRestore();
+    });
+
+    it('picks between explicit mappings when several match', async () => {
+      const subDir = path.join(workRoot, 'sub');
+      await fs.mkdir(subDir, { recursive: true });
+      await fs.writeFile(path.join(subDir, 'f.php'), '<?php');
+      await connectionManager.update(connection.id, {
+        mappings: [
+          { localPath: workRoot, remotePath: '/srv/app' },
+          { localPath: subDir, remotePath: '/srv/other' },
+        ],
+      });
+      mockWindow.__test_queuePick((items: unknown[]) => (items as unknown[])[1]);
+      mockWindow.__test_queuePick((items: unknown[]) => items);
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.syncWorkspaceUp')!();
+
+      const puts = (fakeRawClient.fastPut as ReturnType<typeof vi.fn>).mock.calls as Array<[string, string]>;
+      expect(puts.some(([, remote]) => remote.startsWith('/srv/other/'))).toBe(true);
+      expect(puts.some(([, remote]) => remote.startsWith('/srv/app/'))).toBe(false);
       infoSpy.mockRestore();
     });
   });

@@ -11,7 +11,7 @@ import { AuditLog } from './auditLog';
 import { checkConflict } from './conflictGuard';
 import { readSidecar } from './tmpStore';
 import { purgeExpiredTmp, sweepUnknownTmpRoots } from './tmpRetention';
-import { tmpFilePathFor, tmpRootFor, connectionSlug } from './tmpPath';
+import { tmpFilePathFor, tmpRootFor, connectionSlug, sidecarPathFor } from './tmpPath';
 import { mapSftpError, actionLabel, isConnectionError } from './errorMapper';
 import { mapListingToEntries } from './remoteListing';
 import { GangwayTreeProvider, isSelectorNode, type RemoteTreeNode, type GangwayTreeNode } from './ui/gangwayTreeProvider';
@@ -50,6 +50,7 @@ import {
 import { clearClipboard, copyToClipboard, cutToClipboard, type ClipboardState } from './ui/treeClipboard';
 import { classifyRow, describeExcludedSelection, toQuickPickRow, type SyncRow } from './syncPreview';
 import { effectiveExcludes, matchesExcludes } from './excludes';
+import { defaultMapping } from './pathMapping';
 import type { FileConflictDecision } from './conflictGuard';
 import type { ConnectionConfig, SidecarMeta } from './types';
 import { testConnection } from './testConnection';
@@ -776,7 +777,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       }
       await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, title: `Gangway: uploading ${remotePath}` },
-        () => uploadFile(adapter, connection.id, localPath as string, remotePath as string, byteSize, auditLog, (message) => output.appendLine(message), { connection }),
+        () => uploadFile(adapter, connection.id, localPath as string, remotePath as string, byteSize, auditLog, (message) => output.appendLine(message), { backup: { connection } }),
       );
       dirtyDecorations.refresh(vscode.Uri.file(localPath));
       treeProvider.refresh();
@@ -904,7 +905,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
             }
             await uploadFile(adapter, connection.id, localPath, file, byteSize, auditLog, (message) =>
               output.appendLine(message),
-              { connection },
+              { backup: { connection } },
             );
             dirtyDecorations.refresh(vscode.Uri.file(localPath));
           },
@@ -1413,7 +1414,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
             reportProgress(remotePath);
             await uploadFile(adapter, connection.id, item.localPath, remotePath, item.byteSize, auditLog, (message) =>
               output.appendLine(message),
-              { connection },
+              { backup: { connection } },
             );
           }
         })(),
@@ -1564,6 +1565,37 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       direction === 'up' ? await requireMutableConnection(node) : resolveConnection(node);
     if (!connection) return;
     const syncRoot = node.entry.path;
+    await runSyncFlow({
+      connection,
+      syncRoot,
+      localRoot: tmpFilePathFor(connection, syncRoot),
+      direction,
+      label: syncRoot,
+      isWorkspace: false,
+      retry: () => runSyncFolderCommand(node),
+    });
+  }
+
+  /**
+   * The shared sync flow behind folder sync (tmp mirror) and workspace sync:
+   * scan both sides, excluded-count dialog, preview pick, per-file run with
+   * Conflict Guard, single audit line, summary. tmp-mirror specifics
+   * (sidecars, tmp status bar) versus workspace specifics (no sidecar
+   * litter, tmp→workspace copy on download) branch on isWorkspace.
+   */
+  async function runSyncFlow(options: {
+    connection: ConnectionConfig;
+    /** Remote folder being synced. */
+    syncRoot: string;
+    /** Local counterpart: tmp mirror or workspace folder. */
+    localRoot: string;
+    direction: SyncDirection;
+    /** Display label for progress/summary (the mapped pair for workspace sync). */
+    label: string;
+    isWorkspace: boolean;
+    retry: () => Promise<void>;
+  }): Promise<void> {
+    const { connection, syncRoot, localRoot, direction, label, isWorkspace, retry } = options;
     const fs = (await import('node:fs/promises')).default;
     try {
       const adapter = await getAdapter(connection);
@@ -1573,13 +1605,12 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         const excludedCounter = { count: 0 };
         skippedSymlinks.length = 0;
         const exclude = (rel: string): boolean => matchesExcludes(rel, patterns);
-        const localRoot = tmpFilePathFor(connection, syncRoot);
         const local = await walkLocalSyncTree(localRoot, exclude, excludedCounter);
         const remote = await walkRemoteSyncTree(adapter, connection, syncRoot, exclude, skippedSymlinks, excludedCounter);
         return { local, remote, excluded: excludedCounter.count };
       };
       let { local, remote, excluded } = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: `Gangway: scanning ${syncRoot}` },
+        { location: vscode.ProgressLocation.Notification, title: `Gangway: scanning ${label}` },
         () => scan(),
       );
       const totalScanned = local.length + remote.length + excluded;
@@ -1594,7 +1625,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         if (choice === described.includeAllLabel) {
           patterns = [];
           ({ local, remote, excluded } = await vscode.window.withProgress(
-            { location: vscode.ProgressLocation.Notification, title: `Gangway: scanning ${syncRoot}` },
+            { location: vscode.ProgressLocation.Notification, title: `Gangway: scanning ${label}` },
             () => scan(),
           ));
         }
@@ -1623,7 +1654,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       }
       const candidates = rows.filter((row) => row.verdict !== 'Same');
       if (candidates.length === 0) {
-        await vscode.window.showInformationMessage(`No differences between local and server for ${syncRoot}.`);
+        await vscode.window.showInformationMessage(`No differences between local and server for ${label}.`);
         return;
       }
       type SyncPickRow = vscode.QuickPickItem & { row: (typeof rows)[number] };
@@ -1644,7 +1675,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       let done = 0;
       const skipped: string[] = [];
       const failed: { remotePath: string; message: string }[] = [];
-      await withCancellableProgress(`Syncing ${syncRoot} ${direction}`, (signal, reportProgress) =>
+      await withCancellableProgress(`Syncing ${label} ${direction}`, (signal, reportProgress) =>
         (async () => {
           for (const { row } of picked) {
             if (signal.aborted) throw new TransferCancelledError();
@@ -1660,6 +1691,11 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
                   const decision = await resolveFileConflict(adapter, connection.id, row.localPath, remotePath, conflictUi);
                   if (decision === 'keepServer') {
                     dirtyDecorations.refresh(vscode.Uri.file(row.localPath));
+                    if (isWorkspace) {
+                      // keepServer refreshes a sidecar next to the file —
+                      // remove it so workspace sync never litters the repo.
+                      await fs.rm(sidecarPathFor(row.localPath), { force: true }).catch(() => {});
+                    }
                     skipped.push(`${remotePath} (kept server version)`);
                     continue;
                   }
@@ -1676,7 +1712,10 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
                 }
                 await uploadFile(adapter, connection.id, row.localPath, remotePath, byteSize, auditLog, (message) =>
                   output.appendLine(message),
-                  { connection },
+                  // Workspace uploads never leave sidecars behind: a
+                  // `.meta.json` next to the user's own project files would
+                  // litter their repo (and could even get committed).
+                  isWorkspace ? { backup: { connection }, writeSidecar: false } : { backup: { connection } },
                 );
                 dirtyDecorations.refresh(vscode.Uri.file(row.localPath));
                 done += 1;
@@ -1706,10 +1745,22 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
                     await fs.rm(serverCopyPath, { force: true }).catch(() => {});
                   }
                 }
-                const { localPath } = await downloadFile(adapter, connection, remotePath);
-                dirtyDecorations.refresh(vscode.Uri.file(localPath));
-                tmpStatusBar.showFor(connection.name, remotePath, localPath);
-                done += 1;
+                if (isWorkspace) {
+                  // Workspace downloads land in the workspace, not the tmp
+                  // mirror: download to tmp, then copy over. No tmp status
+                  // bar either — that badge means "tmp-backed editor".
+                  const downloaded = await downloadFile(adapter, connection, remotePath);
+                  const dest = path.join(localRoot, ...row.relativePath.split('/'));
+                  await fs.mkdir(path.dirname(dest), { recursive: true });
+                  await fs.copyFile(downloaded.localPath, dest);
+                  dirtyDecorations.refresh(vscode.Uri.file(dest));
+                  done += 1;
+                } else {
+                  const { localPath } = await downloadFile(adapter, connection, remotePath);
+                  dirtyDecorations.refresh(vscode.Uri.file(localPath));
+                  tmpStatusBar.showFor(connection.name, remotePath, localPath);
+                  done += 1;
+                }
               }
             } catch (err) {
               failed.push({ remotePath, message: err instanceof Error ? err.message : String(err) });
@@ -1738,13 +1789,69 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       if (skipped.length > 0 || skippedSymlinks.length > 0) output.show();
       treeProvider.refresh();
       await vscode.window.showInformationMessage(
-        `Synced ${done} file(s) ${direction}` +
-          (skipped.length > 0 || skippedSymlinks.length > 0 ? ` (${skipped.length + skippedSymlinks.length} skipped, see Output).` : '.'),
+        `Synced ${done} file(s) ${direction} (${label})` +
+          (skipped.length > 0 || skippedSymlinks.length > 0 ? ` (${skipped.length + skippedSymlinks.length} skipped, see Output).` : ''),
       );
-      await handleFolderFailures('sync', failed, () => runSyncFolderCommand(node));
+      await handleFolderFailures('sync', failed, retry);
     } catch (err) {
-      await showCommandError(err, { retry: () => runSyncFolderCommand(node), connection });
+      await showCommandError(err, { retry, connection });
     }
+  }
+
+  /**
+   * Workspace sync (spec §5): the Task 7 engine with the local root resolved
+   * from path mappings instead of the tmp mirror. Explicit mappings win; with
+   * none, the first workspace folder maps to the connection remotePath.
+   * Several mappings → the user picks one via QuickPick.
+   */
+  async function runSyncWorkspaceCommand(direction: SyncDirection): Promise<void> {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (folders.length === 0) {
+      await vscode.window.showWarningMessage('Open a workspace folder first.');
+      return;
+    }
+    const connection = direction === 'up' ? await requireMutableConnection() : getActiveConnection();
+    if (!connection) {
+      if (direction === 'down') await requireActiveConnection();
+      return;
+    }
+    const roots = folders.map((folder) => folder.uri.fsPath);
+    const explicit = connection.mappings ?? [];
+    const candidates =
+      explicit.length > 0
+        ? explicit.map((m) => ({ localRoot: m.localPath, remoteRoot: m.remotePath }))
+        : (() => {
+            const fallback = defaultMapping(connection, roots);
+            return fallback ? [{ localRoot: fallback.local, remoteRoot: fallback.remote }] : [];
+          })();
+    if (candidates.length === 0) return;
+    let choice = candidates[0];
+    if (candidates.length > 1) {
+      type MappingRow = vscode.QuickPickItem & { localRoot: string; remoteRoot: string };
+      const picked = await vscode.window.showQuickPick(
+        candidates.map((c): MappingRow => ({ label: `${c.localRoot} → ${c.remoteRoot}`, localRoot: c.localRoot, remoteRoot: c.remoteRoot })),
+        { placeHolder: 'Select a path mapping to sync' },
+      );
+      if (!picked) return;
+      choice = { localRoot: picked.localRoot, remoteRoot: picked.remoteRoot };
+    }
+    const fs = (await import('node:fs/promises')).default;
+    try {
+      const stat = await fs.stat(choice.localRoot);
+      if (!stat.isDirectory()) throw new Error('not a directory');
+    } catch {
+      await vscode.window.showWarningMessage(`Local folder ${choice.localRoot} does not exist.`);
+      return;
+    }
+    await runSyncFlow({
+      connection,
+      syncRoot: choice.remoteRoot,
+      localRoot: choice.localRoot,
+      direction,
+      label: `${choice.localRoot} → ${choice.remoteRoot}`,
+      isWorkspace: true,
+      retry: () => runSyncWorkspaceCommand(direction),
+    });
   }
 
   /**
@@ -1957,6 +2064,8 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     vscode.commands.registerCommand('gangway.restoreFromTrash', runRestoreFromTrashCommand),
     vscode.commands.registerCommand('gangway.emptyTrash', runEmptyTrashCommand),
     vscode.commands.registerCommand('gangway.syncFolder', runSyncFolderCommand),
+    vscode.commands.registerCommand('gangway.syncWorkspaceUp', () => runSyncWorkspaceCommand('up')),
+    vscode.commands.registerCommand('gangway.syncWorkspaceDown', () => runSyncWorkspaceCommand('down')),
     vscode.commands.registerCommand('gangway.refreshExplorer', () => treeProvider.refresh()),
     vscode.commands.registerCommand('gangway.importGovardRemotes', () => importGovardRemotes(true)),
     govardFoldersListener,

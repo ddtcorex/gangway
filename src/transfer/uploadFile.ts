@@ -57,12 +57,19 @@ export async function uploadFile(
    */
   logWarning: (message: string) => void = () => {},
   /**
-   * When present, the existing server file is copied to the backup dir
-   * before overwriting (spec §5). A failed backup never blocks the push the
-   * user explicitly asked for: it is reported and the upload proceeds.
+   * - `backup`: when present, the existing server file is copied to the
+   *   backup dir before overwriting (spec §5). A failed backup never blocks
+   *   the push the user explicitly asked for: it is reported and the upload
+   *   proceeds.
+   * - `writeSidecar` (default true): refresh the tmp sidecar baseline after
+   *   the push. Workspace sync passes false — a `.meta.json` next to the
+   *   user's own project files would litter their repo (and could even get
+   *   committed).
    */
-  backup?: { connection: ConnectionConfig; staging?: BackupStaging },
+  options?: { backup?: { connection: ConnectionConfig; staging?: BackupStaging }; writeSidecar?: boolean },
 ): Promise<void> {
+  const backup = options?.backup;
+  const writeSidecarBaseline = options?.writeSidecar ?? true;
   // The parent may never have existed remotely (a locally-created folder
   // pushed for the first time). Recursive mkdir is idempotent on the lib
   // ("already exists" is not an error), and anything it cannot fix surfaces
@@ -132,6 +139,8 @@ export async function uploadFile(
   // not an external edit, so reporting it as a conflict is a false positive
   // that confuses a user during a completely normal multi-edit hotfix
   // session (found in review after Task 19's real-server E2E work).
+  // Skipped for workspace sync (writeSidecar: false): see the options doc.
+  if (!writeSidecarBaseline) return;
   const freshStat = await client.stat(remotePath);
   const localStat = await fs.stat(localPath);
   await writeSidecar(localPath, {
