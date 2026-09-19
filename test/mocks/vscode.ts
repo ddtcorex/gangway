@@ -170,7 +170,14 @@ export const window = {
   showWarningMessage: async (_msg: string, ..._items: string[]) => answerQueues.warning.shift(),
   showErrorMessage: async (_msg: string, ..._items: string[]) => answerQueues.error.shift(),
   showInformationMessage: async (_msg: string, ..._items: string[]) => answerQueues.info.shift(),
-  showQuickPick: async (_items: unknown[], _opts?: unknown) => answerQueues.pick.shift(),
+  showQuickPick: async (_items: unknown[], _opts?: unknown) => {
+    const next = answerQueues.pick.shift();
+    // A queued function acts as a selector over the offered items (e.g.
+    // `(items) => [items[0]]`): the handler under test builds its own rows,
+    // which the test cannot know upfront, so it picks from what was offered.
+    if (typeof next === 'function') return (next as (items: unknown[]) => unknown)(_items as unknown[]);
+    return next;
+  },
   showInputBox: async (_opts?: unknown) => answerQueues.input.shift(),
   showTextDocument: async (_uri: unknown) => ({}),
   // The token mirrors vscode.CancellationToken closely enough for the folder

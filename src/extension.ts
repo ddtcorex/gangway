@@ -30,17 +30,24 @@ import { checkEditSession, acquireEditSession, releaseEditSession } from './edit
 import {
   FrozenError,
   assertMutatingAllowed,
+  backupRootsFor,
   chmodRemote,
   collectDropUploads,
   createRemote,
   duplicateRemote,
+  emptyTrash,
   guardUploadTarget,
+  inventoryTrash,
   moveToTrash,
   parseUriList,
+  pasteEntries,
   renameRemote,
+  restoreEntries,
+  sweepOldRemoteDirs,
+  trashRootsFor,
   typedConfirmMatches,
 } from './remoteOps';
->>>>>>> 9ba45ee (feat(remoteops): add new rename delete duplicate chmod drop commands)
+import { clearClipboard, copyToClipboard, cutToClipboard, type ClipboardState } from './ui/treeClipboard';
 import type { FileConflictDecision } from './conflictGuard';
 import type { ConnectionConfig } from './types';
 
@@ -148,7 +155,36 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       (_progress, token) =>
         raceWithCancellation(pool.getClient(connection), token, () => pool.invalidate(connection.id)),
     );
-    return new SftpClientAdapter(client as unknown as RawSftpClient);
+    const adapter = new SftpClientAdapter(client as unknown as RawSftpClient);
+    // Trash/backup retention is lazy, not boot-time: the first successful
+    // connect per connection sweeps expired trash/backup entries once per
+    // session. A boot-time sweep would SSH on startup, which this extension
+    // never does unasked.
+    void sweepTrashFor(connection, adapter);
+    return adapter;
+  };
+
+  const sweptTrashRoots = new Set<string>();
+
+  /** Trash + backup retention: 30 days, swept lazily on first connect (see getAdapter). */
+  const TRASH_BACKUP_RETENTION_MS = 30 * 24 * 3600 * 1000;
+
+  async function sweepTrashFor(connection: ConnectionConfig, adapter: SftpClientAdapter): Promise<void> {
+    if (sweptTrashRoots.has(connection.id)) return;
+    sweptTrashRoots.add(connection.id);
+    const roots = [
+      trashRootsFor(connection).dir,
+      `${connection.remotePath}/.trash-gangway`,
+      backupRootsFor(connection).dir,
+      `${connection.remotePath}/.backup-gangway`,
+    ];
+    for (const root of roots) {
+      try {
+        await sweepOldRemoteDirs(adapter, root, TRASH_BACKUP_RETENTION_MS);
+      } catch {
+        // Best-effort: a later command retries the sweep the same way.
+      }
+    }
   }
 
   /**
@@ -1134,6 +1170,170 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     } catch (err) {
       await showCommandError(err, { retry: () => runChmodRemoteCommand(node), connection });
     }
+  };
+
+  /** The tree clipboard: cut/copy names connections, paste resolves them. Local state only. */
+  let clipboard: ClipboardState = clearClipboard();
+
+  async function runCutCopyCommand(cut: boolean, node?: RemoteTreeNode | RemoteTreeNode[]): Promise<void> {
+    const nodes = node === undefined ? [] : Array.isArray(node) ? node : [node];
+    if (nodes.length === 0) {
+      await vscode.window.showWarningMessage('Select one or more files or folders in the Gangway Remote Explorer first.');
+      return;
+    }
+    // Cutting/copying only arms the local clipboard — nothing on the server
+    // moves — so frozen connections are allowed here; the paste is blocked.
+    const first = nodes[0];
+    const connection = resolveConnection(first);
+    if (!connection) return;
+    for (const entry of nodes) {
+      if (entry.connectionId !== connection.id) {
+        await vscode.window.showWarningMessage('Cut/copy across connections is not supported: select items from one connection.');
+        return;
+      }
+    }
+    const paths = nodes.map((entry) => (entry.entry as { path: string }).path);
+    clipboard = cut ? cutToClipboard(clipboard, connection.id, paths) : copyToClipboard(clipboard, connection.id, paths);
+    await vscode.window.showInformationMessage(`${cut ? 'Cut' : 'Copied'} ${paths.length} item(s).`);
+  }
+
+  async function runPasteEntriesCommand(node?: RemoteTreeNode): Promise<void> {
+    const connection = await requireMutableConnection(node);
+    if (!connection) return;
+    if (clipboard.paths.length === 0) {
+      await vscode.window.showInformationMessage('Clipboard is empty. Cut or copy something in the Gangway Remote Explorer first.');
+      return;
+    }
+    const destDir =
+      node?.entry !== undefined
+        ? node.entry.isDirectory
+          ? node.entry.path
+          : path.posix.dirname(node.entry.path)
+        : connection.remotePath;
+    try {
+      const adapter = await getAdapter(connection);
+      const result = await withCancellableProgress('Pasting…', (signal, reportProgress) =>
+        pasteEntries(
+          adapter,
+          connection,
+          clipboard,
+          destDir,
+          {
+            confirmOverwrite: ({ remotePath, stagingPath }) =>
+              resolveFileConflict(adapter, connection.id, stagingPath as string, remotePath, conflictUi),
+            auditLog,
+          },
+          { signal, onAuditError: (message) => output.appendLine(message) },
+        ).then((r) => {
+          reportProgress(destDir);
+          return r;
+        }),
+      );
+      if (clipboard.cut && result.pasted.length > 0 && result.skipped.length === 0) clipboard = clearClipboard();
+      treeProvider.refresh();
+      if (result.skipped.length > 0) {
+        for (const skip of result.skipped) output.appendLine(`Paste skipped: ${skip.path} (${skip.reason})`);
+        output.show();
+        await vscode.window.showWarningMessage(
+          `Pasted ${result.pasted.length}, skipped ${result.skipped.length}. Details are in the Gangway output channel.`,
+        );
+      } else {
+        await vscode.window.showInformationMessage(`Pasted ${result.pasted.length} item(s).`);
+      }
+    } catch (err) {
+      await showCommandError(err, { retry: () => runPasteEntriesCommand(node), connection });
+    }
+  }
+
+  async function runRestoreFromTrashCommand(): Promise<void> {
+    const connection = await requireMutableConnection();
+    if (!connection) return;
+    try {
+      const adapter = await getAdapter(connection);
+      const picks = await withCancellableProgress('Listing trash…', () => inventoryTrash(adapter, connection));
+      if (picks.length === 0) {
+        await vscode.window.showInformationMessage('Trash is empty.');
+        return;
+      }
+      type TrashRow = vscode.QuickPickItem & { pick: (typeof picks)[number] };
+      const rows: TrashRow[] = picks.map((pick) => ({ label: pick.label, detail: pick.detail, pick }));
+      const selected = await vscode.window.showQuickPick(rows, {
+        canPickMany: true,
+        placeHolder: 'Select trash entries to restore',
+      });
+      if (!selected || selected.length === 0) return;
+      let override: string | undefined;
+      if (selected.length === 1) {
+        const destChoice = await vscode.window.showQuickPick(['Restore to original locations', 'Choose alternate folder…'], {
+          placeHolder: 'Where should the files go?',
+        });
+        if (!destChoice) return;
+        if (destChoice !== 'Restore to original locations') {
+          override = await vscode.window.showInputBox({
+            prompt: 'Alternate folder (remote path)',
+            value: path.posix.dirname(selected[0].pick.items[0]?.originalPath ?? connection.remotePath),
+          });
+          if (!override) return;
+        }
+      }
+      const result = await withCancellableProgress('Restoring…', (signal) =>
+        restoreEntries(
+          adapter,
+          connection,
+          selected.map((row) => row.pick),
+          override,
+          {
+            confirmOverwrite: ({ remotePath, stagingPath }) =>
+              resolveFileConflict(adapter, connection.id, stagingPath as string, remotePath, conflictUi),
+            auditLog,
+          },
+          { signal, onAuditError: (message) => output.appendLine(message) },
+        ),
+      );
+      treeProvider.refresh();
+      if (result.skipped.length > 0) {
+        for (const skip of result.skipped) output.appendLine(`Restore skipped: ${skip.path} (${skip.reason})`);
+        output.show();
+      }
+      await vscode.window.showInformationMessage(
+        `Restored ${result.restored.length}, skipped ${result.skipped.length}.`,
+      );
+    } catch (err) {
+      await showCommandError(err, { retry: () => runRestoreFromTrashCommand(), connection });
+    }
+  }
+
+  async function runEmptyTrashCommand(): Promise<void> {
+    const connection = await requireMutableConnection();
+    if (!connection) return;
+    try {
+      const adapter = await getAdapter(connection);
+      const picks = await withCancellableProgress('Listing trash…', () => inventoryTrash(adapter, connection));
+      if (picks.length === 0) {
+        await vscode.window.showInformationMessage('Trash is empty.');
+        return;
+      }
+      const files = picks.reduce((total, pick) => total + pick.count, 0);
+      const typed = await vscode.window.showInputBox({
+        prompt: `Type EMPTY TRASH to permanently delete ${picks.length} trash entr${picks.length === 1 ? 'y' : 'ies'} (${files} file(s)). There is no undo.`,
+      });
+      if (!typedConfirmMatches('EMPTY TRASH', typed)) {
+        await vscode.window.showInformationMessage('Empty Trash cancelled.');
+        return;
+      }
+      const result = await withCancellableProgress('Emptying trash…', (signal) =>
+        emptyTrash(adapter, connection, picks, auditLog, {
+          signal,
+          onAuditError: (message) => output.appendLine(message),
+        }),
+      );
+      treeProvider.refresh();
+      await vscode.window.showInformationMessage(
+        `Emptied trash: ${result.files} file(s) in ${result.entries} entries deleted permanently.`,
+      );
+    } catch (err) {
+      await showCommandError(err, { retry: () => runEmptyTrashCommand(), connection });
+    }
   }
 
   /**
@@ -1397,6 +1597,11 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     vscode.commands.registerCommand('gangway.deleteRemote', runDeleteRemoteCommand),
     vscode.commands.registerCommand('gangway.duplicateRemote', runDuplicateRemoteCommand),
     vscode.commands.registerCommand('gangway.chmodRemote', runChmodRemoteCommand),
+    vscode.commands.registerCommand('gangway.cutEntries', (node?: RemoteTreeNode | RemoteTreeNode[]) => runCutCopyCommand(true, node)),
+    vscode.commands.registerCommand('gangway.copyEntries', (node?: RemoteTreeNode | RemoteTreeNode[]) => runCutCopyCommand(false, node)),
+    vscode.commands.registerCommand('gangway.pasteEntries', runPasteEntriesCommand),
+    vscode.commands.registerCommand('gangway.restoreFromTrash', runRestoreFromTrashCommand),
+    vscode.commands.registerCommand('gangway.emptyTrash', runEmptyTrashCommand),
     vscode.commands.registerCommand('gangway.refreshExplorer', () => treeProvider.refresh()),
     vscode.commands.registerCommand('gangway.importGovardRemotes', () => importGovardRemotes(true)),
     govardFoldersListener,

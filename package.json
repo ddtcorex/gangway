@@ -90,6 +90,26 @@
         "title": "Gangway: Change Remote Permissions"
       },
       {
+        "command": "gangway.cutEntries",
+        "title": "Gangway: Cut"
+      },
+      {
+        "command": "gangway.copyEntries",
+        "title": "Gangway: Copy"
+      },
+      {
+        "command": "gangway.pasteEntries",
+        "title": "Gangway: Paste"
+      },
+      {
+        "command": "gangway.restoreFromTrash",
+        "title": "Gangway: Restore from Trash"
+      },
+      {
+        "command": "gangway.emptyTrash",
+        "title": "Gangway: Empty Trash (Permanent)"
+      },
+      {
         "command": "gangway.refreshExplorer",
         "title": "Gangway: Refresh Explorer",
         "icon": "$(refresh)"
@@ -127,6 +147,26 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "gangway.cutEntries",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file"
+        },
+        {
+          "command": "gangway.cutEntries",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
+        },
+        {
+          "command": "gangway.copyEntries",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file"
+        },
+        {
+          "command": "gangway.copyEntries",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
+        },
+        {
+          "command": "gangway.pasteEntries",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
+        },
         {
           "command": "gangway.newFile",
           "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"

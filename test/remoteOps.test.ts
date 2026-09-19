@@ -21,6 +21,8 @@ import {
   guardUploadTarget,
   moveToTrash,
   parseUriList,
+  pasteEntries,
+  restoreEntries,
   renameRemote,
   trashRootsFor,
   typedConfirmMatches,
@@ -276,5 +278,120 @@ describe('drop helpers', () => {
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('pasteEntries', () => {
+  it('refuses cross-connection entries', async () => {
+    const clipboard = { connectionId: 'other', paths: ['/srv/app/a.php'], cut: false };
+    const deps = {
+      confirmOverwrite: vi.fn(),
+      auditLog: { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog,
+    };
+    await expect(
+      pasteEntries(fakeOpsClient() as never, connection, clipboard, '/srv/app', deps),
+    ).rejects.toThrow(/different connection/);
+  });
+
+  it('copies a new file via staging and audits op duplicate', async () => {
+    const puts: string[] = [];
+    const client = fakeOpsClient({
+      stat: vi.fn().mockImplementation(async (p: string) => {
+        if (p === '/srv/app' || p === '/srv/app/dest') {
+          return { mtime: 1, size: 0, isDirectory: true, isSymbolicLink: false };
+        }
+        if (p === '/srv/app/a.php') return { mtime: 1, size: 3, isDirectory: false, isSymbolicLink: false };
+        throw enoent();
+      }),
+      fastGet: vi.fn().mockImplementation(async (_r: string, l: string) => {
+        await fs.mkdir(path.dirname(l), { recursive: true });
+        await fs.writeFile(l, 'src');
+      }),
+      fastPut: vi.fn().mockImplementation(async (l: string, r: string) => {
+        puts.push(`${l}->${r}`);
+      }),
+    });
+    const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
+    const deps = { confirmOverwrite: vi.fn(), auditLog };
+    const clipboard = { connectionId: 'c1', paths: ['/srv/app/a.php'], cut: false };
+    const result = await pasteEntries(client as never, connection, clipboard, '/srv/app/dest', deps);
+    expect(result.pasted).toEqual(['/srv/app/dest/a.php']);
+    expect(puts[0]).toMatch(/->\/srv\/app\/dest\/a\.php$/);
+    expect(auditLog.append).toHaveBeenCalledWith(expect.objectContaining({ op: 'duplicate' }));
+    expect(deps.confirmOverwrite).not.toHaveBeenCalled();
+  });
+
+  it('refuses symlink destination parents', async () => {
+    const client = fakeOpsClient({
+      stat: vi.fn().mockImplementation(async (p: string) => {
+        if (p === '/srv/app/dest') return { mtime: 1, size: 0, isDirectory: true, isSymbolicLink: true };
+        return { mtime: 1, size: 3, isDirectory: false, isSymbolicLink: false };
+      }),
+    });
+    const deps = {
+      confirmOverwrite: vi.fn(),
+      auditLog: { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog,
+    };
+    const clipboard = { connectionId: 'c1', paths: ['/srv/app/a.php'], cut: false };
+    await expect(pasteEntries(client as never, connection, clipboard, '/srv/app/dest', deps)).rejects.toThrow(
+      /symlink/,
+    );
+  });
+});
+
+describe('restoreEntries', () => {
+  it('audits op restore even when restoring to the original path', async () => {
+    const renamed: string[] = [];
+    const client = fakeOpsClient({
+      stat: vi.fn().mockImplementation(async (p: string) => {
+        if (p === '/srv/app') return { mtime: 1, size: 0, isDirectory: true, isSymbolicLink: false };
+        throw enoent();
+      }),
+      posixRename: vi.fn().mockImplementation(async (f: string, t: string) => {
+        renamed.push(`${f}->${t}`);
+      }),
+    });
+    const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
+    const deps = { confirmOverwrite: vi.fn(), auditLog };
+    const picks = [
+      {
+        stamp: '20260901-000000-op',
+        trashDir: '/srv/.gangway-trash-abc',
+        items: [{ trashPath: '/srv/.gangway-trash-abc/20260901-000000-op/a.php', originalPath: '/srv/app/a.php', size: 3 }],
+        count: 1,
+        bytes: 3,
+        label: 'x',
+        detail: 'y',
+      },
+    ];
+    const result = await restoreEntries(client as never, connection, picks, undefined, deps);
+    expect(renamed).toEqual([
+      '/srv/.gangway-trash-abc/20260901-000000-op/a.php->/srv/app/a.php',
+    ]);
+    expect(result.restored).toEqual(['/srv/app/a.php']);
+    expect(auditLog.append).toHaveBeenCalledWith(expect.objectContaining({ op: 'restore', count: 1 }));
+    expect(deps.confirmOverwrite).not.toHaveBeenCalled();
+  });
+
+  it('refuses symlink destination parents like paste does', async () => {
+    const client = fakeOpsClient({
+      stat: vi.fn().mockResolvedValue({ mtime: 1, size: 0, isDirectory: true, isSymbolicLink: true }),
+    });
+    const deps = {
+      confirmOverwrite: vi.fn(),
+      auditLog: { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog,
+    };
+    const picks = [
+      {
+        stamp: 's',
+        trashDir: '/srv/.gangway-trash-abc',
+        items: [{ trashPath: '/srv/.gangway-trash-abc/s/a.php', originalPath: '/srv/app/link/a.php', size: 1 }],
+        count: 1,
+        bytes: 1,
+        label: 'x',
+        detail: 'y',
+      },
+    ];
+    await expect(restoreEntries(client as never, connection, picks, undefined, deps)).rejects.toThrow(/symlink/);
   });
 });

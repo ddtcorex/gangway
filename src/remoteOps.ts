@@ -4,8 +4,9 @@ import path from 'node:path';
 import { connectionSlug, sidecarPathFor, tmpFilePathFor } from './tmpPath';
 import { readSidecar, writeSidecar } from './tmpStore';
 import { isSafeListingName } from './remoteListing';
-import { isProbablyBinary } from './folderQueue';
+import { isProbablyBinary, TransferCancelledError } from './folderQueue';
 import type { AuditLog } from './auditLog';
+import type { FileConflictDecision } from './conflictGuard';
 import type { ConnectionConfig, RemoteStat, SidecarMeta } from './types';
 import type { RawSftpListEntry } from './transfer/sftpClientAdapter';
 
@@ -322,6 +323,7 @@ export interface OpOptions {
   count?: number;
   now?: number;
   onAuditError?: (message: string) => void;
+  signal?: AbortSignal;
 }
 
 async function appendAudit(
@@ -677,4 +679,339 @@ export async function collectDropUploads(fsPaths: string[]): Promise<DropUpload[
     out.push({ localPath, byteSize: st.size, needsPrompt });
   }
   return out;
+}
+
+export interface ClipboardState {
+  connectionId: string;
+  paths: string[];
+  cut: boolean;
+}
+
+export interface PasteDeps {
+  confirmOverwrite(entry: { remotePath: string; stagingPath?: string }): Promise<FileConflictDecision>;
+  auditLog: AuditLog;
+}
+
+export interface PasteSkip {
+  path: string;
+  reason: string;
+}
+
+export interface PasteResult {
+  pasted: string[];
+  skipped: PasteSkip[];
+}
+
+/**
+ * Pastes clipboard entries into destDir (same connection only). New
+ * destinations land directly (cut: server-side posixRename, copy: staged
+ * fastGet/fastPut); existing destinations go through the overwrite
+ * confirmation first. Cut audits op 'move', copy audits op 'duplicate'.
+ */
+export async function pasteEntries(
+  client: RemoteOpsClient,
+  connection: ConnectionConfig,
+  clipboard: ClipboardState,
+  destDir: string,
+  deps: PasteDeps,
+  options: OpOptions = {},
+): Promise<PasteResult> {
+  if (clipboard.connectionId !== connection.id) throw new WrongConnectionError();
+  assertMutatingAllowed(connection);
+  assertInsideRoot(connection, destDir);
+  assertNotReserved(connection, destDir);
+  let destDirStat: RemoteStat;
+  try {
+    destDirStat = await client.stat(destDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      throw new Error(`"${destDir}" does not exist on the server.`);
+    }
+    throw err;
+  }
+  if (destDirStat.isSymbolicLink) {
+    throw new Error(`Refusing to paste into "${destDir}": it is a symlink.`);
+  }
+  const now = options.now ?? Date.now();
+  const pasted: string[] = [];
+  const skipped: PasteSkip[] = [];
+  const stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gangway-paste-'));
+  try {
+    for (const [index, sourcePath] of clipboard.paths.entries()) {
+      if (options.signal?.aborted) throw new TransferCancelledError();
+      assertNotReserved(connection, sourcePath);
+      const dest = joinRoot(destDir, path.posix.basename(sourcePath));
+      assertNotReserved(connection, dest);
+      let sourceStat: RemoteStat;
+      try {
+        sourceStat = await client.stat(sourcePath);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+          skipped.push({ path: sourcePath, reason: 'no longer exists on the server' });
+          continue;
+        }
+        throw err;
+      }
+      if (sourceStat.isDirectory && !clipboard.cut) {
+        skipped.push({ path: sourcePath, reason: 'copying folders is not supported yet' });
+        continue;
+      }
+      if (sourceStat.isSymbolicLink) {
+        skipped.push({ path: sourcePath, reason: 'is a symlink' });
+        continue;
+      }
+      const destExists = await existsOnServer(client, dest);
+      if (sourceStat.isDirectory && destExists) {
+        skipped.push({ path: sourcePath, reason: `merging into existing folder ${dest} is not supported` });
+        continue;
+      }
+      let stagingPath: string | undefined;
+      if (!clipboard.cut || destExists) {
+        stagingPath = path.join(stagingDir, `${index}-${path.posix.basename(sourcePath)}`);
+        await client.fastGet(sourcePath, stagingPath);
+        await fs.chmod(stagingPath, 0o600);
+      }
+      if (destExists) {
+        const decision = await deps.confirmOverwrite({ remotePath: dest, stagingPath });
+        if (decision !== 'overwrite') {
+          skipped.push({ path: sourcePath, reason: `kept the server version of ${dest}` });
+          continue;
+        }
+      }
+      if (clipboard.cut) await client.posixRename(sourcePath, dest);
+      else await client.fastPut(stagingPath as string, dest);
+      pasted.push(dest);
+      await appendAudit(
+        deps.auditLog,
+        {
+          connectionId: connection.id,
+          remotePath: dest,
+          timestamp: now,
+          byteSize: sourceStat.size,
+          op: clipboard.cut ? 'move' : 'duplicate',
+          note: `from ${sourcePath}`,
+        },
+        `Pasted ${sourcePath}`,
+        options.onAuditError ?? noop,
+      );
+    }
+  } finally {
+    await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+  }
+  return { pasted, skipped };
+}
+
+export interface TrashItem {
+  trashPath: string;
+  originalPath: string;
+  size: number;
+}
+
+export interface TrashPick {
+  stamp: string;
+  trashDir: string;
+  items: TrashItem[];
+  count: number;
+  bytes: number;
+  label: string;
+  detail: string;
+}
+
+async function walkRemoteFiles(
+  client: Pick<RemoteOpsClient, 'list'>,
+  dir: string,
+): Promise<Array<{ path: string; size: number; isDirectory: boolean }>> {
+  const out: Array<{ path: string; size: number; isDirectory: boolean }> = [];
+  const seen = new Set<string>([dir]);
+  const stack: string[] = [dir];
+  while (stack.length > 0) {
+    const current = stack.pop() as string;
+    let entries: RawSftpListEntry[];
+    try {
+      entries = await client.list(current);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
+      throw err;
+    }
+    for (const entry of entries) {
+      if (!isSafeListingName(entry.name)) continue;
+      const full = current === '/' ? `/${entry.name}` : `${current}/${entry.name}`;
+      // Server listings are attacker-controlled data (see remoteListing.ts):
+      // never visit the same directory twice, so a hostile or looping
+      // listing cannot turn the walk into unbounded memory growth.
+      if (entry.type === 'd') {
+        if (!seen.has(full)) {
+          seen.add(full);
+          stack.push(full);
+        }
+      } else out.push({ path: full, size: entry.size ?? 0, isDirectory: false });
+    }
+  }
+  return out;
+}
+
+/**
+ * Lists every trash operation (default sibling root + in-root fallback),
+ * newest data first is the caller's formatting choice — here in listing
+ * order. Only stamp-shaped directories are inventoried; anything else in
+ * the trash roots is left alone.
+ */
+export async function inventoryTrash(
+  client: Pick<RemoteOpsClient, 'list'>,
+  connection: ConnectionConfig,
+): Promise<TrashPick[]> {
+  const roots = [trashRootsFor(connection).dir, `${connection.remotePath}/.trash-gangway`];
+  const picks: TrashPick[] = [];
+  for (const root of roots) {
+    let stamps: RawSftpListEntry[];
+    try {
+      stamps = await client.list(root);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
+      throw err;
+    }
+    for (const stamp of stamps) {
+      if (stamp.type !== 'd' || !TRASH_STAMP.test(stamp.name)) continue;
+      const stampDir = `${root}/${stamp.name}`;
+      const files = await walkRemoteFiles(client, stampDir);
+      const items: TrashItem[] = files.map((f) => ({
+        trashPath: f.path,
+        originalPath: joinRoot(connection.remotePath, path.posix.relative(stampDir, f.path)),
+        size: f.size,
+      }));
+      const bytes = items.reduce((total, item) => total + item.size, 0);
+      picks.push({
+        stamp: stamp.name,
+        trashDir: root,
+        items,
+        count: items.length,
+        bytes,
+        label: `${stamp.name} — ${items.length} file(s), ${(bytes / 1024).toFixed(1)} KB`,
+        detail: items[0]?.originalPath ?? '(empty operation)',
+      });
+    }
+  }
+  return picks;
+}
+
+/**
+ * Restores trash picks. Each item moves server-side back to its original
+ * path (or under the override dir); existing destinations go through the
+ * overwrite confirmation with the trashed bytes staged for diff. Always
+ * audits op 'restore' — one line per pick with the restored count.
+ */
+export async function restoreEntries(
+  client: RemoteOpsClient,
+  connection: ConnectionConfig,
+  picks: TrashPick[],
+  destDirOverride: string | undefined,
+  deps: PasteDeps,
+  options: OpOptions = {},
+): Promise<{ restored: string[]; skipped: PasteSkip[] }> {
+  assertMutatingAllowed(connection);
+  let override: string | undefined;
+  if (destDirOverride !== undefined) {
+    assertInsideRoot(connection, destDirOverride);
+    assertNotReserved(connection, destDirOverride);
+    const overrideStat = await client.stat(destDirOverride).catch((err) => {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+        throw new Error(`"${destDirOverride}" does not exist on the server.`);
+      }
+      throw err;
+    });
+    if (!overrideStat.isDirectory) throw new Error(`"${destDirOverride}" is not a folder.`);
+    if (overrideStat.isSymbolicLink) throw new Error(`Refusing to restore into "${destDirOverride}": it is a symlink.`);
+    override = destDirOverride;
+  }
+  const now = options.now ?? Date.now();
+  const restored: string[] = [];
+  const skipped: PasteSkip[] = [];
+  const stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gangway-restore-'));
+  try {
+    for (const pick of picks) {
+      let pickRestored = 0;
+      for (const [index, item] of pick.items.entries()) {
+        if (options.signal?.aborted) throw new TransferCancelledError();
+        const dest = override
+          ? joinRoot(override, path.posix.basename(item.originalPath))
+          : item.originalPath;
+        assertInsideRoot(connection, dest);
+        assertNotReserved(connection, dest);
+        const parent = parentDir(dest);
+        try {
+          const parentStat = await client.stat(parent);
+          if (parentStat.isSymbolicLink) {
+            throw new Error(`Refusing to restore into "${parent}": it is a symlink.`);
+          }
+        } catch (err) {
+          if (err instanceof Error && err.message.startsWith('Refusing to restore into')) throw err;
+          if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
+          await client.mkdir(parent, true).catch(() => {});
+        }
+        if (await existsOnServer(client, dest)) {
+          const stagingPath = path.join(stagingDir, `${index}-${path.posix.basename(item.originalPath)}`);
+          await client.fastGet(item.trashPath, stagingPath);
+          await fs.chmod(stagingPath, 0o600);
+          const decision = await deps.confirmOverwrite({ remotePath: dest, stagingPath });
+          if (decision !== 'overwrite') {
+            skipped.push({ path: item.originalPath, reason: `kept the server version of ${dest}` });
+            continue;
+          }
+        }
+        await client.posixRename(item.trashPath, dest);
+        restored.push(dest);
+        pickRestored += 1;
+      }
+      await appendAudit(
+        deps.auditLog,
+        {
+          connectionId: connection.id,
+          remotePath: pick.items[0]?.originalPath ?? `${pick.trashDir}/${pick.stamp}`,
+          timestamp: now,
+          op: 'restore',
+          count: pickRestored,
+        },
+        `Restored trash ${pick.stamp}`,
+        options.onAuditError ?? noop,
+      );
+    }
+  } finally {
+    await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+  }
+  return { restored, skipped };
+}
+
+/**
+ * Permanently deletes trash picks (stamp dirs wholesale). The single
+ * deliberate hard-delete: callers confirm the literal EMPTY TRASH first.
+ * One op 'empty-trash' audit line per pick with its file count. No undo.
+ */
+export async function emptyTrash(
+  client: RemoteOpsClient,
+  connection: ConnectionConfig,
+  picks: TrashPick[],
+  auditLog: AuditLog,
+  options: OpOptions = {},
+): Promise<{ entries: number; files: number }> {
+  assertMutatingAllowed(connection);
+  const now = options.now ?? Date.now();
+  let files = 0;
+  for (const pick of picks) {
+    if (options.signal?.aborted) throw new TransferCancelledError();
+    await removeTrashEntry(client, `${pick.trashDir}/${pick.stamp}`, true);
+    files += pick.count;
+    await appendAudit(
+      auditLog,
+      {
+        connectionId: connection.id,
+        remotePath: `${pick.trashDir}/${pick.stamp}`,
+        timestamp: now,
+        op: 'empty-trash',
+        count: pick.count,
+      },
+      `Emptied trash ${pick.stamp}`,
+      options.onAuditError ?? noop,
+    );
+  }
+  return { entries: picks.length, files };
 }

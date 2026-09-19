@@ -28,6 +28,8 @@ const fakeRawClient = vi.hoisted(() => ({
   posixRename: vi.fn().mockResolvedValue(undefined),
   delete: vi.fn().mockResolvedValue(undefined),
   mkdir: vi.fn().mockResolvedValue(undefined),
+  rmdir: vi.fn().mockResolvedValue(undefined),
+  chmod: vi.fn().mockResolvedValue(undefined),
 }));
 
 function resetFakeClient(): void {
@@ -40,6 +42,8 @@ function resetFakeClient(): void {
   fakeRawClient.posixRename.mockClear();
   fakeRawClient.delete.mockClear();
   fakeRawClient.mkdir.mockClear();
+  fakeRawClient.rmdir.mockClear();
+  fakeRawClient.chmod.mockClear();
 }
 
 // activate() builds its own ConnectionPool internally (not injectable), and
@@ -608,6 +612,121 @@ describe('activate - realistic command invocation', () => {
       expect(fakeRawClient.mkdir).not.toHaveBeenCalled();
       infoSpy.mockRestore();
     });
+  });
+
+  describe('trash and clipboard commands', () => {
+    function trashListFixture() {
+      fakeRawClient.list.mockImplementation(async (dirPath: string) => {
+        // Stamp-specific branch first: a stamp dir path also contains the
+        // trash-root segment, so matching the root first would recurse into
+        // the stamp forever (walkRemoteFiles keeps descending).
+        if (dirPath.includes('20260901-000000-op')) {
+          return [{ name: 'a.php', type: 'f', size: 3 }];
+        }
+        if (dirPath.includes('.gangway-trash-') || dirPath === '/var/www/.trash-gangway') {
+          return [{ name: '20260901-000000-op', type: 'd' }];
+        }
+        return [];
+      });
+    }
+
+    async function activateFrozenConnection() {
+      const fresh = activate(fakeContext());
+      const frozen = await fresh.connectionManager.add({
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'password',
+        frozen: true,
+      });
+      await fresh.connectionManager.setWorkspaceBinding(frozen.id);
+      return frozen;
+    }
+
+    afterEach(() => {
+      mockWindow.__test_resetAnswers();
+    });
+
+    it('gangway.emptyTrash does nothing when the typed confirm does not match', async () => {
+      trashListFixture();
+      mockWindow.__test_queueInput('never mind');
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.emptyTrash')!();
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Empty Trash cancelled'));
+      expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
+      infoSpy.mockRestore();
+    });
+
+    it('gangway.emptyTrash removes stamp dirs on the literal confirm', async () => {
+      trashListFixture();
+      mockWindow.__test_queueInput('EMPTY TRASH');
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.emptyTrash')!();
+
+      expect(fakeRawClient.rmdir).toHaveBeenCalledWith(
+        expect.stringContaining('20260901-000000-op'),
+        true,
+      );
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Emptied trash'));
+      infoSpy.mockRestore();
+    });
+
+    it('gangway.restoreFromTrash moves the trashed file back on overwrite', async () => {
+      trashListFixture();
+      mockWindow.__test_queuePick((items: unknown[]) => [(items as unknown[])[0]]);
+      mockWindow.__test_queuePick('Restore to original locations');
+      mockWindow.__test_queueWarning('Overwrite server');
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.restoreFromTrash')!();
+
+      expect(fakeRawClient.posixRename).toHaveBeenCalledWith(
+        expect.stringContaining('20260901-000000-op/a.php'),
+        '/var/www/a.php',
+      );
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Restored 1'));
+      infoSpy.mockRestore();
+    });
+
+    it('cut then paste moves server-side with no re-upload', async () => {
+      fakeRawClient.stat.mockImplementation(async (p: string) => {
+        if (p === '/var/www/other') return { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false };
+        if (p === '/var/www/app/a.php') return { size: 3, modifyTime: 1, isDirectory: false, isSymbolicLink: false };
+        const err = new Error('ENOENT') as NodeJS.ErrnoException;
+        err.code = 'ENOENT';
+        throw err;
+      });
+      const cutNode = { connectionId: connection.id, entry: { path: '/var/www/app/a.php', isDirectory: false, isSymbolicLink: false, size: 3 } };
+      const destNode = { connectionId: connection.id, entry: { path: '/var/www/other', isDirectory: true, isSymbolicLink: false, size: 0 } };
+
+      await handlers.get('gangway.cutEntries')!(cutNode);
+      await handlers.get('gangway.pasteEntries')!(destNode);
+
+      expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/app/a.php', '/var/www/other/a.php');
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+    });
+
+    it.each([['gangway.pasteEntries'], ['gangway.restoreFromTrash'], ['gangway.emptyTrash']])(
+      '%s stops on a frozen connection before any prompt or network call',
+      async (commandId) => {
+        const frozen = await activateFrozenConnection();
+        resetFakeClient();
+        const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+        const node = { connectionId: frozen.id, entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 } };
+        await handlers.get(commandId)!(commandId === 'gangway.pasteEntries' ? node : undefined);
+
+        expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('frozen'));
+        expect(fakeRawClient.list).not.toHaveBeenCalled();
+        expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+        infoSpy.mockRestore();
+      },
+    );
   });
 
   /**
