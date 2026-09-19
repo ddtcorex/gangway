@@ -1284,8 +1284,19 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     }
   }
 
-  async function runRestoreFromTrashCommand(): Promise<void> {
-    const connection = await requireMutableConnection();
+  async function runCopyRemotePathCommand(node?: RemoteTreeNode): Promise<void> {
+    const remotePath = node?.entry?.path;
+    if (!remotePath) {
+      await vscode.window.showWarningMessage('Select a file or folder in the Gangway Remote Explorer first.');
+      return;
+    }
+    // Read-only: no freeze gate, no connection needed -- the path is known
+    // without touching the server.
+    await vscode.env.clipboard.writeText(remotePath);
+    await vscode.window.showInformationMessage(`Copied remote path: ${remotePath}`);
+  }
+
+  async function runRestoreFromTrashCommand(): Promise<void> {    const connection = await requireMutableConnection();
     if (!connection) return;
     try {
       const adapter = await getAdapter(connection);
@@ -2085,6 +2096,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     vscode.commands.registerCommand('gangway.downloadFolder', runDownloadFolderCommand),
     vscode.commands.registerCommand('gangway.uploadFolder', runUploadFolderCommand),
     vscode.commands.registerCommand('gangway.compareFile', runCompareFileCommand),
+    vscode.commands.registerCommand('gangway.copyRemotePath', runCopyRemotePathCommand),
     vscode.commands.registerCommand('gangway.newFile', (node?: RemoteTreeNode) => runNewRemoteCommand('file', node)),
     vscode.commands.registerCommand('gangway.newFolder', (node?: RemoteTreeNode) => runNewRemoteCommand('dir', node)),
     vscode.commands.registerCommand('gangway.renameRemote', runRenameRemoteCommand),

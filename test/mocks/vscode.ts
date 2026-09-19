@@ -227,3 +227,19 @@ export const commands = {
   // before the overwrite/keep-server/cancel choice was offered.
   executeCommand: async (_command: string, ..._args: unknown[]): Promise<unknown> => undefined,
 };
+
+const clipboardWrites: string[] = [];
+
+export const env = {
+  clipboard: {
+    writeText: async (text: string): Promise<void> => {
+      clipboardWrites.push(text);
+    },
+  },
+  /** Test-only: texts passed to clipboard.writeText since the last reset. */
+  __test_clipboardWrites: clipboardWrites,
+  /** Test-only: clears recorded clipboard writes. */
+  __test_resetClipboard: () => {
+    clipboardWrites.length = 0;
+  },
+};

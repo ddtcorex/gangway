@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 // Relative mock import for the test-only answer queues (__test_queue*):
 // same runtime instance the handlers use, full types under tsc.
 import { window as mockWindow } from './mocks/vscode';
+import { env as mockEnv } from './mocks/vscode';
 
 // Shared fake raw SFTP client, created via vi.hoisted so both the
 // vi.mock('../src/transfer/connectionPool', ...) factory below and the test
@@ -116,6 +117,7 @@ describe('activate', () => {
         'gangway.pickConnection',
         'gangway.downloadFolder',
         'gangway.uploadFolder',
+        'gangway.copyRemotePath',
       ]),
     );
   });
@@ -730,6 +732,58 @@ describe('activate - realistic command invocation', () => {
         infoSpy.mockRestore();
       },
     );
+  });
+
+  describe('copy remote path', () => {
+    beforeEach(() => {
+      mockEnv.__test_resetClipboard();
+    });
+
+    it('gangway.copyRemotePath copies the node path to the OS clipboard', async () => {
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+      const node = { connectionId: connection.id, entry: { path: '/var/www/app/a.php', isDirectory: false, isSymbolicLink: false, size: 3 } };
+
+      await handlers.get('gangway.copyRemotePath')!(node);
+
+      expect(mockEnv.__test_clipboardWrites).toEqual(['/var/www/app/a.php']);
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('/var/www/app/a.php'));
+      // Read-only: no server round-trip, no freeze gate.
+      expect(fakeRawClient.list).not.toHaveBeenCalled();
+      expect(fakeRawClient.stat).not.toHaveBeenCalled();
+      infoSpy.mockRestore();
+    });
+
+    it('gangway.copyRemotePath warns when invoked with no node', async () => {
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+
+      await handlers.get('gangway.copyRemotePath')!();
+
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Select a file or folder'));
+      expect(mockEnv.__test_clipboardWrites).toEqual([]);
+      warnSpy.mockRestore();
+    });
+  });
+
+  describe('paste onto a file node', () => {
+    it('gangway.pasteEntries pastes into the parent dir when invoked on a file', async () => {
+      fakeRawClient.stat.mockImplementation(async (p: string) => {
+        if (p === '/var/www/other') return { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false };
+        if (p === '/var/www/app/a.php') return { size: 3, modifyTime: 1, isDirectory: false, isSymbolicLink: false };
+        const err = new Error('ENOENT') as NodeJS.ErrnoException;
+        err.code = 'ENOENT';
+        throw err;
+      });
+      const cutNode = { connectionId: connection.id, entry: { path: '/var/www/app/a.php', isDirectory: false, isSymbolicLink: false, size: 3 } };
+      // The menu now offers Paste on files too: the destination is the
+      // clicked file's parent dir, not the file itself.
+      const fileNode = { connectionId: connection.id, entry: { path: '/var/www/other/b.php', isDirectory: false, isSymbolicLink: false, size: 1 } };
+
+      await handlers.get('gangway.cutEntries')!(cutNode);
+      await handlers.get('gangway.pasteEntries')!(fileNode);
+
+      expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/app/a.php', '/var/www/other/a.php');
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+    });
   });
 
   describe('sync folder', () => {
