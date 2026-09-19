@@ -258,15 +258,14 @@ async function main() {
 
     const beforeSwitch = await authFieldsVisible();
 
-    // Real mouse click on the Save button, not element.click(). The button
-    // sits below the headless viewport fold, where synthetic mouse events
-    // hit nothing (elementFromPoint returns null there): scroll it into view
-    // first, or every click silently misses and zero messages get posted.
-    const clickSave = async () => {
-      await cdp.evaluate(`document.getElementById('save').scrollIntoView({ block: 'center' });`);
+    // Real mouse click helper (not element.click()): elements below the
+    // headless viewport fold receive nothing from synthetic mouse events
+    // (elementFromPoint returns null there), so scroll into view first.
+    const clickById = async (id) => {
+      await cdp.evaluate(`document.getElementById('${id}').scrollIntoView({ block: 'center' });`);
       await sleep(200);
       const rect = await cdp.evaluate(`
-        (() => { const r = document.getElementById('save').getBoundingClientRect();
+        (() => { const r = document.getElementById('${id}').getBoundingClientRect();
                  return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()
       `);
       for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
@@ -280,6 +279,7 @@ async function main() {
       }
       await sleep(300);
     };
+    const clickSave = () => clickById('save');
 
     await clickSave();
 
@@ -297,6 +297,49 @@ async function main() {
     `);
     const afterSwitch = await authFieldsVisible();
     await clickSave();
+
+    // Mapping overlap notes must render in a REAL DOM: the unit mock's
+    // FakeElement.children is a real Array (with .find), while the browser's
+    // HTMLCollection has no array methods — so only this gate can catch a
+    // mismatch like row.children.find(...) throwing on every keystroke.
+    // Fills two nested rows exactly as a user would, then reads row 0's note.
+    await cdp.evaluate(`
+      (() => {
+        const rows = () => document.querySelectorAll('#mappingsRows .mapping-row');
+        const setRow = (i, local, remote) => {
+          const fields = rows()[i].querySelectorAll('vscode-text-field');
+          fields[0].value = local;
+          fields[0].dispatchEvent(new Event('input', { bubbles: true }));
+          fields[1].value = remote;
+          fields[1].dispatchEvent(new Event('input', { bubbles: true }));
+        };
+        document.getElementById('remotePath').value = '/srv/app';
+        document.getElementById('remotePath').dispatchEvent(new Event('input', { bubbles: true }));
+        setRow(0, '/w', '/srv/app');
+        return true;
+      })()
+    `);
+    await clickById('mappingAdd');
+    await cdp.evaluate(`
+      (() => {
+        const rows = () => document.querySelectorAll('#mappingsRows .mapping-row');
+        const fields = rows()[1].querySelectorAll('vscode-text-field');
+        fields[0].value = '/w/sub';
+        fields[0].dispatchEvent(new Event('input', { bubbles: true }));
+        fields[1].value = '/srv/app/other';
+        fields[1].dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()
+    `);
+    const overlapNote = await cdp.evaluate(`
+      document.querySelectorAll('#mappingsRows .mapping-row')[0]
+        .querySelector('.mapping-note').textContent
+    `);
+    console.log('--- mapping overlap note (row 0) ---');
+    console.log(JSON.stringify(overlapNote));
+    if (!/row 2/i.test(overlapNote ?? '')) {
+      throw new Error(`expected an overlap note naming row 2, got ${JSON.stringify(overlapNote)}`);
+    }
 
     // Optional visual evidence: GANGWAY_WEBVIEW_SCREENSHOT=/path/to.png makes
     // the run save what the form actually looks like, so a CSP-blocked

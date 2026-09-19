@@ -678,7 +678,7 @@ describe('ConnectionFormPanel test connection and mappings', () => {
 });
 
 describe('ConnectionFormPanel test cancellation', () => {
-  it('stays silent when the user cancels the dial', async () => {
+  it('clears the Testing state when the user cancels the dial', async () => {
     const { TransferCancelledError } = await import('../../src/folderQueue');
     const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
     const secrets = new ConnectionSecretStore(fakeSecretStore());
@@ -696,6 +696,9 @@ describe('ConnectionFormPanel test cancellation', () => {
       payload: { draft: { host: 'h', port: 22, username: 'u', authMethod: 'agent' } },
     });
 
-    expect(postMessage).not.toHaveBeenCalled();
+    // No failure verdict (a Cancel is not a failure), but the form must
+    // leave its "Testing…" state: exactly one cancelled message, nothing else.
+    expect(postMessage).toHaveBeenCalledTimes(1);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'testConnectionCancelled' }));
   });
 });

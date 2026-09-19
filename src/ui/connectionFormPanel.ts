@@ -179,9 +179,13 @@ export class ConnectionFormPanel {
       try {
         result = await this.runConnectionTest(draft);
       } catch (err) {
-        // User-cancelled dials stay silent: reporting a failure for an
-        // explicit Cancel would be a lie. Anything else is unreachable.
-        if (err instanceof TransferCancelledError) return;
+        // A user-cancelled dial clears the "Testing…" state instead of
+        // reporting: a failure verdict for an explicit Cancel would be a lie,
+        // but leaving the stale progress text up would be one too.
+        if (err instanceof TransferCancelledError) {
+          await this.panel.webview.postMessage({ nonce: this.nonce, type: 'testConnectionCancelled' });
+          return;
+        }
         result = { ok: false, kind: 'unreachable', message: 'Test failed before connecting.' };
       }
       await this.panel.webview.postMessage({ nonce: this.nonce, type: 'testConnectionResult', ...result });

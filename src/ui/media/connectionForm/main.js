@@ -292,7 +292,15 @@ function renderMappingRows(mappings) {
  */
 function refreshMappingNotes() {
   const norm = (p) => (p || '').replace(/\\/g, '/').replace(/\/+$/, '') || '/';
-  const within = (candidate, prefix) => candidate === prefix || candidate.startsWith(prefix + '/');
+  // Mirrors pathMapping.ts (including its root guard): a '/' connection root
+  // contains everything. NOTE: Element.children is an HTMLCollection in a
+  // real browser — no .find/.map/.filter here, only spread-iteration (which
+  // HTMLCollection supports) and indexed access, so the Array-based unit
+  // mock cannot mask a production TypeError again.
+  const within = (candidate, prefix) => {
+    if (prefix === '/') return candidate.startsWith('/');
+    return candidate === prefix || candidate.startsWith(prefix + '/');
+  };
   const container = document.getElementById('mappingsRows');
   const rows = [...container.children].map((row) => ({
     local: norm(row.children[0] ? row.children[0].value : ''),
@@ -315,7 +323,10 @@ function refreshMappingNotes() {
       // Blank rows are handled by the save-time half-filled check, not here.
       if (rawRemote) notes.push('Remote path is outside the connection remote path — sync will refuse it.');
     }
-    const noteEl = row.children.find((child) => child.className === 'mapping-note');
+    let noteEl = null;
+    for (let i = 0; i < row.children.length; i += 1) {
+      if (row.children[i].className === 'mapping-note') noteEl = row.children[i];
+    }
     if (noteEl) noteEl.textContent = notes.join(' ');
   });
 }
@@ -389,10 +400,19 @@ window.addEventListener('message', (event) => {
     return;
   }
 
+  if (data.type === 'testConnectionCancelled') {
+    clearTestResult();
+    return;
+  }
+
   if (data.type === 'mappingFolderSelected') {
     const rows = document.getElementById('mappingsRows').children;
     const row = rows[data.row];
-    if (row) row.children[0].value = data.path;
+    if (row) {
+      row.children[0].value = data.path;
+      // Programmatic sets fire no input event: recompute hints explicitly.
+      refreshMappingNotes();
+    }
     return;
   }
 

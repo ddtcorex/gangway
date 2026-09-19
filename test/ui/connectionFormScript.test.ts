@@ -544,6 +544,16 @@ describe('connection form webview script', () => {
       expect(dom.elements.get('testResult')!.textContent).toBe('bad password');
       expect(dom.elements.get('host')!.value).toBe('h');
     });
+
+    it('clears the Testing state when the dial is cancelled', () => {
+      const dom = runConnectionFormScript({ nonce: 'n', values: { host: 'h' } });
+      dom.elements.get('testConnection')!.emit('click');
+      expect(dom.elements.get('testResult')!.textContent).toBe('Testing…');
+
+      dom.emitWindowMessage({ nonce: 'n', type: 'testConnectionCancelled' });
+
+      expect(dom.elements.get('testResult')!.textContent).toBe('');
+    });
   });
 
   describe('path mappings table', () => {
@@ -603,6 +613,21 @@ describe('connection form webview script', () => {
       inputMappingRow(dom, 0);
 
       expect(mappingNote(dom, 0)).toMatch(/outside/i);
+    });
+
+    it('recomputes notes after a Browse fill (no input event fires)', () => {
+      const dom = runConnectionFormScript({ nonce: 'n', values: { authMethod: 'agent', remotePath: '/srv/app' } });
+      setMappingRow(dom, 0, '/w', '/srv/app');
+      inputMappingRow(dom, 0);
+      expect(mappingNote(dom, 0)).toBe('');
+      dom.elements.get('mappingAdd')!.emit('click');
+
+      // Fills row 1's local path the way a real Browse reply does: a direct
+      // value set with no input event. The overlap note on row 0 must still
+      // appear, proving the handler recomputes explicitly.
+      dom.emitWindowMessage({ nonce: 'n', type: 'mappingFolderSelected', row: 1, path: '/w/sub' });
+
+      expect(mappingNote(dom, 0)).toMatch(/row 2/i);
     });
   });
 });
