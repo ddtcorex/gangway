@@ -495,6 +495,42 @@ describe('activate - realistic command invocation', () => {
     });
   });
 
+  describe('frozen connection guard', () => {
+    it('gangway.uploadFile stops on a frozen connection before any network mutation', async () => {
+      const fresh = activate(fakeContext());
+      const frozen = await fresh.connectionManager.add({
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'password',
+        frozen: true,
+      });
+      await fresh.connectionManager.setWorkspaceBinding(frozen.id);
+      const localPath = path.join(tmpHome, 'frozen.php');
+      await fs.writeFile(localPath, 'hotfix');
+      await writeSidecar(localPath, {
+        connectionId: frozen.id,
+        remotePath: '/var/www/app/f.php',
+        mtime: 1,
+        size: 6,
+        downloadedAt: 1,
+      });
+      vscode.window.activeTextEditor = { document: { uri: { fsPath: localPath } } } as unknown as vscode.TextEditor;
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+      resetFakeClient();
+
+      await handlers.get('gangway.uploadFile')!();
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('frozen'));
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+      expect(fakeRawClient.fastGet).not.toHaveBeenCalled();
+      expect(fakeRawClient.stat).not.toHaveBeenCalled();
+      infoSpy.mockRestore();
+    });
+  });
+
   /**
    * Conflict Guard, second half. Before this, a detected conflict showed a
    * warning telling the user to "Open the diff and choose Overwrite, Keep

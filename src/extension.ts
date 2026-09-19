@@ -27,6 +27,7 @@ import { raceWithCancellation } from './ui/cancellable';
 import { TransferCancelledError } from './folderQueue';
 import { resolveFileConflict, type ConflictResolutionUi } from './ui/conflictResolution';
 import { checkEditSession, acquireEditSession, releaseEditSession } from './editSession';
+import { FrozenError, assertMutatingAllowed, guardUploadTarget } from './remoteOps';
 import type { FileConflictDecision } from './conflictGuard';
 import type { ConnectionConfig } from './types';
 
@@ -612,6 +613,17 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         return;
       }
       remotePath = derivedSidecar.remotePath;
+      // Wrong-server was already checked above (mismatch returns); only the
+      // frozen check can still fire here, before any network call.
+      try {
+        guardUploadTarget(connection, derivedSidecar);
+      } catch (err) {
+        if (err instanceof FrozenError) {
+          await vscode.window.showInformationMessage(err.message);
+          return;
+        }
+        throw err;
+      }
     }
 
     if (!remotePath) {
@@ -630,6 +642,17 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
           `${localPath} belongs to a different connection than "${connection.name}". Bind that connection to this workspace before continuing.`,
         );
         return;
+      }
+      // Same ordering as the keybinding shape above: the wrong-server case
+      // just warned and returned, so only the frozen check can fire here.
+      try {
+        guardUploadTarget(connection, sidecar);
+      } catch (err) {
+        if (err instanceof FrozenError) {
+          await vscode.window.showInformationMessage(err.message);
+          return;
+        }
+        throw err;
       }
       // A tree-node upload for a file that was never downloaded has no
       // local mirror yet. Say so directly: without this, the stat below
@@ -666,7 +689,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       }
       await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, title: `Gangway: uploading ${remotePath}` },
-        () => uploadFile(adapter, connection.id, localPath as string, remotePath as string, byteSize, auditLog, (message) => output.appendLine(message)),
+        () => uploadFile(adapter, connection.id, localPath as string, remotePath as string, byteSize, auditLog, (message) => output.appendLine(message), { connection }),
       );
       dirtyDecorations.refresh(vscode.Uri.file(localPath));
       treeProvider.refresh();
@@ -738,6 +761,15 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     }
     const connection = resolveConnection(node);
     if (!connection) return;
+    try {
+      assertMutatingAllowed(connection);
+    } catch (err) {
+      if (err instanceof FrozenError) {
+        await vscode.window.showInformationMessage(err.message);
+        return;
+      }
+      throw err;
+    }
     const remotePath = node.entry.path;
     const fs = (await import('node:fs/promises')).default;
     try {
@@ -785,6 +817,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
             }
             await uploadFile(adapter, connection.id, localPath, file, byteSize, auditLog, (message) =>
               output.appendLine(message),
+              { connection },
             );
             dirtyDecorations.refresh(vscode.Uri.file(localPath));
           },
