@@ -53,6 +53,8 @@ describe('mapGovardRemote', () => {
         authMethod: 'key',
         keyPath: '/home/deploy/.ssh/id_ed25519',
         scope: 'workspace',
+        // The fixture remote is protected: true, so it imports frozen (spec §5).
+        frozen: true,
       },
     });
   });
@@ -77,6 +79,16 @@ describe('mapGovardRemote', () => {
     expect(mapGovardRemote('myshop', 'staging', { host: 's.example.com', user: 'd', path: '/srv', auth: { method: 'password' } })).toEqual(
       expect.objectContaining({ ok: true, connection: expect.objectContaining({ authMethod: 'password' }) }),
     );
+  });
+
+  it('maps protected govard remotes to frozen connections', () => {
+    const mapped = mapGovardRemote('proj', 'prod', { host: 'h', user: 'u', path: '/srv/app', protected: true });
+    expect(mapped).toEqual(expect.objectContaining({ ok: true, connection: expect.objectContaining({ frozen: true }) }));
+  });
+
+  it('leaves unprotected remotes unfrozen', () => {
+    const mapped = mapGovardRemote('proj', 'stage', { host: 'h', user: 'u', path: '/srv/stage' });
+    expect(mapped).toEqual(expect.objectContaining({ ok: true, connection: expect.not.objectContaining({ frozen: true }) }));
   });
 });
 

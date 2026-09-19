@@ -6,6 +6,11 @@ export type AuthMethod = 'password' | 'key' | 'agent';
  * vs workspaceState) rather than filtering one shared list. */
 export type ConnectionScope = 'workspace' | 'global';
 
+export interface PathMapping {
+  localPath: string;
+  remotePath: string;
+}
+
 export interface ConnectionConfig {
   id: string;
   name: string;
@@ -23,6 +28,12 @@ export interface ConnectionConfig {
    * back, so any *newly constructed* ConnectionConfig in the codebase after
    * that point can rely on it being set. */
   scope?: ConnectionScope;
+  /** When true, all mutating remote ops are hard-blocked until explicit unlock (spec §5). Absent = false. */
+  frozen?: boolean;
+  /** Glob patterns excluded from recursive walks. Absent = DEFAULT_EXCLUDES (spec §2.3). */
+  excludePatterns?: string[];
+  /** Explicit remote↔local pairs (mapping spec §2). Absent/empty = default rule (§2.2). */
+  mappings?: PathMapping[];
 }
 
 export interface SidecarMeta {

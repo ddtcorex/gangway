@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { AuditLog } from '../src/auditLog';
+import { AuditLog, parseAuditLine } from '../src/auditLog';
 
 let logPath: string;
 
@@ -18,13 +18,13 @@ afterEach(async () => {
 describe('AuditLog', () => {
   it('appends one JSON line per entry, creating the file on first write', async () => {
     const log = new AuditLog(logPath);
-    await log.append({ connectionId: 'c1', remotePath: '/var/www/a.php', timestamp: 1, byteSize: 10 });
-    await log.append({ connectionId: 'c1', remotePath: '/var/www/b.php', timestamp: 2, byteSize: 20 });
+    await log.append({ connectionId: 'c1', remotePath: '/var/www/a.php', timestamp: 1, byteSize: 10, op: 'upload' });
+    await log.append({ connectionId: 'c1', remotePath: '/var/www/b.php', timestamp: 2, byteSize: 20, op: 'upload' });
 
     const lines = (await fs.readFile(logPath, 'utf8')).trim().split('\n');
     expect(lines).toHaveLength(2);
-    expect(JSON.parse(lines[0])).toEqual({ connectionId: 'c1', remotePath: '/var/www/a.php', timestamp: 1, byteSize: 10 });
-    expect(JSON.parse(lines[1])).toEqual({ connectionId: 'c1', remotePath: '/var/www/b.php', timestamp: 2, byteSize: 20 });
+    expect(JSON.parse(lines[0])).toEqual({ connectionId: 'c1', remotePath: '/var/www/a.php', timestamp: 1, byteSize: 10, op: 'upload' });
+    expect(JSON.parse(lines[1])).toEqual({ connectionId: 'c1', remotePath: '/var/www/b.php', timestamp: 2, byteSize: 20, op: 'upload' });
   });
 
   it('creates the containing directory on first write', async () => {
@@ -35,8 +35,26 @@ describe('AuditLog', () => {
     const nested = path.join(path.dirname(logPath), 'globalStorage', 'ddtcorex.gangway', 'uploads.log');
     const log = new AuditLog(nested);
 
-    await log.append({ connectionId: 'c1', remotePath: '/var/www/a.php', timestamp: 1, byteSize: 10 });
+    await log.append({ connectionId: 'c1', remotePath: '/var/www/a.php', timestamp: 1, byteSize: 10, op: 'upload' });
 
     await expect(fs.readFile(nested, 'utf8')).resolves.toContain('/var/www/a.php');
+  });
+
+  it('parses legacy 4-field lines as upload and rejects garbage without throwing', async () => {
+    await fs.writeFile(
+      logPath,
+      `${JSON.stringify({ connectionId: 'c1', remotePath: '/a.php', timestamp: 1, byteSize: 9 })}\nnot json\n`,
+    );
+    const lines = (await fs.readFile(logPath, 'utf8')).trim().split('\n');
+    expect(parseAuditLine(lines[0])).toMatchObject({ op: 'upload', connectionId: 'c1' });
+    expect(parseAuditLine(lines[1])).toBeUndefined();
+  });
+
+  it('appends a delete line with count and no byteSize', async () => {
+    const log = new AuditLog(logPath);
+    await log.append({ connectionId: 'c1', remotePath: '/srv/app/dir', timestamp: Date.now(), op: 'delete', count: 14 });
+    const back = parseAuditLine((await fs.readFile(logPath, 'utf8')).trim());
+    expect(back).toMatchObject({ op: 'delete', count: 14 });
+    expect(back!.byteSize).toBeUndefined();
   });
 });

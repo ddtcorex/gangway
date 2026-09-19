@@ -25,6 +25,26 @@ async function resetFixture(): Promise<void> {
   try {
     await fs.mkdir(fixtureDir, { recursive: true });
     await fs.writeFile(path.join(fixtureDir, 'hotfix.php'), SEED_CONTENT, 'utf8');
+    // Richer tree for the folder-ops suites (sync preview, excludes,
+    // conflict review): nested file, excluded dir, conflict pair.
+    await fs.mkdir(path.join(fixtureDir, 'nested'), { recursive: true });
+    await fs.writeFile(path.join(fixtureDir, 'nested', 'inner.php'), "<?php echo 'nested';", 'utf8');
+    await fs.mkdir(path.join(fixtureDir, 'node_modules'), { recursive: true });
+    await fs.writeFile(path.join(fixtureDir, 'node_modules', 'skip.js'), 'skip me', 'utf8');
+    await fs.writeFile(path.join(fixtureDir, 'conflict.php'), "<?php echo 'base';", 'utf8');
+    // Prior runs leave trash/backup/e2e dirs in the bind mount: sweep them
+    // so every run starts from the same tree.
+    for (const entry of await fs.readdir(fixtureDir)) {
+      if (
+        entry.startsWith('.gangway-trash-') ||
+        entry.startsWith('.gangway-backup-') ||
+        entry === '.trash-gangway' ||
+        entry === '.backup-gangway' ||
+        entry === 'e2e-ws'
+      ) {
+        await fs.rm(path.join(fixtureDir, entry), { recursive: true, force: true });
+      }
+    }
   } catch (err) {
     // The fixture dir is a docker bind-mount: once the sftp container has
     // started, the mount point is owned by the container's user, so a direct

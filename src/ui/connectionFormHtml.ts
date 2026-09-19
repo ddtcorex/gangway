@@ -1,4 +1,4 @@
-import type { AuthMethod, ConnectionScope } from '../types';
+import type { AuthMethod, ConnectionScope, PathMapping } from '../types';
 
 export interface ConnectionFormPrefill {
   id: string;
@@ -10,6 +10,10 @@ export interface ConnectionFormPrefill {
   authMethod: AuthMethod;
   keyPath?: string;
   scope?: ConnectionScope;
+  /** Mirrors ConnectionConfig.frozen for the read-only badge in the heading. */
+  frozen?: boolean;
+  /** Mirrors ConnectionConfig.mappings for the sidebar JSON and the mappings editor. */
+  mappings?: PathMapping[];
 }
 
 export interface ConnectionFormHtmlInput {
@@ -91,7 +95,12 @@ export function resolveConnectionFormFields(
   const selected = (expected: AuthMethod) => (authMethod === expected ? ' selected' : '');
   const blankHint = c ? ' (leave blank to keep the current one)' : '';
   return {
-    heading: c ? `Edit Connection: ${escapeHtml(c.name)}` : 'New Connection',
+    heading:
+      c && c.frozen === true
+        ? `Edit Connection: ${escapeHtml(c.name)} (frozen — unlock via Gangway: Toggle Freeze)`
+        : c
+          ? `Edit Connection: ${escapeHtml(c.name)}`
+          : 'New Connection',
     connectionId: c ? escapeHtml(c.id) : '',
     name: c ? escapeHtml(c.name) : '',
     host: c ? escapeHtml(c.host) : '',
@@ -375,9 +384,18 @@ const TEMPLATE = `<!DOCTYPE html>
     <vscode-text-field id="remotePath" placeholder="/var/www" value="{{REMOTE_PATH}}"></vscode-text-field>
   </div>
 
+  <h2>Path Mappings</h2>
+  <div class="field">
+    <div id="mappingsRows"></div>
+    <vscode-button id="mappingAdd" appearance="secondary">+ Add mapping</vscode-button>
+    <div id="mappingsError" role="alert"></div>
+  </div>
+
   <div class="actions">
     <vscode-button id="save">Save</vscode-button>
+    <vscode-button id="testConnection" appearance="secondary">Test Connection</vscode-button>
   </div>
+  <div id="testResult" role="status"></div>
 </form>
 </div>
 </div>

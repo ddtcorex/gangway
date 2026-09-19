@@ -64,9 +64,26 @@ function applyAuthVisibility() {
  * a value left behind in a hidden input can never be stored as a secret for a
  * connection that does not use it.
  */
-function buildPayload() {
+function credentialFields() {
   const authMethod = fieldValue('authMethod');
-  const payload = {
+  const fields = {};
+  if (authMethod === 'password') {
+    const password = fieldValue('password');
+    if (password) fields.password = password;
+  }
+  if (authMethod === 'key') {
+    fields.keyPath = fieldValue('keyPath');
+    const keyPassphrase = fieldValue('keyPassphrase');
+    // Optional: an unencrypted key has no passphrase, and storing an empty
+    // string would make authResolver hand ssh2 a bogus `passphrase` option.
+    if (keyPassphrase) fields.keyPassphrase = keyPassphrase;
+  }
+  return { authMethod, fields };
+}
+
+function buildPayload() {
+  const { authMethod, fields } = credentialFields();
+  return {
     ...(connectionId ? { id: connectionId } : {}),
     name: fieldValue('name'),
     host: fieldValue('host'),
@@ -75,22 +92,25 @@ function buildPayload() {
     remotePath: fieldValue('remotePath'),
     authMethod,
     scope: checkboxChecked('workspaceScope') ? 'workspace' : 'global',
+    ...fields,
+    mappings: readMappingRows().filter((m) => m.localPath && m.remotePath),
   };
+}
 
-  if (authMethod === 'password') {
-    const password = fieldValue('password');
-    if (password) payload.password = password;
-  }
-
-  if (authMethod === 'key') {
-    payload.keyPath = fieldValue('keyPath');
-    const keyPassphrase = fieldValue('keyPassphrase');
-    // Optional: an unencrypted key has no passphrase, and storing an empty
-    // string would make authResolver hand ssh2 a bogus `passphrase` option.
-    if (keyPassphrase) payload.keyPassphrase = keyPassphrase;
-  }
-
-  return payload;
+/**
+ * The unsaved draft for a Test Connection dial: same connection fields and
+ * credentials as a save, but never an id and never mappings — the host dials
+ * it once and drops it.
+ */
+function buildDraft() {
+  const { authMethod, fields } = credentialFields();
+  return {
+    host: fieldValue('host'),
+    port: Number(fieldValue('port')),
+    username: fieldValue('username'),
+    authMethod,
+    ...fields,
+  };
 }
 
 /** Loads one saved connection's non-secret fields into the form (a
@@ -110,6 +130,8 @@ function loadConnectionIntoForm(connection) {
   document.getElementById('authMethod').value = connection.authMethod;
   setCheckboxChecked('workspaceScope', connection.scope === 'workspace');
   applyAuthVisibility();
+  clearTestResult();
+  renderMappingRows(connection.mappings || []);
   renderRemotesList();
 }
 
@@ -132,6 +154,8 @@ function clearForm() {
   // reasoning as the govard-import default.
   setCheckboxChecked('workspaceScope', true);
   applyAuthVisibility();
+  clearTestResult();
+  renderMappingRows([]);
   renderRemotesList();
 }
 
@@ -190,10 +214,153 @@ function renderRemotesList() {
 }
 
 document.getElementById('authMethod').addEventListener('change', applyAuthVisibility);
+document.getElementById('remotePath').addEventListener('input', refreshMappingNotes);
+
+/**
+ * Path mappings table (remote ↔ local pairs). Rows are plain element trees
+ * — [local field, remote field, browse button, remove button] — read back
+ * positionally, so no per-row ids are needed and rows survive re-renders.
+ */
+function createMappingRow(mapping) {
+  const row = document.createElement('div');
+  row.className = 'mapping-row';
+  const local = document.createElement('vscode-text-field');
+  local.placeholder = '/home/you/proj';
+  local.value = mapping.localPath || '';
+  local.addEventListener('input', refreshMappingNotes);
+  const remote = document.createElement('vscode-text-field');
+  remote.placeholder = '/srv/app';
+  remote.value = mapping.remotePath || '';
+  remote.addEventListener('input', refreshMappingNotes);
+  const browse = document.createElement('vscode-button');
+  browse.textContent = 'Browse…';
+  browse.appearance = 'secondary';
+  browse.title = 'Pick a local folder';
+  browse.addEventListener('click', (event) => {
+    event.preventDefault();
+    vscodeApi.postMessage({ nonce, type: 'browseMappingFolder', row: mappingRowIndex(row) });
+  });
+  const remove = document.createElement('vscode-button');
+  remove.textContent = '✕';
+  remove.title = 'Remove mapping';
+  remove.appearance = 'secondary';
+  remove.addEventListener('click', (event) => {
+    event.preventDefault();
+    const container = document.getElementById('mappingsRows');
+    const kept = [...container.children].filter((child) => child !== row);
+    container.textContent = '';
+    for (const child of kept) container.appendChild(child);
+    if (kept.length === 0) container.appendChild(createMappingRow({ localPath: '', remotePath: '' }));
+    refreshMappingNotes();
+  });
+  row.appendChild(local);
+  row.appendChild(remote);
+  row.appendChild(browse);
+  row.appendChild(remove);
+  const note = document.createElement('div');
+  note.className = 'mapping-note';
+  note.textContent = '';
+  row.appendChild(note);
+  return row;
+}
+
+function mappingRowIndex(row) {
+  return [...document.getElementById('mappingsRows').children].indexOf(row);
+}
+
+function readMappingRows() {
+  return [...document.getElementById('mappingsRows').children].map((row) => ({
+    localPath: row.children[0] ? row.children[0].value || '' : '',
+    remotePath: row.children[1] ? row.children[1].value || '' : '',
+  }));
+}
+
+function renderMappingRows(mappings) {
+  const container = document.getElementById('mappingsRows');
+  container.textContent = '';
+  const rows = mappings.length > 0 ? mappings : [{ localPath: '', remotePath: '' }];
+  for (const mapping of rows) container.appendChild(createMappingRow(mapping));
+  refreshMappingNotes();
+}
+
+/**
+ * Per-row notes, recomputed on every edit: overlap (the same longest-prefix
+ * rule as pathMapping.ts overlapNotes, duplicated here because the webview
+ * cannot import host modules) and remote-outside-connection-root. The
+ * connection root comes from the Remote Path field itself, so the hint
+ * follows what the user is typing.
+ */
+function refreshMappingNotes() {
+  const norm = (p) => (p || '').replace(/\\/g, '/').replace(/\/+$/, '') || '/';
+  // Mirrors pathMapping.ts (including its root guard): a '/' connection root
+  // contains everything. NOTE: Element.children is an HTMLCollection in a
+  // real browser — no .find/.map/.filter here, only spread-iteration (which
+  // HTMLCollection supports) and indexed access, so the Array-based unit
+  // mock cannot mask a production TypeError again.
+  const within = (candidate, prefix) => {
+    if (prefix === '/') return candidate.startsWith('/');
+    return candidate === prefix || candidate.startsWith(prefix + '/');
+  };
+  const container = document.getElementById('mappingsRows');
+  const rows = [...container.children].map((row) => ({
+    local: norm(row.children[0] ? row.children[0].value : ''),
+    remote: norm(row.children[1] ? row.children[1].value : ''),
+  }));
+  const root = norm(fieldValue('remotePath'));
+  [...container.children].forEach((row, index) => {
+    const notes = [];
+    rows.forEach((other, otherIndex) => {
+      if (otherIndex === index) return;
+      if (
+        (other.local !== rows[index].local && within(other.local, rows[index].local)) ||
+        (other.remote !== rows[index].remote && within(other.remote, rows[index].remote))
+      ) {
+        notes.push(`Overlapped by row ${otherIndex + 1} — the longer prefix wins`);
+      }
+    });
+    if (rows[index].remote && root && !within(rows[index].remote, root)) {
+      const rawRemote = (row.children[1] && row.children[1].value) || '';
+      // Blank rows are handled by the save-time half-filled check, not here.
+      if (rawRemote) notes.push('Remote path is outside the connection remote path — sync will refuse it.');
+    }
+    let noteEl = null;
+    for (let i = 0; i < row.children.length; i += 1) {
+      if (row.children[i].className === 'mapping-note') noteEl = row.children[i];
+    }
+    if (noteEl) noteEl.textContent = notes.join(' ');
+  });
+}
+
+function clearTestResult() {
+  const resultEl = document.getElementById('testResult');
+  resultEl.textContent = '';
+  resultEl.dataset.ok = '';
+}
 
 document.getElementById('save').addEventListener('click', (event) => {
   event.preventDefault();
+  const rows = readMappingRows();
+  const half = rows.findIndex((m) => (m.localPath && !m.remotePath) || (!m.localPath && m.remotePath));
+  const errorEl = document.getElementById('mappingsError');
+  if (half !== -1) {
+    errorEl.textContent = `Mapping row ${half + 1} is half-filled: fill both paths or remove the row.`;
+    return;
+  }
+  errorEl.textContent = '';
   vscodeApi.postMessage({ nonce, type: 'saveConnection', payload: buildPayload() });
+});
+
+document.getElementById('testConnection').addEventListener('click', (event) => {
+  event.preventDefault();
+  const resultEl = document.getElementById('testResult');
+  resultEl.textContent = 'Testing…';
+  resultEl.dataset.ok = '';
+  vscodeApi.postMessage({ nonce, type: 'testConnection', payload: { draft: buildDraft() } });
+});
+
+document.getElementById('mappingAdd').addEventListener('click', (event) => {
+  event.preventDefault();
+  document.getElementById('mappingsRows').appendChild(createMappingRow({ localPath: '', remotePath: '' }));
 });
 
 document.getElementById('addRemote').addEventListener('click', (event) => {
@@ -210,7 +377,8 @@ document.getElementById('browseKeyPath').addEventListener('click', (event) => {
 // picker resolves, and to saveConnection/deleteConnection once the mutation
 // lands (see ConnectionFormPanel.handleMessage). browseKeyPath never posts
 // back at all if the user cancelled the dialog, so that field is simply left
-// as it was.
+// as it was. testConnection always posts back a testConnectionResult;
+// browseMappingFolder posts mappingFolderSelected unless cancelled.
 window.addEventListener('message', (event) => {
   const data = event.data;
   // The host echoes the same per-panel nonce on every reply (see
@@ -222,6 +390,29 @@ window.addEventListener('message', (event) => {
 
   if (data.type === 'keyPathSelected') {
     setFieldValue('keyPath', data.path);
+    return;
+  }
+
+  if (data.type === 'testConnectionResult') {
+    const resultEl = document.getElementById('testResult');
+    resultEl.textContent = data.message || (data.ok ? 'Connection OK' : 'Connection failed');
+    resultEl.dataset.ok = data.ok ? 'true' : 'false';
+    return;
+  }
+
+  if (data.type === 'testConnectionCancelled') {
+    clearTestResult();
+    return;
+  }
+
+  if (data.type === 'mappingFolderSelected') {
+    const rows = document.getElementById('mappingsRows').children;
+    const row = rows[data.row];
+    if (row) {
+      row.children[0].value = data.path;
+      // Programmatic sets fire no input event: recompute hints explicitly.
+      refreshMappingNotes();
+    }
     return;
   }
 
@@ -240,3 +431,9 @@ window.addEventListener('message', (event) => {
 
 applyAuthVisibility();
 renderRemotesList();
+// The host pre-renders field values for the edited connection (if any) into
+// the template; mappings arrive the same way through the sidebar data.
+(function initMappings() {
+  const current = connections.find((c) => c.id === connectionId);
+  renderMappingRows((current && current.mappings) || []);
+})();

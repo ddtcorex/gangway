@@ -67,6 +67,7 @@ export async function run(): Promise<void> {
   type ShowMessage = typeof vscode.window.showWarningMessage;
   let hostKeyPromptInvoked = false;
   let warnedAboutConflict = false;
+  const infoMessages: string[] = [];
   const patchableWindow = vscode.window as unknown as { showWarningMessage: ShowMessage; showErrorMessage: ShowMessage };
 
   patchableWindow.showWarningMessage = (async (msg: string, ...items: string[]) => {
@@ -79,6 +80,8 @@ export async function run(): Promise<void> {
       warnedAboutConflict = true;
       return undefined;
     }
+    // File/folder-ops suite: confirm trash moves the same way a user would.
+    if (/to the Gangway trash/i.test(msg)) return 'Move to Trash';
     return undefined;
   }) as unknown as ShowMessage;
 
@@ -86,6 +89,31 @@ export async function run(): Promise<void> {
     log(`showErrorMessage stub called (UNEXPECTED): "${msg}" items=${JSON.stringify(items)}`);
     return undefined;
   }) as unknown as ShowMessage;
+
+  // Headless guards installed once for every suite below: a real modal would
+  // hang forever with nobody to click it. QuickPick returns everything
+  // offered for multi-picks and the first item for single picks (direction
+  // lists put Upload first, dest choices put original-location first);
+  // information messages auto-dismiss (and log, so summaries stay visible);
+  // input boxes answer from a queue the suites fill before invoking.
+  type ShowQuickPick = typeof vscode.window.showQuickPick;
+  const patchablePick = vscode.window as unknown as { showQuickPick: ShowQuickPick };
+  patchablePick.showQuickPick = (async (items: unknown, opts?: { canPickMany?: boolean }) => {
+    log(`showQuickPick stub called: ${Array.isArray(items) ? items.length : '?'} item(s), canPickMany=${opts?.canPickMany}`);
+    if (!Array.isArray(items) || items.length === 0) return undefined;
+    return opts?.canPickMany ? items : items[0];
+  }) as unknown as ShowQuickPick;
+  type ShowInformation = typeof vscode.window.showInformationMessage;
+  const patchableInfo = vscode.window as unknown as { showInformationMessage: ShowInformation };
+  patchableInfo.showInformationMessage = (async (msg: string) => {
+    log(`showInformationMessage stub called: "${msg}"`);
+    infoMessages.push(msg);
+    return undefined;
+  }) as unknown as ShowInformation;
+  const inputQueue: (string | undefined)[] = [];
+  type ShowInput = typeof vscode.window.showInputBox;
+  const patchableInput = vscode.window as unknown as { showInputBox: ShowInput };
+  patchableInput.showInputBox = (async () => inputQueue.shift()) as unknown as ShowInput;
 
   assert.strictEqual(
     vscode.window.showWarningMessage,
@@ -214,5 +242,110 @@ export async function run(): Promise<void> {
     'expected the blocked upload to leave the server-side (out-of-band) content untouched, proving the block ' +
       'actually prevented the write and was not just a warning shown alongside a silent overwrite',
   );
+  log('conflict block verified: server content untouched');
+
+  // --- File/folder ops path ------------------------------------------------
+  // Delete → restore → rename → folder sync, all through the real registered
+  // commands against the real server. Input/modal answers come from the
+  // shared stubs at the top (trash confirm, input queue, pick-all,
+  // auto-dismissed info): nothing here can hang headless.
+  const opsNode = (remotePath: string, isDirectory: boolean) => ({
+    connectionId: connection.id,
+    entry: { path: remotePath, isDirectory, isSymbolicLink: false, size: 0 },
+  });
+
+  log('invoking gangway.deleteRemote on conflict.php (expect trash move)');
+  await vscode.commands.executeCommand('gangway.deleteRemote', opsNode('/var/www/conflict.php', false));
+  log('gangway.deleteRemote returned');
+  const conflictHostPath = path.join(repoRoot(), 'test', 'fixtures', 'sftp-data', 'conflict.php');
+  await assert.rejects(fs.stat(conflictHostPath), 'expected the deleted file gone from its server path');
+  const trashHosts = await fs.readdir(path.join(repoRoot(), 'test', 'fixtures', 'sftp-data', '.trash-gangway'));
+  assert.ok(trashHosts.length > 0, 'expected a trash stamp dir in the fallback trash root');
+  log('trash move verified on the server tree');
+
+  log('invoking gangway.restoreFromTrash');
+  await vscode.commands.executeCommand('gangway.restoreFromTrash');
+  log('gangway.restoreFromTrash returned');
+  assert.strictEqual(
+    await fs.readFile(conflictHostPath, 'utf8'),
+    "<?php echo 'base';",
+    'expected the trashed file restored with its original bytes',
+  );
+  log('restore verified with original bytes');
+
+  log('invoking gangway.renameRemote on nested/inner.php');
+  inputQueue.push('renamed.php');
+  await vscode.commands.executeCommand('gangway.renameRemote', opsNode('/var/www/nested/inner.php', false));
+  log('gangway.renameRemote returned');
+  const renamedHostPath = path.join(repoRoot(), 'test', 'fixtures', 'sftp-data', 'nested', 'renamed.php');
+  assert.strictEqual(await fs.readFile(renamedHostPath, 'utf8'), "<?php echo 'nested';");
+  log('rename verified on the server tree');
+
+  log('invoking gangway.downloadFolder on nested/');
+  await vscode.commands.executeCommand('gangway.downloadFolder', opsNode('/var/www/nested', true));
+  log('gangway.downloadFolder returned');
+  log('invoking gangway.syncFolder up on nested/');
+  await vscode.commands.executeCommand('gangway.syncFolder', opsNode('/var/www/nested', true));
+  log('gangway.syncFolder returned (clean tree: expect No-differences info in the log above)');
+
+  log('renaming nested/renamed.php back to inner.php for repeatability');
+  inputQueue.push('inner.php');
+  await vscode.commands.executeCommand('gangway.renameRemote', opsNode('/var/www/nested/renamed.php', false));
+  assert.strictEqual(
+    await fs.readFile(path.join(repoRoot(), 'test', 'fixtures', 'sftp-data', 'nested', 'inner.php'), 'utf8'),
+    "<?php echo 'nested';",
+  );
+  log('rename-back verified: fixture tree restored');
+
+  // --- Workspace mapping sync path -----------------------------------------
+  // A subdir of the real workspace folder maps to a fresh remote dir, so the
+  // sync only ever touches files this section owns (never the whole repo).
+  // Modals use the shared headless stubs from the top of run().
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  assert.ok(workspaceFolders && workspaceFolders.length > 0, 'expected the e2e host to open a workspace folder');
+  const e2eWsDir = path.join(workspaceFolders[0].uri.fsPath, 'e2e-ws-tmp');
+  await fs.mkdir(e2eWsDir, { recursive: true });
+  await fs.writeFile(path.join(e2eWsDir, 'mapped.php'), "<?php echo 'w1';");
+  await api.connectionManager.update(connection.id, {
+    mappings: [{ localPath: e2eWsDir, remotePath: '/var/www/e2e-ws' }],
+  });
+  log('workspace mapping set for e2e-ws-tmp');
+
+
+  const hostMappedPath = path.join(repoRoot(), 'test', 'fixtures', 'sftp-data', 'e2e-ws', 'mapped.php');
+  log('invoking gangway.syncWorkspaceUp');
+  await vscode.commands.executeCommand('gangway.syncWorkspaceUp');
+  log('gangway.syncWorkspaceUp returned');
+  assert.strictEqual(
+    await fs.readFile(hostMappedPath, 'utf8'),
+    "<?php echo 'w1';",
+    'expected the workspace file to land on the server through the mapping',
+  );
+  log('workspace up verified on the real server-side file');
+
+  // Same-size out-of-band server edit, but the no-sidecar fallback compares
+  // mtimes with a 2s tolerance: sleep past it so the download direction is
+  // unambiguous instead of flaky.
+  log('sleeping 2600ms to clear the no-baseline mtime tolerance');
+  await sleep(2600);
+  await fs.writeFile(hostMappedPath, "<?php echo 'w2';", 'utf8');
+  log('wrote out-of-band server edit');
+  log('invoking gangway.syncWorkspaceDown');
+  await vscode.commands.executeCommand('gangway.syncWorkspaceDown');
+  log('gangway.syncWorkspaceDown returned');
+  assert.strictEqual(
+    await fs.readFile(path.join(e2eWsDir, 'mapped.php'), 'utf8'),
+    "<?php echo 'w2';",
+    'expected the server edit to land back in the workspace file',
+  );
+  assert.ok(
+    infoMessages.some((msg) => msg.includes(e2eWsDir)),
+    'expected the sync summary to name the mapped workspace root',
+  );
+  log('workspace down verified in the local file');
+
+  await fs.rm(path.join(repoRoot(), 'test', 'fixtures', 'sftp-data', 'e2e-ws'), { recursive: true, force: true });
+  await fs.rm(e2eWsDir, { recursive: true, force: true });
+  log('mapping fixture cleaned up');
   log('run() complete: all assertions passed');
 }

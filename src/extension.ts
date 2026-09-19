@@ -11,7 +11,7 @@ import { AuditLog } from './auditLog';
 import { checkConflict } from './conflictGuard';
 import { readSidecar } from './tmpStore';
 import { purgeExpiredTmp, sweepUnknownTmpRoots } from './tmpRetention';
-import { tmpFilePathFor, tmpRootFor, connectionSlug } from './tmpPath';
+import { tmpFilePathFor, tmpRootFor, connectionSlug, sidecarPathFor } from './tmpPath';
 import { mapSftpError, actionLabel, isConnectionError } from './errorMapper';
 import { mapListingToEntries } from './remoteListing';
 import { GangwayTreeProvider, isSelectorNode, type RemoteTreeNode, type GangwayTreeNode } from './ui/gangwayTreeProvider';
@@ -27,8 +27,34 @@ import { raceWithCancellation } from './ui/cancellable';
 import { TransferCancelledError } from './folderQueue';
 import { resolveFileConflict, type ConflictResolutionUi } from './ui/conflictResolution';
 import { checkEditSession, acquireEditSession, releaseEditSession } from './editSession';
+import {
+  FrozenError,
+  assertMutatingAllowed,
+  backupRootsFor,
+  chmodRemote,
+  collectDropUploads,
+  createRemote,
+  duplicateRemote,
+  emptyTrash,
+  guardUploadTarget,
+  inventoryTrash,
+  isNotFoundError,
+  moveToTrash,
+  parseUriList,
+  pasteEntries,
+  renameRemote,
+  restoreEntries,
+  sweepOldRemoteDirs,
+  trashRootsFor,
+  typedConfirmMatches,
+} from './remoteOps';
+import { clearClipboard, copyToClipboard, cutToClipboard, type ClipboardState } from './ui/treeClipboard';
+import { classifyRow, describeExcludedSelection, mapLimit, toQuickPickRow, type SyncRow } from './syncPreview';
+import { effectiveExcludes, matchesExcludes } from './excludes';
+import { defaultMapping, isRemoteInsideRoot } from './pathMapping';
 import type { FileConflictDecision } from './conflictGuard';
-import type { ConnectionConfig } from './types';
+import type { ConnectionConfig, SidecarMeta } from './types';
+import { testConnection } from './testConnection';
 
 export function activate(context: vscode.ExtensionContext): { connectionManager: ConnectionManager; secrets: ConnectionSecretStore } {
   const connectionManager = new ConnectionManager(context.globalState, context.workspaceState);
@@ -46,20 +72,26 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
    */
   const auditLog = new AuditLog(path.join(context.globalStorageUri.fsPath, 'sftp-hotfix-uploads.log'));
 
+  const confirmNewOrChangedKey = async (
+    host: string,
+    port: number,
+    fingerprint: string,
+    isChange: boolean,
+  ): Promise<'accept' | 'reject'> => {
+    const choice = await vscode.window.showWarningMessage(
+      isChange
+        ? `Host key for ${host}:${port} changed to ${fingerprint}. Trust it?`
+        : `First connection to ${host}:${port}. Trust host key ${fingerprint}?`,
+      'Trust',
+      'Cancel',
+    );
+    return choice === 'Trust' ? 'accept' : 'reject';
+  };
+
   const pool = new ConnectionPool(
     { create: () => new Client() as never },
     hostKeyStore,
-    { confirmNewOrChangedKey: async (host, port, fingerprint, isChange) => {
-        const choice = await vscode.window.showWarningMessage(
-          isChange
-            ? `Host key for ${host}:${port} changed to ${fingerprint}. Trust it?`
-            : `First connection to ${host}:${port}. Trust host key ${fingerprint}?`,
-          'Trust',
-          'Cancel',
-        );
-        return choice === 'Trust' ? 'accept' : 'reject';
-      },
-    },
+    { confirmNewOrChangedKey },
     secrets,
   );
 
@@ -134,7 +166,36 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       (_progress, token) =>
         raceWithCancellation(pool.getClient(connection), token, () => pool.invalidate(connection.id)),
     );
-    return new SftpClientAdapter(client as unknown as RawSftpClient);
+    const adapter = new SftpClientAdapter(client as unknown as RawSftpClient);
+    // Trash/backup retention is lazy, not boot-time: the first successful
+    // connect per connection sweeps expired trash/backup entries once per
+    // session. A boot-time sweep would SSH on startup, which this extension
+    // never does unasked.
+    void sweepTrashFor(connection, adapter);
+    return adapter;
+  };
+
+  const sweptTrashRoots = new Set<string>();
+
+  /** Trash + backup retention: 30 days, swept lazily on first connect (see getAdapter). */
+  const TRASH_BACKUP_RETENTION_MS = 30 * 24 * 3600 * 1000;
+
+  async function sweepTrashFor(connection: ConnectionConfig, adapter: SftpClientAdapter): Promise<void> {
+    if (sweptTrashRoots.has(connection.id)) return;
+    sweptTrashRoots.add(connection.id);
+    const roots = [
+      trashRootsFor(connection).dir,
+      `${connection.remotePath}/.trash-gangway`,
+      backupRootsFor(connection).dir,
+      `${connection.remotePath}/.backup-gangway`,
+    ];
+    for (const root of roots) {
+      try {
+        await sweepOldRemoteDirs(adapter, root, TRASH_BACKUP_RETENTION_MS);
+      } catch {
+        // Best-effort: a later command retries the sweep the same way.
+      }
+    }
   }
 
   /**
@@ -325,9 +386,15 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       // tree instead of leaving the node failed.
       void showCommandError(err, { retry: () => Promise.resolve(treeProvider.refresh()) });
     },
+    // Local-Explorer/OS drops land here with the tree node they were dropped
+    // on (or undefined for empty tree space). The closure runs long after
+    // activate() finishes, so referencing handleLocalDrop (defined below)
+    // is safe despite the textual order.
+    (node, uriListValue) => handleLocalDrop(node, uriListValue),
   );
   const treeView = vscode.window.createTreeView('gangway.remoteExplorer', {
     treeDataProvider: treeProvider as never,
+    dragAndDropController: treeProvider as never,
   });
 
   /**
@@ -483,6 +550,34 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       (message) => {
         void vscode.window.showWarningMessage(`Gangway: ${message}`);
       },
+      // Test Connection dials the unsaved draft exactly once: same host-key
+      // prompt as real connects (so TOFU mismatches surface), same factory,
+      // but nothing pooled, persisted, or secret-stored. Cancellable with
+      // progress: a 15s dial with no cancel affordance violates the repo's
+      // >~5s rule.
+      async (draft) =>
+        withCancellableProgress('Testing connection', (signal) =>
+          testConnection(
+            {
+              createClient: () => new Client() as never,
+              hostKeyStore,
+              prompt: { confirmNewOrChangedKey },
+              readFile: async (filePath) => (await import('node:fs/promises')).default.readFile(filePath),
+              signal,
+            },
+            draft,
+          ),
+        ),
+      async () => {
+        const picked = await vscode.window.showOpenDialog({
+          canSelectFiles: false,
+          canSelectFolders: true,
+          canSelectMany: false,
+          title: 'Select Local Folder for Mapping',
+          openLabel: 'Select Folder',
+        });
+        return picked?.[0]?.fsPath;
+      },
     );
     rawPanel.webview.html = buildConnectionFormHtml({
       toolkitUri: rawPanel.webview.asWebviewUri(vscode.Uri.joinPath(mediaDir, 'toolkit.min.js')).toString(),
@@ -612,6 +707,17 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         return;
       }
       remotePath = derivedSidecar.remotePath;
+      // Wrong-server was already checked above (mismatch returns); only the
+      // frozen check can still fire here, before any network call.
+      try {
+        guardUploadTarget(connection, derivedSidecar);
+      } catch (err) {
+        if (err instanceof FrozenError) {
+          await vscode.window.showInformationMessage(err.message);
+          return;
+        }
+        throw err;
+      }
     }
 
     if (!remotePath) {
@@ -630,6 +736,17 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
           `${localPath} belongs to a different connection than "${connection.name}". Bind that connection to this workspace before continuing.`,
         );
         return;
+      }
+      // Same ordering as the keybinding shape above: the wrong-server case
+      // just warned and returned, so only the frozen check can fire here.
+      try {
+        guardUploadTarget(connection, sidecar);
+      } catch (err) {
+        if (err instanceof FrozenError) {
+          await vscode.window.showInformationMessage(err.message);
+          return;
+        }
+        throw err;
       }
       // A tree-node upload for a file that was never downloaded has no
       // local mirror yet. Say so directly: without this, the stat below
@@ -666,7 +783,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       }
       await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, title: `Gangway: uploading ${remotePath}` },
-        () => uploadFile(adapter, connection.id, localPath as string, remotePath as string, byteSize, auditLog, (message) => output.appendLine(message)),
+        () => uploadFile(adapter, connection.id, localPath as string, remotePath as string, byteSize, auditLog, (message) => output.appendLine(message), { backup: { connection } }),
       );
       dirtyDecorations.refresh(vscode.Uri.file(localPath));
       treeProvider.refresh();
@@ -738,6 +855,15 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     }
     const connection = resolveConnection(node);
     if (!connection) return;
+    try {
+      assertMutatingAllowed(connection);
+    } catch (err) {
+      if (err instanceof FrozenError) {
+        await vscode.window.showInformationMessage(err.message);
+        return;
+      }
+      throw err;
+    }
     const remotePath = node.entry.path;
     const fs = (await import('node:fs/promises')).default;
     try {
@@ -785,6 +911,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
             }
             await uploadFile(adapter, connection.id, localPath, file, byteSize, auditLog, (message) =>
               output.appendLine(message),
+              { backup: { connection } },
             );
             dirtyDecorations.refresh(vscode.Uri.file(localPath));
           },
@@ -902,6 +1029,863 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       await showCommandError(err, { retry: () => runCompareFileCommand(node), connection });
     }
   };
+
+  /**
+   * File-command guard shared by every Task 5/6 mutating tree command:
+   * resolve the node's own connection, then stop frozen connections with an
+   * info message before any prompt or network call.
+   */
+  async function requireMutableConnection(node?: RemoteTreeNode): Promise<ConnectionConfig | undefined> {
+    const connection = resolveConnection(node);
+    if (!connection) return undefined;
+    try {
+      assertMutatingAllowed(connection);
+    } catch (err) {
+      if (err instanceof FrozenError) {
+        await vscode.window.showInformationMessage(err.message);
+        return undefined;
+      }
+      throw err;
+    }
+    return connection;
+  }
+
+  async function runNewRemoteCommand(kind: 'file' | 'dir', node?: RemoteTreeNode): Promise<void> {
+    const connection = await requireMutableConnection(node);
+    if (!connection) return;
+    let dirPath = node?.entry?.path;
+    if (node?.entry && !node.entry.isDirectory) dirPath = path.posix.dirname(node.entry.path);
+    if (!dirPath) {
+      await vscode.window.showWarningMessage('Select a folder in the Gangway Remote Explorer first.');
+      return;
+    }
+    const name = await vscode.window.showInputBox({ prompt: `Name of the new ${kind} in ${dirPath}` });
+    if (!name) return;
+    try {
+      const adapter = await getAdapter(connection);
+      const { path: created } = await createRemote(adapter, connection, dirPath, name, kind, auditLog, {
+        onAuditError: (message) => output.appendLine(message),
+      });
+      treeProvider.refresh();
+      if (kind === 'file') {
+        const choice = await vscode.window.showInformationMessage(`Created ${created}.`, 'Download for editing');
+        if (choice === 'Download for editing') {
+          await runDownloadFileCommand({
+            connectionId: connection.id,
+            entry: { path: created, isDirectory: false, isSymbolicLink: false, size: 0 },
+          });
+        }
+      } else {
+        await vscode.window.showInformationMessage(`Created folder ${created}.`);
+      }
+    } catch (err) {
+      await showCommandError(err, { retry: () => runNewRemoteCommand(kind, node), connection });
+    }
+  }
+
+  async function runRenameRemoteCommand(node?: RemoteTreeNode): Promise<void> {
+    if (!node?.entry?.path) {
+      await vscode.window.showWarningMessage('Select a file or folder in the Gangway Remote Explorer to rename it.');
+      return;
+    }
+    const connection = await requireMutableConnection(node);
+    if (!connection) return;
+    const oldPath = node.entry.path;
+    const newName = await vscode.window.showInputBox({
+      prompt: `Rename ${oldPath} to`,
+      value: path.posix.basename(oldPath),
+    });
+    if (!newName) return;
+    try {
+      const adapter = await getAdapter(connection);
+      const { newPath } = await renameRemote(adapter, connection, oldPath, newName, auditLog, {
+        onAuditError: (message) => output.appendLine(message),
+      });
+      treeProvider.refresh();
+      await vscode.window.showInformationMessage(`Renamed to ${newPath}.`);
+    } catch (err) {
+      await showCommandError(err, { retry: () => runRenameRemoteCommand(node), connection });
+    }
+  }
+
+  async function countRemoteFiles(adapter: SftpClientAdapter, dirPath: string): Promise<number> {
+    const entries = mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName);
+    let count = 0;
+    for (const entry of entries) {
+      if (entry.isDirectory) count += await countRemoteFiles(adapter, entry.path);
+      else count += 1;
+    }
+    return count;
+  }
+
+  async function runDeleteRemoteCommand(node?: RemoteTreeNode): Promise<void> {
+    if (!node?.entry?.path) {
+      await vscode.window.showWarningMessage('Select a file or folder in the Gangway Remote Explorer to delete it.');
+      return;
+    }
+    const connection = await requireMutableConnection(node);
+    if (!connection) return;
+    const target = node.entry.path;
+    try {
+      const adapter = await getAdapter(connection);
+      if (!node.entry.isDirectory) {
+        const choice = await vscode.window.showWarningMessage(
+          `Move ${target} to the Gangway trash on the server?`,
+          'Move to Trash',
+          'Cancel',
+        );
+        if (choice !== 'Move to Trash') return;
+        await moveToTrash(adapter, connection, target, auditLog, {
+          onAuditError: (message) => output.appendLine(message),
+        });
+      } else {
+        const fileCount = await countRemoteFiles(adapter, target);
+        const base = path.posix.basename(target);
+        const typed = await vscode.window.showInputBox({
+          prompt: `Type "${base}" to move this folder (${fileCount} file(s)) to the Gangway trash`,
+        });
+        if (!typedConfirmMatches(base, typed)) {
+          await vscode.window.showInformationMessage('Delete cancelled: the typed name did not match.');
+          return;
+        }
+        await moveToTrash(adapter, connection, target, auditLog, {
+          count: fileCount,
+          onAuditError: (message) => output.appendLine(message),
+        });
+      }
+      treeProvider.refresh();
+      await vscode.window.showInformationMessage(`Moved ${target} to trash.`);
+    } catch (err) {
+      await showCommandError(err, { retry: () => runDeleteRemoteCommand(node), connection });
+    }
+  }
+
+  async function runDuplicateRemoteCommand(node?: RemoteTreeNode): Promise<void> {
+    if (!node?.entry?.path || node.entry.isDirectory) {
+      await vscode.window.showWarningMessage('Select a file in the Gangway Remote Explorer to duplicate it.');
+      return;
+    }
+    const connection = await requireMutableConnection(node);
+    if (!connection) return;
+    try {
+      const adapter = await getAdapter(connection);
+      const { path: dupPath } = await duplicateRemote(adapter, connection, node.entry.path, auditLog, {
+        onAuditError: (message) => output.appendLine(message),
+      });
+      treeProvider.refresh();
+      await vscode.window.showInformationMessage(`Duplicated to ${dupPath}.`);
+    } catch (err) {
+      await showCommandError(err, { retry: () => runDuplicateRemoteCommand(node), connection });
+    }
+  }
+
+  const CHMOD_PRESETS = ['644 (files)', '755 (folders)', '600', '640', 'Custom…'];
+
+  async function runChmodRemoteCommand(node?: RemoteTreeNode): Promise<void> {
+    if (!node?.entry?.path) {
+      await vscode.window.showWarningMessage('Select a file or folder in the Gangway Remote Explorer first.');
+      return;
+    }
+    const connection = await requireMutableConnection(node);
+    if (!connection) return;
+    const picked = await vscode.window.showQuickPick(CHMOD_PRESETS, { placeHolder: 'Choose a mode' });
+    if (!picked) return;
+    let mode: string | undefined;
+    if (picked === 'Custom…') {
+      mode = await vscode.window.showInputBox({ prompt: 'Octal mode (e.g. 644)', value: '644' });
+      if (!mode) return;
+    } else {
+      const match = /^(\d{3,4})\b/.exec(picked);
+      mode = match ? match[1] : undefined;
+    }
+    if (!mode) return;
+    try {
+      const adapter = await getAdapter(connection);
+      await chmodRemote(adapter, connection, node.entry.path, mode, auditLog, {
+        onAuditError: (message) => output.appendLine(message),
+      });
+      treeProvider.refresh();
+      await vscode.window.showInformationMessage(`Changed mode of ${node.entry.path} to ${mode}.`);
+    } catch (err) {
+      await showCommandError(err, { retry: () => runChmodRemoteCommand(node), connection });
+    }
+  };
+
+  /** The tree clipboard: cut/copy names connections, paste resolves them. Local state only. */
+  let clipboard: ClipboardState = clearClipboard();
+
+  async function runCutCopyCommand(cut: boolean, node?: RemoteTreeNode | RemoteTreeNode[]): Promise<void> {
+    const nodes = node === undefined ? [] : Array.isArray(node) ? node : [node];
+    if (nodes.length === 0) {
+      await vscode.window.showWarningMessage('Select one or more files or folders in the Gangway Remote Explorer first.');
+      return;
+    }
+    // Cutting/copying only arms the local clipboard — nothing on the server
+    // moves — so frozen connections are allowed here; the paste is blocked.
+    const first = nodes[0];
+    const connection = resolveConnection(first);
+    if (!connection) return;
+    for (const entry of nodes) {
+      if (entry.connectionId !== connection.id) {
+        await vscode.window.showWarningMessage('Cut/copy across connections is not supported: select items from one connection.');
+        return;
+      }
+    }
+    const paths = nodes.map((entry) => (entry.entry as { path: string }).path);
+    clipboard = cut ? cutToClipboard(clipboard, connection.id, paths) : copyToClipboard(clipboard, connection.id, paths);
+    await vscode.window.showInformationMessage(`${cut ? 'Cut' : 'Copied'} ${paths.length} item(s).`);
+  }
+
+  async function runPasteEntriesCommand(node?: RemoteTreeNode): Promise<void> {
+    const connection = await requireMutableConnection(node);
+    if (!connection) return;
+    if (clipboard.paths.length === 0) {
+      await vscode.window.showInformationMessage('Clipboard is empty. Cut or copy something in the Gangway Remote Explorer first.');
+      return;
+    }
+    const destDir =
+      node?.entry !== undefined
+        ? node.entry.isDirectory
+          ? node.entry.path
+          : path.posix.dirname(node.entry.path)
+        : connection.remotePath;
+    try {
+      const adapter = await getAdapter(connection);
+      const result = await withCancellableProgress('Pasting…', (signal, reportProgress) =>
+        pasteEntries(
+          adapter,
+          connection,
+          clipboard,
+          destDir,
+          {
+            confirmOverwrite: ({ remotePath, stagingPath }) =>
+              resolveFileConflict(adapter, connection.id, stagingPath as string, remotePath, conflictUi),
+            auditLog,
+          },
+          { signal, onAuditError: (message) => output.appendLine(message) },
+        ).then((r) => {
+          reportProgress(destDir);
+          return r;
+        }),
+      );
+      if (clipboard.cut && result.pasted.length > 0 && result.skipped.length === 0) clipboard = clearClipboard();
+      treeProvider.refresh();
+      if (result.skipped.length > 0) {
+        for (const skip of result.skipped) output.appendLine(`Paste skipped: ${skip.path} (${skip.reason})`);
+        output.show();
+        await vscode.window.showWarningMessage(
+          `Pasted ${result.pasted.length}, skipped ${result.skipped.length}. Details are in the Gangway output channel.`,
+        );
+      } else {
+        await vscode.window.showInformationMessage(`Pasted ${result.pasted.length} item(s).`);
+      }
+    } catch (err) {
+      await showCommandError(err, { retry: () => runPasteEntriesCommand(node), connection });
+    }
+  }
+
+  async function runRestoreFromTrashCommand(): Promise<void> {
+    const connection = await requireMutableConnection();
+    if (!connection) return;
+    try {
+      const adapter = await getAdapter(connection);
+      const picks = await withCancellableProgress('Listing trash…', () => inventoryTrash(adapter, connection));
+      if (picks.length === 0) {
+        await vscode.window.showInformationMessage('Trash is empty.');
+        return;
+      }
+      type TrashRow = vscode.QuickPickItem & { pick: (typeof picks)[number] };
+      const rows: TrashRow[] = picks.map((pick) => ({ label: pick.label, detail: pick.detail, pick }));
+      const selected = await vscode.window.showQuickPick(rows, {
+        canPickMany: true,
+        placeHolder: 'Select trash entries to restore',
+      });
+      if (!selected || selected.length === 0) return;
+      let override: string | undefined;
+      if (selected.length === 1) {
+        const destChoice = await vscode.window.showQuickPick(['Restore to original locations', 'Choose alternate folder…'], {
+          placeHolder: 'Where should the files go?',
+        });
+        if (!destChoice) return;
+        if (destChoice !== 'Restore to original locations') {
+          override = await vscode.window.showInputBox({
+            prompt: 'Alternate folder (remote path)',
+            value: path.posix.dirname(selected[0].pick.items[0]?.originalPath ?? connection.remotePath),
+          });
+          if (!override) return;
+        }
+      }
+      const result = await withCancellableProgress('Restoring…', (signal) =>
+        restoreEntries(
+          adapter,
+          connection,
+          selected.map((row) => row.pick),
+          override,
+          {
+            confirmOverwrite: ({ remotePath, stagingPath }) =>
+              resolveFileConflict(adapter, connection.id, stagingPath as string, remotePath, conflictUi),
+            auditLog,
+          },
+          { signal, onAuditError: (message) => output.appendLine(message) },
+        ),
+      );
+      treeProvider.refresh();
+      if (result.skipped.length > 0) {
+        for (const skip of result.skipped) output.appendLine(`Restore skipped: ${skip.path} (${skip.reason})`);
+        output.show();
+      }
+      await vscode.window.showInformationMessage(
+        `Restored ${result.restored.length}, skipped ${result.skipped.length}.`,
+      );
+    } catch (err) {
+      await showCommandError(err, { retry: () => runRestoreFromTrashCommand(), connection });
+    }
+  }
+
+  async function runEmptyTrashCommand(): Promise<void> {
+    const connection = await requireMutableConnection();
+    if (!connection) return;
+    try {
+      const adapter = await getAdapter(connection);
+      const picks = await withCancellableProgress('Listing trash…', () => inventoryTrash(adapter, connection));
+      if (picks.length === 0) {
+        await vscode.window.showInformationMessage('Trash is empty.');
+        return;
+      }
+      const files = picks.reduce((total, pick) => total + pick.count, 0);
+      const typed = await vscode.window.showInputBox({
+        prompt: `Type EMPTY TRASH to permanently delete ${picks.length} trash entr${picks.length === 1 ? 'y' : 'ies'} (${files} file(s)). There is no undo.`,
+      });
+      if (!typedConfirmMatches('EMPTY TRASH', typed)) {
+        await vscode.window.showInformationMessage('Empty Trash cancelled.');
+        return;
+      }
+      const result = await withCancellableProgress('Emptying trash…', (signal) =>
+        emptyTrash(adapter, connection, picks, auditLog, {
+          signal,
+          onAuditError: (message) => output.appendLine(message),
+        }),
+      );
+      treeProvider.refresh();
+      await vscode.window.showInformationMessage(
+        `Emptied trash: ${result.files} file(s) in ${result.entries} entries deleted permanently.`,
+      );
+    } catch (err) {
+      await showCommandError(err, { retry: () => runEmptyTrashCommand(), connection });
+    }
+  }
+
+  /**
+   * Local-Explorer/OS drop onto a remote node. Every dropped path is
+   * inspected first (missing paths and folders fail fast); large or binary
+   * files get one combined prompt; the upload loop reuses backup-first
+   * uploadFile with progress + cancel.
+   */
+  async function handleLocalDrop(targetNode: RemoteTreeNode | undefined, uriListValue: string): Promise<void> {
+    const connection = await requireMutableConnection(targetNode);
+    if (!connection) return;
+    const fsPaths = parseUriList(uriListValue);
+    if (fsPaths.length === 0) return;
+    let collected;
+    try {
+      collected = await collectDropUploads(fsPaths);
+    } catch (err) {
+      await showCommandError(err as Error, { connection });
+      return;
+    }
+    const flagged = collected.filter((c) => c.needsPrompt);
+    if (flagged.length > 0) {
+      const choice = await vscode.window.showWarningMessage(
+        `${flagged.length} of ${collected.length} dropped file(s) are large or look binary. Upload them anyway?`,
+        'Upload all',
+        'Skip flagged',
+      );
+      if (choice !== 'Upload all' && choice !== 'Skip flagged') return;
+      if (choice === 'Skip flagged') collected = collected.filter((c) => !c.needsPrompt);
+    }
+    if (collected.length === 0) return;
+    const targetDir =
+      targetNode?.entry && targetNode.entry.isDirectory
+        ? targetNode.entry.path
+        : targetNode?.entry
+          ? path.posix.dirname(targetNode.entry.path)
+          : connection.remotePath;
+    try {
+      const adapter = await getAdapter(connection);
+      await withCancellableProgress(`Uploading ${collected.length} dropped file(s)`, (signal, reportProgress) =>
+        (async () => {
+          for (const item of collected) {
+            if (signal.aborted) throw new TransferCancelledError();
+            const remotePath = `${targetDir}/${path.posix.basename(item.localPath)}`;
+            reportProgress(remotePath);
+            await uploadFile(adapter, connection.id, item.localPath, remotePath, item.byteSize, auditLog, (message) =>
+              output.appendLine(message),
+              { backup: { connection } },
+            );
+          }
+        })(),
+      );
+      treeProvider.refresh();
+      await vscode.window.showInformationMessage(`Uploaded ${collected.length} file(s).`);
+    } catch (err) {
+      await showCommandError(err, { retry: () => handleLocalDrop(targetNode, uriListValue), connection });
+    }
+  }
+
+  const SYNC_UP_LABEL = 'Upload (local → server)';
+  const SYNC_DOWN_LABEL = 'Download (server → local)';
+
+  interface SyncWalkLocal {
+    rel: string;
+    size: number;
+    mtimeMs: number;
+    localPath: string;
+    sidecar: SidecarMeta | undefined;
+  }
+
+  interface SyncWalkRemote {
+    rel: string;
+    size: number;
+    mtime: number;
+  }
+
+  /**
+   * Excludes are evaluated relative to the synced folder (not the
+   * connection root): a pattern like `node_modules/**` hides that subtree
+   * wherever the sync starts. Reserved trash/backup dirs and local sidecar
+   * scratch files are never walkable, regardless of user patterns.
+   */
+  function isReservedSyncPath(connection: ConnectionConfig, remotePath: string): boolean {
+    const reserved = [
+      trashRootsFor(connection).dir,
+      `${connection.remotePath}/.trash-gangway`,
+      backupRootsFor(connection).dir,
+      `${connection.remotePath}/.backup-gangway`,
+    ];
+    return reserved.some((dir) => remotePath === dir || remotePath.startsWith(`${dir}/`));
+  }
+
+  async function walkRemoteSyncTree(
+    adapter: SftpClientAdapter,
+    connection: ConnectionConfig,
+    syncRoot: string,
+    exclude: (rel: string) => boolean,
+    skippedSymlinks: string[],
+    excludedCounter: { count: number },
+  ): Promise<SyncWalkRemote[]> {
+    const out: SyncWalkRemote[] = [];
+    const pendingStats: Array<{ rel: string; size: number; remotePath: string }> = [];
+    const seen = new Set<string>([syncRoot]);
+    // Like the local walk, excluded subtrees are descended (list only, no
+    // stats) so the excluded-files count stays honest. Reserved dirs are
+    // never descended at all.
+    const stack: Array<{ dir: string; excludedBelow: boolean }> = [{ dir: syncRoot, excludedBelow: false }];
+    while (stack.length > 0) {
+      const { dir, excludedBelow } = stack.pop() as { dir: string; excludedBelow: boolean };
+      let entries;
+      try {
+        entries = mapListingToEntries(dir, await adapter.list(dir), reportUnsafeListingName);
+      } catch (err) {
+        // A sync root that does not exist yet on the server (e.g. a fresh
+        // workspace mapping) scans as empty, not as a failure. Numeric SFTP
+        // codes included (see isNotFoundError): the real server reports '2'.
+        if (isNotFoundError(err)) continue;
+        throw err;
+      }
+      for (const entry of entries) {
+        const rel = path.posix.relative(syncRoot, entry.path);
+        if (isReservedSyncPath(connection, entry.path)) continue;
+        const excluded = excludedBelow || exclude(rel);
+        if (entry.isDirectory) {
+          if (!seen.has(entry.path)) {
+            seen.add(entry.path);
+            stack.push({ dir: entry.path, excludedBelow: excluded });
+          }
+          continue;
+        }
+        if (excluded) {
+          excludedCounter.count += 1;
+          continue;
+        }
+        if (entry.isSymbolicLink) {
+          skippedSymlinks.push(entry.path);
+        } else {
+          pendingStats.push({ rel, size: entry.size, remotePath: entry.path });
+        }
+      }
+    }
+    // One round-trip per file would serialize a big folder; stat with bounded
+    // parallelism instead (order irrelevant — rows sort later by path).
+    await mapLimit(pendingStats, 8, async (file) => {
+      const stat = await adapter.stat(file.remotePath);
+      out.push({ rel: file.rel, size: file.size, mtime: stat.mtime });
+    });
+    return out;
+  }
+
+  async function walkLocalSyncTree(
+    localRoot: string,
+    exclude: (rel: string) => boolean,
+    excludedCounter: { count: number },
+  ): Promise<SyncWalkLocal[]> {
+    const fs = (await import('node:fs/promises')).default;
+    const out: SyncWalkLocal[] = [];
+    // Excluded subtrees are still descended (cheap: no stats) so the
+    // excluded-files count in the confirm dialog stays honest.
+    const stack: Array<{ dir: string; excludedBelow: boolean }> = [{ dir: localRoot, excludedBelow: false }];
+    while (stack.length > 0) {
+      const { dir, excludedBelow } = stack.pop() as { dir: string; excludedBelow: boolean };
+      let entries: import('node:fs').Dirent[];
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
+        throw err;
+      }
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        const rel = path.relative(localRoot, full).split(path.sep).join('/');
+        const excluded = excludedBelow || exclude(rel);
+        if (entry.isDirectory()) {
+          stack.push({ dir: full, excludedBelow: excluded });
+          continue;
+        }
+        if (!entry.isFile() || entry.name.endsWith('.meta.json') || entry.name.includes('.gangway-')) continue;
+        if (excluded) {
+          excludedCounter.count += 1;
+          continue;
+        }
+        const st = await fs.stat(full);
+        out.push({ rel, size: st.size, mtimeMs: st.mtimeMs, localPath: full, sidecar: await readSidecar(full) });
+      }
+    }
+    return out;
+  }
+
+  type SyncDirection = 'up' | 'down';
+
+  async function runSyncFolderCommand(node?: RemoteTreeNode): Promise<void> {
+    if (!node?.entry?.path || !node.entry.isDirectory) {
+      await vscode.window.showWarningMessage('Select a folder in the Gangway Remote Explorer to sync it.');
+      return;
+    }
+    const directionPick = await vscode.window.showQuickPick([SYNC_UP_LABEL, SYNC_DOWN_LABEL], {
+      placeHolder: 'Sync direction',
+    });
+    if (!directionPick) return;
+    const direction: SyncDirection = directionPick === SYNC_UP_LABEL ? 'up' : 'down';
+    // Uploads mutate the server (frozen blocks); downloads are read-only and
+    // stay available on frozen connections.
+    const connection =
+      direction === 'up' ? await requireMutableConnection(node) : resolveConnection(node);
+    if (!connection) return;
+    const syncRoot = node.entry.path;
+    await runSyncFlow({
+      connection,
+      syncRoot,
+      localRoot: tmpFilePathFor(connection, syncRoot),
+      direction,
+      label: syncRoot,
+      isWorkspace: false,
+      retry: () => runSyncFolderCommand(node),
+    });
+  }
+
+  /**
+   * The shared sync flow behind folder sync (tmp mirror) and workspace sync:
+   * scan both sides, excluded-count dialog, preview pick, per-file run with
+   * Conflict Guard, single audit line, summary. tmp-mirror specifics
+   * (sidecars, tmp status bar) versus workspace specifics (no sidecar
+   * litter, tmp→workspace copy on download) branch on isWorkspace.
+   */
+  async function runSyncFlow(options: {
+    connection: ConnectionConfig;
+    /** Remote folder being synced. */
+    syncRoot: string;
+    /** Local counterpart: tmp mirror or workspace folder. */
+    localRoot: string;
+    direction: SyncDirection;
+    /** Display label for progress/summary (the mapped pair for workspace sync). */
+    label: string;
+    isWorkspace: boolean;
+    retry: () => Promise<void>;
+  }): Promise<void> {
+    const { connection, syncRoot, localRoot, direction, label, isWorkspace, retry } = options;
+    const fs = (await import('node:fs/promises')).default;
+    try {
+      const adapter = await getAdapter(connection);
+      let patterns = effectiveExcludes(connection);
+      const skippedSymlinks: string[] = [];
+      const scan = async (): Promise<{ local: SyncWalkLocal[]; remote: SyncWalkRemote[]; excluded: number }> => {
+        const excludedCounter = { count: 0 };
+        skippedSymlinks.length = 0;
+        const exclude = (rel: string): boolean => matchesExcludes(rel, patterns);
+        const local = await walkLocalSyncTree(localRoot, exclude, excludedCounter);
+        const remote = await walkRemoteSyncTree(adapter, connection, syncRoot, exclude, skippedSymlinks, excludedCounter);
+        return { local, remote, excluded: excludedCounter.count };
+      };
+      let { local, remote, excluded } = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: `Gangway: scanning ${label}` },
+        () => scan(),
+      );
+      const totalScanned = local.length + remote.length + excluded;
+      if (excluded > 0) {
+        const described = describeExcludedSelection(totalScanned, excluded);
+        const choice = await vscode.window.showWarningMessage(
+          described.message,
+          described.proceedLabel,
+          described.includeAllLabel,
+        );
+        if (!choice) return;
+        if (choice === described.includeAllLabel) {
+          patterns = [];
+          ({ local, remote, excluded } = await vscode.window.withProgress(
+            { location: vscode.ProgressLocation.Notification, title: `Gangway: scanning ${label}` },
+            () => scan(),
+          ));
+        }
+      }
+      const localByRel = new Map(local.map((f) => [f.rel, f]));
+      const remoteByRel = new Map(remote.map((f) => [f.rel, f]));
+      const rows: Array<SyncRow & { localPath?: string }> = [];
+      for (const rel of [...new Set([...localByRel.keys(), ...remoteByRel.keys()])].sort()) {
+        const l = localByRel.get(rel);
+        const r = remoteByRel.get(rel);
+        rows.push({
+          relativePath: rel,
+          verdict: classifyRow({
+            localExists: l !== undefined,
+            localMtimeMs: l?.mtimeMs ?? 0,
+            localSize: l?.size ?? 0,
+            remoteExists: r !== undefined,
+            remoteMtime: r?.mtime ?? 0,
+            remoteSize: r?.size ?? 0,
+            sidecar: l?.sidecar,
+          }),
+          localStat: l ? { path: rel, mtime: l.mtimeMs, size: l.size } : undefined,
+          remoteStat: r ? { path: rel, mtime: r.mtime, size: r.size } : undefined,
+          localPath: l?.localPath,
+        });
+      }
+      const candidates = rows.filter((row) => row.verdict !== 'Same');
+      if (candidates.length === 0) {
+        await vscode.window.showInformationMessage(`No differences between local and server for ${label}.`);
+        return;
+      }
+      type SyncPickRow = vscode.QuickPickItem & { row: (typeof rows)[number] };
+      const picked = await vscode.window.showQuickPick(
+        candidates.map((row): SyncPickRow => {
+          const base = toQuickPickRow(row);
+          return {
+            label: base.label,
+            detail: base.detail,
+            picked: direction === 'up' ? row.verdict !== 'Only-remote' : row.verdict !== 'Only-local',
+            row,
+          };
+        }),
+        { canPickMany: true, placeHolder: `Select files to sync ${direction === 'up' ? 'up' : 'down'}` },
+      );
+      if (!picked || picked.length === 0) return;
+      const joinSync = (rel: string): string => (syncRoot === '/' ? `/${rel}` : `${syncRoot}/${rel}`);
+      let done = 0;
+      const skipped: string[] = [];
+      const failed: { remotePath: string; message: string }[] = [];
+      await withCancellableProgress(`Syncing ${label} ${direction}`, (signal, reportProgress) =>
+        (async () => {
+          for (const { row } of picked) {
+            if (signal.aborted) throw new TransferCancelledError();
+            const remotePath = joinSync(row.relativePath);
+            reportProgress(remotePath);
+            try {
+              if (direction === 'up') {
+                if (row.verdict === 'Only-remote' || !row.localPath) {
+                  skipped.push(`${remotePath} (no local copy to upload)`);
+                  continue;
+                }
+                if (row.verdict === 'Conflict' || row.verdict === 'Remote-newer') {
+                  const decision = await resolveFileConflict(adapter, connection.id, row.localPath, remotePath, conflictUi);
+                  if (decision === 'keepServer') {
+                    dirtyDecorations.refresh(vscode.Uri.file(row.localPath));
+                    if (isWorkspace) {
+                      // keepServer refreshes a sidecar next to the file —
+                      // remove it so workspace sync never litters the repo.
+                      await fs.rm(sidecarPathFor(row.localPath), { force: true }).catch(() => {});
+                    }
+                    skipped.push(`${remotePath} (kept server version)`);
+                    continue;
+                  }
+                  if (decision !== 'overwrite') {
+                    skipped.push(`${remotePath} (cancelled)`);
+                    continue;
+                  }
+                }
+                let byteSize: number;
+                try {
+                  byteSize = (await fs.stat(row.localPath)).size;
+                } catch {
+                  throw new Error(`Local copy of ${remotePath} disappeared — re-run the sync.`);
+                }
+                await uploadFile(adapter, connection.id, row.localPath, remotePath, byteSize, auditLog, (message) =>
+                  output.appendLine(message),
+                  // Workspace uploads never leave sidecars behind: a
+                  // `.meta.json` next to the user's own project files would
+                  // litter their repo (and could even get committed).
+                  isWorkspace ? { backup: { connection }, writeSidecar: false } : { backup: { connection } },
+                );
+                dirtyDecorations.refresh(vscode.Uri.file(row.localPath));
+                done += 1;
+              } else {
+                if (row.verdict === 'Only-local') {
+                  skipped.push(`${remotePath} (nothing on the server to download)`);
+                  continue;
+                }
+                if (row.verdict === 'Conflict' || row.verdict === 'Local-newer') {
+                  const localPath = row.localPath ?? tmpFilePathFor(connection, remotePath);
+                  const serverCopyPath = `${localPath}.gangway-compare-fresh`;
+                  try {
+                    await adapter.fastGet(remotePath, serverCopyPath);
+                    await conflictUi.showDiff(
+                      localPath,
+                      serverCopyPath,
+                      `${path.posix.basename(remotePath)}: local (Gangway) ↔ server (current)`,
+                    );
+                    const choice = await vscode.window.showQuickPick(['Download (server wins)', 'Skip'], {
+                      placeHolder: `${remotePath} differs on both sides`,
+                    });
+                    if (choice !== 'Download (server wins)') {
+                      skipped.push(`${remotePath} (kept local edits)`);
+                      continue;
+                    }
+                  } finally {
+                    await fs.rm(serverCopyPath, { force: true }).catch(() => {});
+                  }
+                }
+                if (isWorkspace) {
+                  // Workspace downloads land in the workspace, not the tmp
+                  // mirror: download to tmp, then copy over. No tmp status
+                  // bar either — that badge means "tmp-backed editor".
+                  const downloaded = await downloadFile(adapter, connection, remotePath);
+                  const dest = path.join(localRoot, ...row.relativePath.split('/'));
+                  await fs.mkdir(path.dirname(dest), { recursive: true });
+                  await fs.copyFile(downloaded.localPath, dest);
+                  dirtyDecorations.refresh(vscode.Uri.file(dest));
+                  done += 1;
+                } else {
+                  const { localPath } = await downloadFile(adapter, connection, remotePath);
+                  dirtyDecorations.refresh(vscode.Uri.file(localPath));
+                  tmpStatusBar.showFor(connection.name, remotePath, localPath);
+                  done += 1;
+                }
+              }
+            } catch (err) {
+              failed.push({ remotePath, message: err instanceof Error ? err.message : String(err) });
+            }
+          }
+        })(),
+      );
+      if (done > 0) {
+        try {
+          await auditLog.append({
+            connectionId: connection.id,
+            remotePath: syncRoot,
+            timestamp: Date.now(),
+            op: 'sync',
+            count: done,
+            note: `${direction} ${syncRoot}`,
+          });
+        } catch (err) {
+          output.appendLine(
+            `Synced ${syncRoot}, but could not write the audit log entry: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      for (const skip of skipped) output.appendLine(`Sync skipped: ${skip}`);
+      for (const name of skippedSymlinks) output.appendLine(`Sync skipped symlink: ${name}`);
+      if (skipped.length > 0 || skippedSymlinks.length > 0) output.show();
+      treeProvider.refresh();
+      await vscode.window.showInformationMessage(
+        `Synced ${done} file(s) ${direction} (${label})` +
+          (skipped.length > 0 || skippedSymlinks.length > 0 ? ` (${skipped.length + skippedSymlinks.length} skipped, see Output).` : ''),
+      );
+      await handleFolderFailures('sync', failed, retry);
+    } catch (err) {
+      await showCommandError(err, { retry, connection });
+    }
+  }
+
+  /**
+   * Workspace sync (spec §5): the Task 7 engine with the local root resolved
+   * from path mappings instead of the tmp mirror. Explicit mappings win; with
+   * none, the first workspace folder maps to the connection remotePath.
+   * Several mappings → the user picks one via QuickPick.
+   */
+  async function runSyncWorkspaceCommand(direction: SyncDirection): Promise<void> {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (folders.length === 0) {
+      await vscode.window.showWarningMessage('Open a workspace folder first.');
+      return;
+    }
+    const connection = direction === 'up' ? await requireMutableConnection() : getActiveConnection();
+    if (!connection) {
+      if (direction === 'down') await requireActiveConnection();
+      return;
+    }
+    const roots = folders.map((folder) => folder.uri.fsPath);
+    const explicit = connection.mappings ?? [];
+    const candidates =
+      explicit.length > 0
+        ? explicit.map((m) => ({ localRoot: m.localPath, remoteRoot: m.remotePath }))
+        : (() => {
+            const fallback = defaultMapping(connection, roots);
+            return fallback ? [{ localRoot: fallback.local, remoteRoot: fallback.remote }] : [];
+          })();
+    if (candidates.length === 0) return;
+    // Workspace-contained mappings sort first: a local path outside every
+    // open folder still syncs when picked, but open-folder mappings lead.
+    const normLocal = (p: string): string => (p.length > 1 && p.endsWith(path.sep) ? p.slice(0, -1) : p);
+    const contained = (localRoot: string): boolean =>
+      roots.some((root) => {
+        const peer = normLocal(localRoot);
+        const base = normLocal(root);
+        return peer === base || peer.startsWith(`${base}${path.sep}`);
+      });
+    candidates.sort((a, b) => Number(contained(b.localRoot)) - Number(contained(a.localRoot)));
+    let choice = candidates[0];
+    if (candidates.length > 1) {
+      type MappingRow = vscode.QuickPickItem & { localRoot: string; remoteRoot: string };
+      const picked = await vscode.window.showQuickPick(
+        candidates.map((c): MappingRow => ({ label: `${c.localRoot} → ${c.remoteRoot}`, localRoot: c.localRoot, remoteRoot: c.remoteRoot })),
+        { placeHolder: 'Select a path mapping to sync' },
+      );
+      if (!picked) return;
+      choice = { localRoot: picked.localRoot, remoteRoot: picked.remoteRoot };
+    }
+    // Spec §2.4: a resolved remote outside the connection root is refused
+    // even when the form holds it as a draft — the editor only hints.
+    if (!isRemoteInsideRoot(connection, choice.remoteRoot)) {
+      await vscode.window.showErrorMessage(
+        `Mapping "${choice.localRoot} → ${choice.remoteRoot}" points outside the connection remote path (${connection.remotePath}). Fix the mapping first.`,
+      );
+      return;
+    }
+    const fs = (await import('node:fs/promises')).default;
+    try {
+      const stat = await fs.stat(choice.localRoot);
+      if (!stat.isDirectory()) throw new Error('not a directory');
+    } catch {
+      await vscode.window.showWarningMessage(`Local folder ${choice.localRoot} does not exist.`);
+      return;
+    }
+    await runSyncFlow({
+      connection,
+      syncRoot: choice.remoteRoot,
+      localRoot: choice.localRoot,
+      direction,
+      label: `${choice.localRoot} → ${choice.remoteRoot}`,
+      isWorkspace: true,
+      retry: () => runSyncWorkspaceCommand(direction),
+    });
+  }
 
   /**
    * Govard remote import (see docs/specs/2026-09-18-gangway-govard-import-design.md).
@@ -1023,7 +2007,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       return;
     }
     treeProvider.refresh();
-    const importedNote = `Imported ${selected.length} (${selected.map((c) => c.name).join(', ')}).`;
+    const importedNote = `Imported ${selected.length} (${selected.map((c) => `${c.name}${c.frozen === true ? ' (frozen)' : ''}`).join(', ')}).`;
     const presentNote = alreadyPresent.length > 0 ? ` Already present: ${alreadyPresent.join(', ')}.` : '';
     const skippedNote =
       skipped.length > 0 ? ` Skipped: ${skipped.map((s) => `${s.remoteName} (${s.reason})`).join(', ')}.` : '';
@@ -1060,7 +2044,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
           .sort((a, b) => a.name.localeCompare(b.name))
           .map(
             (c): PickItem => ({
-              label: c.name,
+              label: c.frozen === true ? `$(lock) ${c.name}` : c.name,
               description: `${c.username}@${c.host}:${c.port}`,
               detail: c.remotePath,
               connectionId: c.id,
@@ -1101,7 +2085,34 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     vscode.commands.registerCommand('gangway.downloadFolder', runDownloadFolderCommand),
     vscode.commands.registerCommand('gangway.uploadFolder', runUploadFolderCommand),
     vscode.commands.registerCommand('gangway.compareFile', runCompareFileCommand),
+    vscode.commands.registerCommand('gangway.newFile', (node?: RemoteTreeNode) => runNewRemoteCommand('file', node)),
+    vscode.commands.registerCommand('gangway.newFolder', (node?: RemoteTreeNode) => runNewRemoteCommand('dir', node)),
+    vscode.commands.registerCommand('gangway.renameRemote', runRenameRemoteCommand),
+    vscode.commands.registerCommand('gangway.deleteRemote', runDeleteRemoteCommand),
+    vscode.commands.registerCommand('gangway.duplicateRemote', runDuplicateRemoteCommand),
+    vscode.commands.registerCommand('gangway.chmodRemote', runChmodRemoteCommand),
+    vscode.commands.registerCommand('gangway.cutEntries', (node?: RemoteTreeNode | RemoteTreeNode[]) => runCutCopyCommand(true, node)),
+    vscode.commands.registerCommand('gangway.copyEntries', (node?: RemoteTreeNode | RemoteTreeNode[]) => runCutCopyCommand(false, node)),
+    vscode.commands.registerCommand('gangway.pasteEntries', runPasteEntriesCommand),
+    vscode.commands.registerCommand('gangway.restoreFromTrash', runRestoreFromTrashCommand),
+    vscode.commands.registerCommand('gangway.emptyTrash', runEmptyTrashCommand),
+    vscode.commands.registerCommand('gangway.syncFolder', runSyncFolderCommand),
+    vscode.commands.registerCommand('gangway.syncWorkspaceUp', () => runSyncWorkspaceCommand('up')),
+    vscode.commands.registerCommand('gangway.syncWorkspaceDown', () => runSyncWorkspaceCommand('down')),
     vscode.commands.registerCommand('gangway.refreshExplorer', () => treeProvider.refresh()),
+    vscode.commands.registerCommand('gangway.toggleFreeze', async (node?: RemoteTreeNode) => {
+      const connection = node
+        ? connectionManager.list().find((c) => c.id === node.connectionId)
+        : requireActiveConnection();
+      if (!connection) return;
+      const updated = await connectionManager.update(connection.id, { frozen: !(connection.frozen === true) });
+      treeProvider.refresh();
+      await vscode.window.showInformationMessage(
+        updated.frozen === true
+          ? `Locked "${updated.name}": uploads, deletes, and other server mutations are now blocked.`
+          : `Unlocked "${updated.name}": server mutations allowed again.`,
+      );
+    }),
     vscode.commands.registerCommand('gangway.importGovardRemotes', () => importGovardRemotes(true)),
     govardFoldersListener,
   );

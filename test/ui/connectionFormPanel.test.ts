@@ -592,3 +592,113 @@ describe('ConnectionFormPanel', () => {
     });
   });
 });
+
+describe('ConnectionFormPanel test connection and mappings', () => {
+  function fireMessage(rawPanel: unknown, message: unknown): Promise<void> {
+    return (rawPanel as unknown as { __test_fireMessage: (m: unknown) => Promise<void> }).__test_fireMessage(message);
+  }
+
+  it('forwards a testConnection draft and posts the classified result back', async () => {
+    const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+    const secrets = new ConnectionSecretStore(fakeSecretStore());
+    const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+    const runConnectionTest = vi.fn().mockResolvedValue({ ok: false, kind: 'auth-failed', message: 'bad password' });
+    const panel = new ConnectionFormPanel(
+      rawPanel as never, manager, secrets,
+      () => {}, async () => undefined, async () => true, () => {}, runConnectionTest,
+    );
+    const postMessage = vi.spyOn(rawPanel.webview, 'postMessage');
+
+    await fireMessage(rawPanel, {
+      nonce: panel.nonce,
+      type: 'testConnection',
+      payload: { draft: { host: 'h', port: 22, username: 'u', authMethod: 'password', password: 'x' } },
+    });
+
+    expect(runConnectionTest).toHaveBeenCalledWith(
+      expect.objectContaining({ host: 'h', username: 'u', authMethod: 'password' }),
+    );
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'testConnectionResult', ok: false, kind: 'auth-failed' }),
+    );
+  });
+
+  it('rejects a forged testConnection nonce without touching anything', async () => {
+    const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+    const secrets = new ConnectionSecretStore(fakeSecretStore());
+    const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+    const runConnectionTest = vi.fn();
+    const panel = new ConnectionFormPanel(
+      rawPanel as never, manager, secrets,
+      () => {}, async () => undefined, async () => true, () => {}, runConnectionTest,
+    );
+    void panel;
+
+    await fireMessage(rawPanel, { nonce: 'forged', type: 'testConnection', payload: { draft: {} } });
+
+    expect(runConnectionTest).not.toHaveBeenCalled();
+  });
+
+  it('saves mappings through the existing save path', async () => {
+    const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+    const secrets = new ConnectionSecretStore(fakeSecretStore());
+    const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+    const panel = new ConnectionFormPanel(rawPanel as never, manager, secrets);
+
+    await fireMessage(rawPanel, {
+      nonce: panel.nonce,
+      type: 'saveConnection',
+      payload: {
+        name: 'p', host: 'h', port: 22, username: 'u', remotePath: '/srv/app', authMethod: 'agent',
+        mappings: [{ localPath: '/w', remotePath: '/srv/app' }],
+      },
+    });
+
+    expect(manager.list()[0].mappings).toEqual([{ localPath: '/w', remotePath: '/srv/app' }]);
+  });
+
+  it('forwards browseMappingFolder picks with the row index', async () => {
+    const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+    const secrets = new ConnectionSecretStore(fakeSecretStore());
+    const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+    const chooseFolder = vi.fn().mockResolvedValue('/home/u/proj');
+    const panel = new ConnectionFormPanel(
+      rawPanel as never, manager, secrets,
+      () => {}, async () => undefined, async () => true, () => {}, undefined, chooseFolder,
+    );
+    const postMessage = vi.spyOn(rawPanel.webview, 'postMessage');
+
+    await fireMessage(rawPanel, { nonce: panel.nonce, type: 'browseMappingFolder', row: 2 });
+
+    expect(chooseFolder).toHaveBeenCalledTimes(1);
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'mappingFolderSelected', row: 2, path: '/home/u/proj' }),
+    );
+  });
+});
+
+describe('ConnectionFormPanel test cancellation', () => {
+  it('clears the Testing state when the user cancels the dial', async () => {
+    const { TransferCancelledError } = await import('../../src/folderQueue');
+    const manager = new ConnectionManager(fakeKeyValueStore(), fakeKeyValueStore());
+    const secrets = new ConnectionSecretStore(fakeSecretStore());
+    const rawPanel = vscode.window.createWebviewPanel('gangway.connectionForm', 'Connection', vscode.ViewColumn.Active, {});
+    const runConnectionTest = vi.fn().mockRejectedValue(new TransferCancelledError());
+    const panel = new ConnectionFormPanel(
+      rawPanel as never, manager, secrets,
+      () => {}, async () => undefined, async () => true, () => {}, runConnectionTest,
+    );
+    const postMessage = vi.spyOn(rawPanel.webview, 'postMessage');
+
+    await (rawPanel as unknown as { __test_fireMessage: (m: unknown) => Promise<void> }).__test_fireMessage({
+      nonce: panel.nonce,
+      type: 'testConnection',
+      payload: { draft: { host: 'h', port: 22, username: 'u', authMethod: 'agent' } },
+    });
+
+    // No failure verdict (a Cancel is not a failure), but the form must
+    // leave its "Testing…" state: exactly one cancelled message, nothing else.
+    expect(postMessage).toHaveBeenCalledTimes(1);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'testConnectionCancelled' }));
+  });
+});

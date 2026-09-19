@@ -52,6 +52,10 @@ export interface RawSftpClient {
   posixRename(fromPath: string, toPath: string): Promise<unknown>;
   /** Used only to clean up an orphaned `<name>.tmp` after a failed rename. */
   delete(remotePath: string): Promise<unknown>;
+  /** Recursive remove of a trash entry. Verified in node_modules (rmdir l.946): `recursive` defaults false there, always passed explicitly here. */
+  rmdir(remotePath: string, recursive: boolean): Promise<unknown>;
+  /** Octal string mode ('644', '755'). Verified in node_modules (chmod l.1138): passed straight to ssh2. */
+  chmod(remotePath: string, mode: string): Promise<unknown>;
   list(remotePath: string): Promise<RawSftpListEntry[]>;
 }
 
@@ -107,6 +111,14 @@ export class SftpClientAdapter {
 
   delete(remotePath: string): Promise<unknown> {
     return this.raw.delete(remotePath);
+  }
+
+  rmdir(remotePath: string, recursive: boolean): Promise<unknown> {
+    return this.raw.rmdir(remotePath, recursive);
+  }
+
+  chmod(remotePath: string, mode: string): Promise<unknown> {
+    return this.raw.chmod(remotePath, mode);
   }
 
   list(remotePath: string): Promise<RawSftpListEntry[]> {

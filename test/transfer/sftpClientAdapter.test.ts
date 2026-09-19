@@ -12,6 +12,8 @@ function fakeRawClient(overrides: Partial<RawSftpClient> = {}): RawSftpClient {
     posixRename: async () => undefined,
     delete: async () => undefined,
     mkdir: async () => undefined,
+    rmdir: async () => undefined,
+    chmod: async () => undefined,
     list: async () => [],
     ...overrides,
   };

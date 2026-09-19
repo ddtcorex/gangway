@@ -3,6 +3,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import * as vscode from 'vscode';
+// Relative mock import for the test-only answer queues (__test_queue*):
+// same runtime instance the handlers use, full types under tsc.
+import { window as mockWindow } from './mocks/vscode';
 
 // Shared fake raw SFTP client, created via vi.hoisted so both the
 // vi.mock('../src/transfer/connectionPool', ...) factory below and the test
@@ -25,6 +28,8 @@ const fakeRawClient = vi.hoisted(() => ({
   posixRename: vi.fn().mockResolvedValue(undefined),
   delete: vi.fn().mockResolvedValue(undefined),
   mkdir: vi.fn().mockResolvedValue(undefined),
+  rmdir: vi.fn().mockResolvedValue(undefined),
+  chmod: vi.fn().mockResolvedValue(undefined),
 }));
 
 function resetFakeClient(): void {
@@ -37,6 +42,8 @@ function resetFakeClient(): void {
   fakeRawClient.posixRename.mockClear();
   fakeRawClient.delete.mockClear();
   fakeRawClient.mkdir.mockClear();
+  fakeRawClient.rmdir.mockClear();
+  fakeRawClient.chmod.mockClear();
 }
 
 // activate() builds its own ConnectionPool internally (not injectable), and
@@ -60,6 +67,7 @@ vi.mock('../src/transfer/connectionPool', () => ({
 
 import { activate } from '../src/extension';
 import { ConnectionPool } from '../src/transfer/connectionPool';
+import type { ConnectionManager } from '../src/connectionManager';
 import { writeSidecar } from '../src/tmpStore';
 import { tmpFilePathFor } from '../src/tmpPath';
 import type { ConnectionConfig } from '../src/types';
@@ -162,6 +170,7 @@ describe('activate - realistic command invocation', () => {
   let tmpHome: string;
   let handlers: Map<string, (...args: unknown[]) => unknown>;
   let connection: ConnectionConfig;
+  let connectionManager: ConnectionManager;
   let osTmpdirSpy: ReturnType<typeof vi.spyOn>;
   let capturedTreeView: { __test_fireDidChangeSelection: (node: unknown) => void } | undefined;
 
@@ -193,6 +202,7 @@ describe('activate - realistic command invocation', () => {
     }) as typeof originalCreateTreeView;
 
     const result = activate(fakeContext());
+    connectionManager = result.connectionManager;
     connection = await result.connectionManager.add({
       name: 'staging',
       host: 'example.com',
@@ -492,6 +502,438 @@ describe('activate - realistic command invocation', () => {
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('different connection'));
       expect(fakeRawClient.fastGet).not.toHaveBeenCalled();
       expect(fakeRawClient.stat).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('frozen connection guard', () => {
+    it('gangway.uploadFile stops on a frozen connection before any network mutation', async () => {
+      const fresh = activate(fakeContext());
+      const frozen = await fresh.connectionManager.add({
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'password',
+        frozen: true,
+      });
+      await fresh.connectionManager.setWorkspaceBinding(frozen.id);
+      const localPath = path.join(tmpHome, 'frozen.php');
+      await fs.writeFile(localPath, 'hotfix');
+      await writeSidecar(localPath, {
+        connectionId: frozen.id,
+        remotePath: '/var/www/app/f.php',
+        mtime: 1,
+        size: 6,
+        downloadedAt: 1,
+      });
+      vscode.window.activeTextEditor = { document: { uri: { fsPath: localPath } } } as unknown as vscode.TextEditor;
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+      resetFakeClient();
+
+      await handlers.get('gangway.uploadFile')!();
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('frozen'));
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+      expect(fakeRawClient.fastGet).not.toHaveBeenCalled();
+      expect(fakeRawClient.stat).not.toHaveBeenCalled();
+      infoSpy.mockRestore();
+    });
+  });
+
+  describe('file commands', () => {
+    function fileNode(remotePath: string) {
+      return { connectionId: connection.id, entry: { path: remotePath, isDirectory: false, isSymbolicLink: false, size: 5 } };
+    }
+
+    function folderNode(remotePath: string) {
+      return { connectionId: connection.id, entry: { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 } };
+    }
+
+    async function activateFrozenConnection() {
+      const fresh = activate(fakeContext());
+      const frozen = await fresh.connectionManager.add({
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'password',
+        frozen: true,
+      });
+      await fresh.connectionManager.setWorkspaceBinding(frozen.id);
+      return frozen;
+    }
+
+    afterEach(() => {
+      mockWindow.__test_resetAnswers();
+    });
+
+    it('gangway.deleteRemote cancels a folder delete when the typed name does not match', async () => {
+      mockWindow.__test_queueInput('wrong-name');
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.deleteRemote')!(folderNode('/var/www/app/dir'));
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Delete cancelled'));
+      expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+      infoSpy.mockRestore();
+    });
+
+    it('gangway.deleteRemote retries the trash move when the user picks Retry', async () => {
+      mockWindow.__test_queueWarning('Move to Trash', 'Move to Trash');
+      mockWindow.__test_queueError('Retry');
+      fakeRawClient.posixRename.mockRejectedValueOnce(new Error('boom'));
+      fakeRawClient.stat.mockResolvedValue({ size: 5, modifyTime: 1, isDirectory: false, isSymbolicLink: false });
+
+      await handlers.get('gangway.deleteRemote')!(fileNode('/var/www/app/a.php'));
+
+      expect(fakeRawClient.posixRename).toHaveBeenCalledTimes(2);
+      expect(fakeRawClient.posixRename).toHaveBeenLastCalledWith(
+        '/var/www/app/a.php',
+        expect.stringMatching(/\.gangway-trash-[0-9a-f]{10}\//),
+      );
+    });
+
+    it.each([
+      ['gangway.newFile', { isDirectory: true, path: '/var/www/app' }],
+      ['gangway.newFolder', { isDirectory: true, path: '/var/www/app' }],
+      ['gangway.renameRemote', { isDirectory: false, path: '/var/www/app/a.php' }],
+      ['gangway.deleteRemote', { isDirectory: false, path: '/var/www/app/a.php' }],
+      ['gangway.duplicateRemote', { isDirectory: false, path: '/var/www/app/a.php' }],
+      ['gangway.chmodRemote', { isDirectory: false, path: '/var/www/app/a.php' }],
+    ])('%s stops on a frozen connection before any prompt or network call', async (commandId, entry) => {
+      const frozen = await activateFrozenConnection();
+      resetFakeClient();
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get(commandId)!({ connectionId: frozen.id, entry });
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('frozen'));
+      expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+      expect(fakeRawClient.mkdir).not.toHaveBeenCalled();
+      infoSpy.mockRestore();
+    });
+  });
+
+  describe('trash and clipboard commands', () => {
+    function trashListFixture() {
+      fakeRawClient.list.mockImplementation(async (dirPath: string) => {
+        // Stamp-specific branch first: a stamp dir path also contains the
+        // trash-root segment, so matching the root first would recurse into
+        // the stamp forever (walkRemoteFiles keeps descending).
+        if (dirPath.includes('20260901-000000-op')) {
+          return [{ name: 'a.php', type: 'f', size: 3 }];
+        }
+        if (dirPath.includes('.gangway-trash-') || dirPath === '/var/www/.trash-gangway') {
+          return [{ name: '20260901-000000-op', type: 'd' }];
+        }
+        return [];
+      });
+    }
+
+    async function activateFrozenConnection() {
+      const fresh = activate(fakeContext());
+      const frozen = await fresh.connectionManager.add({
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'password',
+        frozen: true,
+      });
+      await fresh.connectionManager.setWorkspaceBinding(frozen.id);
+      return frozen;
+    }
+
+    afterEach(() => {
+      mockWindow.__test_resetAnswers();
+    });
+
+    it('gangway.emptyTrash does nothing when the typed confirm does not match', async () => {
+      trashListFixture();
+      mockWindow.__test_queueInput('never mind');
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.emptyTrash')!();
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Empty Trash cancelled'));
+      expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
+      infoSpy.mockRestore();
+    });
+
+    it('gangway.emptyTrash removes stamp dirs on the literal confirm', async () => {
+      trashListFixture();
+      mockWindow.__test_queueInput('EMPTY TRASH');
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.emptyTrash')!();
+
+      expect(fakeRawClient.rmdir).toHaveBeenCalledWith(
+        expect.stringContaining('20260901-000000-op'),
+        true,
+      );
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Emptied trash'));
+      infoSpy.mockRestore();
+    });
+
+    it('gangway.restoreFromTrash moves the trashed file back on overwrite', async () => {
+      trashListFixture();
+      mockWindow.__test_queuePick((items: unknown[]) => [(items as unknown[])[0]]);
+      mockWindow.__test_queuePick('Restore to original locations');
+      mockWindow.__test_queueWarning('Overwrite server');
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.restoreFromTrash')!();
+
+      expect(fakeRawClient.posixRename).toHaveBeenCalledWith(
+        expect.stringContaining('20260901-000000-op/a.php'),
+        '/var/www/a.php',
+      );
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Restored 1'));
+      infoSpy.mockRestore();
+    });
+
+    it('cut then paste moves server-side with no re-upload', async () => {
+      fakeRawClient.stat.mockImplementation(async (p: string) => {
+        if (p === '/var/www/other') return { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false };
+        if (p === '/var/www/app/a.php') return { size: 3, modifyTime: 1, isDirectory: false, isSymbolicLink: false };
+        const err = new Error('ENOENT') as NodeJS.ErrnoException;
+        err.code = 'ENOENT';
+        throw err;
+      });
+      const cutNode = { connectionId: connection.id, entry: { path: '/var/www/app/a.php', isDirectory: false, isSymbolicLink: false, size: 3 } };
+      const destNode = { connectionId: connection.id, entry: { path: '/var/www/other', isDirectory: true, isSymbolicLink: false, size: 0 } };
+
+      await handlers.get('gangway.cutEntries')!(cutNode);
+      await handlers.get('gangway.pasteEntries')!(destNode);
+
+      expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/app/a.php', '/var/www/other/a.php');
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+    });
+
+    it.each([['gangway.pasteEntries'], ['gangway.restoreFromTrash'], ['gangway.emptyTrash']])(
+      '%s stops on a frozen connection before any prompt or network call',
+      async (commandId) => {
+        const frozen = await activateFrozenConnection();
+        resetFakeClient();
+        const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+        const node = { connectionId: frozen.id, entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 } };
+        await handlers.get(commandId)!(commandId === 'gangway.pasteEntries' ? node : undefined);
+
+        expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('frozen'));
+        expect(fakeRawClient.list).not.toHaveBeenCalled();
+        expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+        infoSpy.mockRestore();
+      },
+    );
+  });
+
+  describe('sync folder', () => {
+    async function activateFrozenConnection() {
+      const fresh = activate(fakeContext());
+      const frozen = await fresh.connectionManager.add({
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'password',
+        frozen: true,
+      });
+      await fresh.connectionManager.setWorkspaceBinding(frozen.id);
+      return frozen;
+    }
+
+    afterEach(() => {
+      mockWindow.__test_resetAnswers();
+    });
+
+    it('gangway.syncFolder blocks the up direction on a frozen connection', async () => {
+      const frozen = await activateFrozenConnection();
+      resetFakeClient();
+      mockWindow.__test_queuePick('Upload (local → server)');
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.syncFolder')!({
+        connectionId: frozen.id,
+        entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 },
+      });
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('frozen'));
+      expect(fakeRawClient.list).not.toHaveBeenCalled();
+      infoSpy.mockRestore();
+    });
+
+    it('gangway.syncFolder allows the down direction on a frozen connection', async () => {
+      const frozen = await activateFrozenConnection();
+      resetFakeClient();
+      mockWindow.__test_queuePick('Download (server → local)');
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.syncFolder')!({
+        connectionId: frozen.id,
+        entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 },
+      });
+
+      expect(fakeRawClient.list).toHaveBeenCalled();
+      expect(infoSpy).not.toHaveBeenCalledWith(expect.stringContaining('frozen'));
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('No differences'));
+      infoSpy.mockRestore();
+    });
+
+    it('gangway.syncFolder states the excluded count and uploads only the picked files', async () => {
+      const { tmpFilePathFor } = await import('../src/tmpPath');
+      const localRoot = tmpFilePathFor(connection, '/var/www/app');
+      await fs.mkdir(path.join(localRoot, 'node_modules'), { recursive: true });
+      await fs.writeFile(path.join(localRoot, 'keep.php'), '<?php');
+      await fs.writeFile(path.join(localRoot, 'node_modules', 'skip.js'), 'x');
+      mockWindow.__test_queuePick('Upload (local → server)');
+      mockWindow.__test_queueWarning('Proceed-excluded');
+      mockWindow.__test_queuePick((items: unknown[]) => items);
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.syncFolder')!({
+        connectionId: connection.id,
+        entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 },
+      });
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Synced 1'));
+      const puts = (fakeRawClient.fastPut as ReturnType<typeof vi.fn>).mock.calls as Array<[string, string]>;
+      expect(puts.some(([local]) => local.endsWith('keep.php'))).toBe(true);
+      expect(puts.some(([local, remote]) => local.includes('skip.js') || remote.includes('skip.js'))).toBe(false);
+      infoSpy.mockRestore();
+    });
+  });
+
+  describe('sync workspace', () => {
+    let workRoot: string;
+    let previousFolders: unknown;
+
+    beforeEach(async () => {
+      workRoot = path.join(tmpHome, 'work');
+      await fs.mkdir(workRoot, { recursive: true });
+      previousFolders = vscode.workspace.workspaceFolders;
+      (vscode.workspace as unknown as { workspaceFolders: { uri: { fsPath: string }; name: string }[] }).workspaceFolders = [{ uri: { fsPath: workRoot }, name: 'work' }];
+    });
+
+    afterEach(() => {
+      (vscode.workspace as unknown as { workspaceFolders: unknown }).workspaceFolders = previousFolders;
+      mockWindow.__test_resetAnswers();
+    });
+
+    it('gangway.syncWorkspaceUp uploads a workspace file through the default mapping', async () => {
+      await fs.writeFile(path.join(workRoot, 'hello.php'), '<?php');
+      mockWindow.__test_queuePick((items: unknown[]) => items);
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.syncWorkspaceUp')!();
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Synced 1'));
+      const puts = (fakeRawClient.fastPut as ReturnType<typeof vi.fn>).mock.calls as Array<[string, string]>;
+      expect(puts.some(([local, remote]) => local === path.join(workRoot, 'hello.php') && remote === '/var/www/hello.php.tmp')).toBe(true);
+      infoSpy.mockRestore();
+    });
+
+    it('names the mapped root in the summary so unmapped roots are visible', async () => {
+      await fs.writeFile(path.join(workRoot, 'hello.php'), '<?php');
+      mockWindow.__test_queuePick((items: unknown[]) => items);
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.syncWorkspaceUp')!();
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining(`${workRoot} → /var/www`));
+      infoSpy.mockRestore();
+    });
+
+    it('treats a missing remote root as empty, including numeric SFTP codes', async () => {
+      await fs.writeFile(path.join(workRoot, 'hello.php'), '<?php');
+      fakeRawClient.list.mockRejectedValue(Object.assign(new Error('list: No such file /var/www'), { code: '2' }));
+      mockWindow.__test_queuePick((items: unknown[]) => items);
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.syncWorkspaceUp')!();
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Synced 1'));
+      const puts = (fakeRawClient.fastPut as ReturnType<typeof vi.fn>).mock.calls as Array<[string, string]>;
+      expect(puts.some(([local]) => local === path.join(workRoot, 'hello.php'))).toBe(true);
+      infoSpy.mockRestore();
+    });
+
+    it('picks between explicit mappings when several match', async () => {
+      const subDir = path.join(workRoot, 'sub');
+      await fs.mkdir(subDir, { recursive: true });
+      await fs.writeFile(path.join(subDir, 'f.php'), '<?php');
+      await connectionManager.update(connection.id, {
+        mappings: [
+          { localPath: workRoot, remotePath: '/var/www/app' },
+          { localPath: subDir, remotePath: '/var/www/other' },
+        ],
+      });
+      mockWindow.__test_queuePick((items: unknown[]) => (items as unknown[])[1]);
+      mockWindow.__test_queuePick((items: unknown[]) => items);
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.syncWorkspaceUp')!();
+
+      const puts = (fakeRawClient.fastPut as ReturnType<typeof vi.fn>).mock.calls as Array<[string, string]>;
+      expect(puts.some(([, remote]) => remote.startsWith('/var/www/other/'))).toBe(true);
+      expect(puts.some(([, remote]) => remote.startsWith('/var/www/app/'))).toBe(false);
+      infoSpy.mockRestore();
+    });
+
+    it('refuses a mapping whose remote sits outside the connection root', async () => {
+      await connectionManager.update(connection.id, {
+        mappings: [{ localPath: workRoot, remotePath: '/other/place' }],
+      });
+      const errSpy = vi.spyOn(vscode.window, 'showErrorMessage');
+
+      await handlers.get('gangway.syncWorkspaceUp')!();
+
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('outside'));
+      expect(fakeRawClient.list).not.toHaveBeenCalled();
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+      errSpy.mockRestore();
+    });
+
+    it('sorts workspace-contained mappings ahead of outside ones', async () => {
+      const outsideDir = path.join(tmpHome, 'outside');
+      await fs.mkdir(outsideDir, { recursive: true });
+      await connectionManager.update(connection.id, {
+        mappings: [
+          { localPath: outsideDir, remotePath: '/var/www/out' },
+          { localPath: workRoot, remotePath: '/var/www/in' },
+        ],
+      });
+      let offered: string[] = [];
+      mockWindow.__test_queuePick((items: unknown[]) => {
+        offered = (items as Array<{ label: string }>).map((i) => i.label);
+        return (items as unknown[])[0];
+      });
+
+      await handlers.get('gangway.syncWorkspaceUp')!();
+
+      expect(offered[0]).toContain(workRoot);
+      expect(offered[1]).toContain(outsideDir);
+    });
+  });
+
+  describe('freeze toggle', () => {
+    it('gangway.toggleFreeze locks and unlocks, and the pick list shows the lock', async () => {
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+      const node = { connectionId: connection.id, entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 } };
+
+      await handlers.get('gangway.toggleFreeze')!(node);
+      expect(connectionManager.list()[0].frozen).toBe(true);
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Locked'));
+
+      await handlers.get('gangway.toggleFreeze')!(node);
+      expect(connectionManager.list()[0].frozen).toBe(false);
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Unlocked'));
+      infoSpy.mockRestore();
     });
   });
 

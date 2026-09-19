@@ -54,6 +54,22 @@ describe('ConnectionManager', () => {
     expect(manager.list()).toEqual([updated]);
   });
 
+  it('round-trips frozen and excludePatterns through add/update', async () => {
+    const created = await manager.add({
+      name: 'p',
+      host: 'h',
+      port: 22,
+      username: 'u',
+      remotePath: '/srv/app',
+      authMethod: 'agent',
+    });
+    expect(created.frozen).toBeUndefined();
+    const updated = await manager.update(created.id, { frozen: true, excludePatterns: ['dist/**'] });
+    expect(updated.frozen).toBe(true);
+    expect(updated.excludePatterns).toEqual(['dist/**']);
+    expect(manager.list()[0].frozen).toBe(true);
+  });
+
   it('removes a connection by id', async () => {
     const created = await manager.add({
       name: 'staging',
@@ -162,5 +178,21 @@ describe('ConnectionManager', () => {
       expect(manager.list()).toEqual([]);
       expect(workspaceState.get('gangway.connections')).toEqual([]);
     });
+  });
+
+  it('round-trips mappings through add/update', async () => {
+    const created = await manager.add({
+      name: 'p',
+      host: 'h',
+      port: 22,
+      username: 'u',
+      remotePath: '/srv/app',
+      authMethod: 'agent',
+    });
+    expect(created.mappings).toBeUndefined();
+    const updated = await manager.update(created.id, {
+      mappings: [{ localPath: '/home/u/proj', remotePath: '/srv/app' }],
+    });
+    expect(updated.mappings).toEqual([{ localPath: '/home/u/proj', remotePath: '/srv/app' }]);
   });
 });
