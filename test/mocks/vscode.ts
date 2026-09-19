@@ -98,6 +98,14 @@ export interface MockTextEditor {
   document: { uri: { fsPath: string } };
 }
 
+const answerQueues: {
+  warning: (string | undefined)[];
+  error: (string | undefined)[];
+  info: (string | undefined)[];
+  pick: unknown[];
+  input: (string | undefined)[];
+} = { warning: [], error: [], info: [], pick: [], input: [] };
+
 const onDidChangeActiveTextEditorEmitter = new EventEmitter<MockTextEditor | undefined>();
 
 export const window = {
@@ -105,6 +113,34 @@ export const window = {
   // assigning `vscode.window.activeTextEditor = { document: { uri: { fsPath: '...' } } }`
   // before invoking a command handler, and reset to undefined afterwards.
   activeTextEditor: undefined as MockTextEditor | undefined,
+  // FIFO answer queues for prompt buttons and inputs. Tests push the user's
+  // answers with __test_queueWarning/__test_queueError/__test_queueInfo/
+  // __test_queuePick/__test_queueInput before invoking a handler; an empty
+  // queue resolves undefined (the user dismissed the prompt), preserving the
+  // old always-undefined behavior for tests that queue nothing.
+  __test_queueWarning(...answers: (string | undefined)[]): void {
+    answerQueues.warning.push(...answers);
+  },
+  __test_queueError(...answers: (string | undefined)[]): void {
+    answerQueues.error.push(...answers);
+  },
+  __test_queueInfo(...answers: (string | undefined)[]): void {
+    answerQueues.info.push(...answers);
+  },
+  __test_queuePick(...answers: unknown[]): void {
+    answerQueues.pick.push(...answers);
+  },
+  __test_queueInput(...answers: (string | undefined)[]): void {
+    answerQueues.input.push(...answers);
+  },
+  /** Test-only: drains every answer queue. */
+  __test_resetAnswers(): void {
+    answerQueues.warning.length = 0;
+    answerQueues.error.length = 0;
+    answerQueues.info.length = 0;
+    answerQueues.pick.length = 0;
+    answerQueues.input.length = 0;
+  },
   createWebviewPanel: (..._args: unknown[]) => createFakeWebviewPanel(),
   createTreeView: (_id: string, _options: unknown) => {
     const selectionEmitter = new EventEmitter<{ selection: unknown[] }>();
@@ -131,10 +167,11 @@ export const window = {
     show: () => {},
     dispose: () => {},
   }),
-  showWarningMessage: async (_msg: string, ..._items: string[]) => undefined,
-  showErrorMessage: async (_msg: string, ..._items: string[]) => undefined,
-  showInformationMessage: async (_msg: string, ..._items: string[]) => undefined,
-  showQuickPick: async (_items: unknown[], _opts?: unknown) => undefined,
+  showWarningMessage: async (_msg: string, ..._items: string[]) => answerQueues.warning.shift(),
+  showErrorMessage: async (_msg: string, ..._items: string[]) => answerQueues.error.shift(),
+  showInformationMessage: async (_msg: string, ..._items: string[]) => answerQueues.info.shift(),
+  showQuickPick: async (_items: unknown[], _opts?: unknown) => answerQueues.pick.shift(),
+  showInputBox: async (_opts?: unknown) => answerQueues.input.shift(),
   showTextDocument: async (_uri: unknown) => ({}),
   // The token mirrors vscode.CancellationToken closely enough for the folder
   // commands, which translate onCancellationRequested into an AbortController.
