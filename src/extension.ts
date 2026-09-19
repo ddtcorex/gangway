@@ -1987,7 +1987,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       return;
     }
     treeProvider.refresh();
-    const importedNote = `Imported ${selected.length} (${selected.map((c) => c.name).join(', ')}).`;
+    const importedNote = `Imported ${selected.length} (${selected.map((c) => `${c.name}${c.frozen === true ? ' (frozen)' : ''}`).join(', ')}).`;
     const presentNote = alreadyPresent.length > 0 ? ` Already present: ${alreadyPresent.join(', ')}.` : '';
     const skippedNote =
       skipped.length > 0 ? ` Skipped: ${skipped.map((s) => `${s.remoteName} (${s.reason})`).join(', ')}.` : '';
@@ -2024,7 +2024,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
           .sort((a, b) => a.name.localeCompare(b.name))
           .map(
             (c): PickItem => ({
-              label: c.name,
+              label: c.frozen === true ? `$(lock) ${c.name}` : c.name,
               description: `${c.username}@${c.host}:${c.port}`,
               detail: c.remotePath,
               connectionId: c.id,
@@ -2080,6 +2080,19 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     vscode.commands.registerCommand('gangway.syncWorkspaceUp', () => runSyncWorkspaceCommand('up')),
     vscode.commands.registerCommand('gangway.syncWorkspaceDown', () => runSyncWorkspaceCommand('down')),
     vscode.commands.registerCommand('gangway.refreshExplorer', () => treeProvider.refresh()),
+    vscode.commands.registerCommand('gangway.toggleFreeze', async (node?: RemoteTreeNode) => {
+      const connection = node
+        ? connectionManager.list().find((c) => c.id === node.connectionId)
+        : requireActiveConnection();
+      if (!connection) return;
+      const updated = await connectionManager.update(connection.id, { frozen: !(connection.frozen === true) });
+      treeProvider.refresh();
+      await vscode.window.showInformationMessage(
+        updated.frozen === true
+          ? `Locked "${updated.name}": uploads, deletes, and other server mutations are now blocked.`
+          : `Unlocked "${updated.name}": server mutations allowed again.`,
+      );
+    }),
     vscode.commands.registerCommand('gangway.importGovardRemotes', () => importGovardRemotes(true)),
     govardFoldersListener,
   );

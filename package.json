@@ -122,6 +122,10 @@
         "title": "Gangway: Sync Workspace Down"
       },
       {
+        "command": "gangway.toggleFreeze",
+        "title": "Gangway: Toggle Freeze (Lock/Unlock Production)"
+      },
+      {
         "command": "gangway.refreshExplorer",
         "title": "Gangway: Refresh Explorer",
         "icon": "$(refresh)"

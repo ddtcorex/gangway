@@ -87,6 +87,10 @@ export function mapGovardRemote(projectName: string, remoteName: string, remote:
       // project's staging/prod entries out of every other project's remote
       // list. The user can still promote it to 'global' from the form.
       scope: 'workspace',
+      // A govard `protected: true` remote arrives frozen: uploads, deletes,
+      // and other mutations stay blocked until an explicit unlock (spec §5,
+      // amending the import spec's deliberately-ignored list for this field).
+      ...(remote.protected === true ? { frozen: true as const } : {}),
     },
   };
 }

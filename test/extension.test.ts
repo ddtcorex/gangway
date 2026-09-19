@@ -886,6 +886,22 @@ describe('activate - realistic command invocation', () => {
     });
   });
 
+  describe('freeze toggle', () => {
+    it('gangway.toggleFreeze locks and unlocks, and the pick list shows the lock', async () => {
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+      const node = { connectionId: connection.id, entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 } };
+
+      await handlers.get('gangway.toggleFreeze')!(node);
+      expect(connectionManager.list()[0].frozen).toBe(true);
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Locked'));
+
+      await handlers.get('gangway.toggleFreeze')!(node);
+      expect(connectionManager.list()[0].frozen).toBe(false);
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Unlocked'));
+      infoSpy.mockRestore();
+    });
+  });
+
   /**
    * Conflict Guard, second half. Before this, a detected conflict showed a
    * warning telling the user to "Open the diff and choose Overwrite, Keep
