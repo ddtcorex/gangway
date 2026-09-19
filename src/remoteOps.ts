@@ -13,6 +13,21 @@ import type { RawSftpListEntry } from './transfer/sftpClientAdapter';
 /** Default recursive-walk excludes (spec §2.3), tuned for Magento/PHP hosting. */
 export const DEFAULT_EXCLUDES: readonly string[] = ['.git/**', 'node_modules/**', 'var/**', 'pub/media/**'];
 
+/**
+ * Not-found detection across both error dialects: node:fs uses ENOENT while
+ * ssh2-sftp-client reports numeric SFTP status codes ('2' = NO_SUCH_FILE,
+ * verified against the lib — see errorMapper.ts). Found live 2026-09-19:
+ * every trash/inventory/sweep path that checked ENOENT-only broke against
+ * the real docker server on the first missing directory.
+ */
+export function isNotFoundError(err: unknown): boolean {
+  const code =
+    typeof err === 'object' && err !== null && 'code' in err ? String((err as { code: unknown }).code) : undefined;
+  if (code === 'ENOENT' || code === '2') return true;
+  const message = err instanceof Error ? err.message : String(err);
+  return /no such file/i.test(message);
+}
+
 const noop = (): void => {};
 
 export class FrozenError extends Error {
@@ -257,6 +272,10 @@ export async function backupFile(
   try {
     await client.fastGet(remotePath, stagePath);
     await fs.chmod(stagePath, 0o600);
+    // The stamp dir exists, but nested parents under it usually do not (the
+    // backup preserves the full relative tree). Found live 2026-09-19: a
+    // nested put without this fails and the backup is silently skipped.
+    await client.mkdir(path.posix.dirname(backupPath), true).catch(() => {});
     await client.fastPut(stagePath, backupPath);
   } finally {
     await staging.cleanup(stagePath).catch(() => {});
@@ -306,7 +325,7 @@ export async function sweepOldRemoteDirs(
   try {
     entries = await client.list(dir);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { removed: 0 };
+    if (isNotFoundError(err)) return { removed: 0 };
     throw err;
   }
   let removed = 0;
@@ -353,7 +372,7 @@ async function existsOnServer(client: RemoteOpsClient, remotePath: string): Prom
     await client.stat(remotePath);
     return true;
   } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return false;
+    if (isNotFoundError(err)) return false;
     throw err;
   }
 }
@@ -411,7 +430,7 @@ async function collectLocalFiles(root: string): Promise<string[]> {
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
     } catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
+      if (isNotFoundError(err)) continue;
       throw err;
     }
     for (const entry of entries) {
@@ -450,7 +469,7 @@ async function remapSidecarsForRename(
       await fs.mkdir(path.dirname(newLocal), { recursive: true });
       await fs.rename(oldLocal, newLocal);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
+      if (isNotFoundError(err)) continue;
       throw err;
     }
     if (sidecar) {
@@ -489,7 +508,7 @@ export async function renameRemote(
   try {
     oldStat = await client.stat(oldPath);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+    if (isNotFoundError(err)) {
       throw new Error(`"${oldPath}" does not exist on the server.`);
     }
     throw err;
@@ -538,7 +557,7 @@ export async function duplicateRemote(
   try {
     sourceStat = await client.stat(sourcePath);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+    if (isNotFoundError(err)) {
       throw new Error(`"${sourcePath}" does not exist on the server.`);
     }
     throw err;
@@ -606,7 +625,7 @@ export async function chmodRemote(
   try {
     await client.stat(remotePath);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+    if (isNotFoundError(err)) {
       throw new Error(`"${remotePath}" does not exist on the server.`);
     }
     throw err;
@@ -724,7 +743,7 @@ export async function pasteEntries(
   try {
     destDirStat = await client.stat(destDir);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+    if (isNotFoundError(err)) {
       throw new Error(`"${destDir}" does not exist on the server.`);
     }
     throw err;
@@ -746,7 +765,7 @@ export async function pasteEntries(
       try {
         sourceStat = await client.stat(sourcePath);
       } catch (err) {
-        if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+        if (isNotFoundError(err)) {
           skipped.push({ path: sourcePath, reason: 'no longer exists on the server' });
           continue;
         }
@@ -830,7 +849,7 @@ async function walkRemoteFiles(
     try {
       entries = await client.list(current);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
+      if (isNotFoundError(err)) continue;
       throw err;
     }
     for (const entry of entries) {
@@ -867,7 +886,7 @@ export async function inventoryTrash(
     try {
       stamps = await client.list(root);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
+      if (isNotFoundError(err)) continue;
       throw err;
     }
     for (const stamp of stamps) {
@@ -914,7 +933,7 @@ export async function restoreEntries(
     assertInsideRoot(connection, destDirOverride);
     assertNotReserved(connection, destDirOverride);
     const overrideStat = await client.stat(destDirOverride).catch((err) => {
-      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      if (isNotFoundError(err)) {
         throw new Error(`"${destDirOverride}" does not exist on the server.`);
       }
       throw err;
@@ -945,7 +964,7 @@ export async function restoreEntries(
           }
         } catch (err) {
           if (err instanceof Error && err.message.startsWith('Refusing to restore into')) throw err;
-          if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
+          if (!isNotFoundError(err)) throw err;
           await client.mkdir(parent, true).catch(() => {});
         }
         if (await existsOnServer(client, dest)) {

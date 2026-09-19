@@ -395,3 +395,14 @@ describe('restoreEntries', () => {
     await expect(restoreEntries(client as never, connection, picks, undefined, deps)).rejects.toThrow(/symlink/);
   });
 });
+
+describe('isNotFoundError', () => {
+  it('accepts node ENOENT, numeric SFTP codes, and no-such-file text', async () => {
+    const { isNotFoundError } = await import('../src/remoteOps');
+    expect(isNotFoundError(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))).toBe(true);
+    expect(isNotFoundError(Object.assign(new Error('list: No such file /x'), { code: '2' }))).toBe(true);
+    expect(isNotFoundError(new Error('list: No such file /x'))).toBe(true);
+    expect(isNotFoundError(Object.assign(new Error('Permission denied'), { code: '3' }))).toBe(false);
+    expect(isNotFoundError(new Error('boom'))).toBe(false);
+  });
+});

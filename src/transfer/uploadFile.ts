@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AuditLog } from '../auditLog';
-import { backupFile, type BackupStaging } from '../remoteOps';
+import { backupFile, isNotFoundError, type BackupStaging } from '../remoteOps';
 import { writeSidecar } from '../tmpStore';
 import type { ConnectionConfig, RemoteStat } from '../types';
 
@@ -84,7 +84,7 @@ export async function uploadFile(
       // A brand-new remote file has nothing to back up; any other stat
       // failure is reported once and the push proceeds without a backup
       // rather than refusing a hotfix the user explicitly pushed.
-      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+      if (!isNotFoundError(err)) {
         logWarning(
           `Could not back up ${remotePath} before upload (${err instanceof Error ? err.message : String(err)}). Proceeding without a backup.`,
         );
