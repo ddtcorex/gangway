@@ -37,7 +37,7 @@ raw `ssh`, or a full sync tool built for a workflow you don't need.
   from it, or empty it explicitly by typing `EMPTY TRASH`.
 - **Clipboard + drag & drop.** Cut/copy/paste entries inside the remote
   tree, or drop files from the local Explorer/OS onto a remote folder to
-  upload them.
+  upload them. `Copy Remote Path` grabs a server path for the terminal.
 - **Backup before overwrite.** Uploads stash the previous server copy
   under `.gangway-backup-*` first.
 - **Freeze production.** Toggling freeze on a connection refuses every

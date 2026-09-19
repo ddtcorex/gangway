@@ -66,6 +66,10 @@
         "title": "Gangway: Compare File with Server"
       },
       {
+        "command": "gangway.copyRemotePath",
+        "title": "Gangway: Copy Remote Path"
+      },
+      {
         "command": "gangway.newFile",
         "title": "Gangway: New Remote File"
       },
@@ -103,7 +107,7 @@
       },
       {
         "command": "gangway.restoreFromTrash",
-        "title": "Gangway: Restore from Trash"
+        "title": "Gangway: Restore from Trash…"
       },
       {
         "command": "gangway.emptyTrash",
@@ -111,7 +115,7 @@
       },
       {
         "command": "gangway.syncFolder",
-        "title": "Gangway: Sync Folder with Preview"
+        "title": "Gangway: Sync Folder…"
       },
       {
         "command": "gangway.syncWorkspaceUp",
@@ -165,82 +169,123 @@
       "view/item/context": [
         {
           "command": "gangway.cutEntries",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.file"
-        },
-        {
-          "command": "gangway.cutEntries",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file",
+          "group": "1_clipboard"
         },
         {
           "command": "gangway.copyEntries",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.file"
-        },
-        {
-          "command": "gangway.copyEntries",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file",
+          "group": "1_clipboard"
         },
         {
           "command": "gangway.pasteEntries",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
-        },
-        {
-          "command": "gangway.syncFolder",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
-        },
-        {
-          "command": "gangway.newFile",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
-        },
-        {
-          "command": "gangway.newFolder",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file",
+          "group": "1_clipboard"
         },
         {
           "command": "gangway.renameRemote",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.file"
-        },
-        {
-          "command": "gangway.renameRemote",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
-        },
-        {
-          "command": "gangway.deleteRemote",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.file"
-        },
-        {
-          "command": "gangway.deleteRemote",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file",
+          "group": "2_organize"
         },
         {
           "command": "gangway.duplicateRemote",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.file"
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file",
+          "group": "2_organize"
         },
         {
           "command": "gangway.chmodRemote",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.file"
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file",
+          "group": "2_organize"
         },
         {
-          "command": "gangway.chmodRemote",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
-        },        {
-          "command": "gangway.downloadFolder",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
-        },
-        {
-          "command": "gangway.uploadFolder",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder"
+          "command": "gangway.copyRemotePath",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file",
+          "group": "2_organize"
         },
         {
           "command": "gangway.downloadFile",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.file"
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file",
+          "group": "3_transfer"
         },
         {
           "command": "gangway.uploadFile",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.file"
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file",
+          "group": "3_transfer"
         },
         {
           "command": "gangway.compareFile",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.file"
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file",
+          "group": "3_transfer"
+        },
+        {
+          "command": "gangway.deleteRemote",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file",
+          "group": "4_danger"
+        },
+        {
+          "command": "gangway.cutEntries",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder",
+          "group": "1_clipboard"
+        },
+        {
+          "command": "gangway.copyEntries",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder",
+          "group": "1_clipboard"
+        },
+        {
+          "command": "gangway.pasteEntries",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder",
+          "group": "1_clipboard"
+        },
+        {
+          "command": "gangway.newFile",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder",
+          "group": "2_organize"
+        },
+        {
+          "command": "gangway.newFolder",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder",
+          "group": "2_organize"
+        },
+        {
+          "command": "gangway.renameRemote",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder",
+          "group": "2_organize"
+        },
+        {
+          "command": "gangway.chmodRemote",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder",
+          "group": "2_organize"
+        },
+        {
+          "command": "gangway.copyRemotePath",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder",
+          "group": "2_organize"
+        },
+        {
+          "command": "gangway.syncFolder",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder",
+          "group": "3_transfer"
+        },
+        {
+          "command": "gangway.downloadFolder",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder",
+          "group": "3_transfer"
+        },
+        {
+          "command": "gangway.uploadFolder",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder",
+          "group": "3_transfer"
+        },
+        {
+          "command": "gangway.deleteRemote",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder",
+          "group": "4_danger"
+        },
+        {
+          "command": "gangway.restoreFromTrash",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder",
+          "group": "4_danger"
         }
       ]
     },

@@ -19,6 +19,9 @@ All notable changes to the Gangway extension are documented in this file.
 - Path mappings per connection (workspace folder ↔ remote path) backing
   workspace sync.
 - Test-connection button on the add/edit form (15s bound draft dial).
+- Context-menu refresh: 4 groups (clipboard/organize/transfer/danger),
+  Paste on files, Restore from Trash in the folder menu, new Copy Remote
+  Path command, `Sync Folder…` title.
 
 ## [0.1.0] - 2026-09-18
 
