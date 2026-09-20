@@ -20,7 +20,7 @@
  * Usage: node esbuild.js && node scripts/verify-webview.mjs
  * Exits non-zero (and prints the page's console errors) if the form is dead.
  */
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import esbuild from 'esbuild';
 import fs from 'node:fs/promises';
 import http from 'node:http';
@@ -174,27 +174,58 @@ async function main() {
   const pageUrl = `http://127.0.0.1:${server.address().port}/index.html`;
 
   const profileDir = path.join(workDir, 'chrome-profile');
-  const browser = spawn(chrome, [
-    '--headless=new',
-    '--remote-debugging-port=0',
-    `--user-data-dir=${profileDir}`,
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--disable-gpu',
-    'about:blank',
-  ]);
+  // Print the browser identity first: when a spawn fails in CI the log below
+  // is the only evidence of which Chrome actually ran (2026-09-19: the
+  // DevTools-port timeout left zero Chrome output in the log).
+  try {
+    console.log(`--- browser: ${execFileSync(chrome, ['--version']).toString().trim()} (${chrome}) ---`);
+  } catch {
+    console.log(`--- browser: (could not report --version) (${chrome}) ---`);
+  }
+  const browser = spawn(
+    chrome,
+    [
+      '--headless=new',
+      '--remote-debugging-port=0',
+      `--user-data-dir=${profileDir}`,
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-gpu',
+      // Shared CI runners often mount a tiny /dev/shm: without this, Chrome's
+      // renderer can SIGBUS-crash mid-run instead of failing loudly at spawn.
+      '--disable-dev-shm-usage',
+      'about:blank',
+    ],
+    // Pipe the child's stderr with a prefix instead of inheriting it: a raw
+    // interleave buries one-line Chrome errors (sandbox refusal, missing
+    // libs) in the step log, while a silent child stays visibly silent.
+    { stdio: ['ignore', 'ignore', 'pipe'] },
+  );
+  browser.stderr.on('data', (chunk) => {
+    for (const line of String(chunk).split('\n')) {
+      if (line.trim()) process.stderr.write(`[chrome] ${line}\n`);
+    }
+  });
 
   let cdp;
   try {
     let devtoolsPort;
-    for (let attempt = 0; attempt < 100 && !devtoolsPort; attempt++) {
+    // 30s, not 10: a cold first launch on a shared runner (fontconfig, shader
+    // cache) can legitimately exceed 10s -- that exact timeout flaked CI
+    // green-red-green on 2026-09-19 with no Chrome output at all.
+    for (let attempt = 0; attempt < 300 && !devtoolsPort; attempt++) {
       await sleep(100);
       devtoolsPort = await fs
         .readFile(path.join(profileDir, 'DevToolsActivePort'), 'utf8')
         .then((raw) => raw.split('\n')[0].trim())
         .catch(() => undefined);
     }
-    if (!devtoolsPort) throw new Error('Chrome never reported a DevTools port');
+    if (!devtoolsPort) {
+      throw new Error(
+        'Chrome never reported a DevTools port within 30s ' +
+          '(check the [chrome] stderr lines above; a slow cold-start on a shared runner is the usual cause)',
+      );
+    }
 
     const targets = await fetch(`http://127.0.0.1:${devtoolsPort}/json/list`).then((r) => r.json());
     const page = targets.find((t) => t.type === 'page');
