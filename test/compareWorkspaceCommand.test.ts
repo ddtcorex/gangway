@@ -165,7 +165,10 @@ describe('compareWorkspaceFile command', () => {
 
     await handlers.get('gangway.compareWorkspaceFile')!({ fsPath: localFile });
 
-    expect(fakeRawClient.fastGet).toHaveBeenCalledWith('/var/www/app.php', expect.stringContaining('.gangway-compare-workspace'));
+    expect(fakeRawClient.fastGet).toHaveBeenCalledWith(
+      '/var/www/app.php',
+      expect.stringMatching(/\.gangway-compare-workspace\.gangway-downloading$/),
+    );
     expect(execSpy).toHaveBeenCalledWith(
       'vscode.diff',
       expect.objectContaining({ fsPath: localFile }),
@@ -231,5 +234,19 @@ describe('compareWorkspaceFile command', () => {
 
     expect(execSpy).toHaveBeenCalledWith('vscode.diff', expect.objectContaining({ fsPath: localFile }), expect.anything(), expect.anything());
     execSpy.mockRestore();
+  });
+
+  it('fetches the server copy under a cancellable progress notification', async () => {
+    const localFile = path.join(wsRoot, 'app.php');
+    await fs.writeFile(localFile, '<?php echo local;');
+    const progressSpy = vi.spyOn(vscode.window, 'withProgress');
+
+    await handlers.get('gangway.compareWorkspaceFile')!({ fsPath: localFile });
+
+    expect(progressSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ cancellable: true }),
+      expect.any(Function),
+    );
+    progressSpy.mockRestore();
   });
 });

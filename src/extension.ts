@@ -52,7 +52,7 @@ import { clearClipboard, copyToClipboard, cutToClipboard, type ClipboardState } 
 import { classifyRow, describeExcludedSelection, mapLimit, toQuickPickRow, type SyncRow } from './syncPreview';
 import { effectiveExcludes, matchesExcludes } from './excludes';
 import { pullMappedFile, pushMappedFile, walkMappedLocalFiles } from './mappedTransfer';
-import { diffTitleForWorkspaceCompare, stagingPathForWorkspaceCompare } from './ui/compareWorkspace';
+import { diffTitleForWorkspaceCompare, fetchServerCopyForCompare } from './ui/compareWorkspace';
 import { defaultMapping, isRemoteInsideRoot, resolveLocalToRemote, resolveRemoteToLocal } from './pathMapping';
 import type { FileConflictDecision } from './conflictGuard';
 import type { ConnectionConfig, SidecarMeta } from './types';
@@ -1959,8 +1959,11 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
 
   /**
    * Compare one workspace file against the server's current bytes, read-only:
-   * resolve through the ACTIVE connection's mappings, download fresh bytes to
-   * a staging file, and open `vscode.diff`. No frozen gate, no confirm, no
+   * resolve through the ACTIVE connection's mappings, fetch fresh bytes under
+   * a cancellable progress notification, and open `vscode.diff`. The fetch is
+   * owner-only and atomic (stage-then-rename, same shape as
+   * `transfer/downloadFile.ts`) so a failed second compare never truncates
+   * the revisit-kept staging copy. No frozen gate, no confirm, no
    * Upload/Download offer afterwards -- for looking only. A remote that does
    * not exist is a plain warning (no action): there is nothing to diff.
    */
@@ -1988,10 +1991,9 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         await vscode.window.showWarningMessage('Compare works on files, not folders.');
         return;
       }
-      const stagingPath = stagingPathForWorkspaceCompare(connection, remotePath);
-      const fs = (await import('node:fs/promises')).default;
-      await fs.mkdir(path.dirname(stagingPath), { recursive: true });
-      await adapter.fastGet(remotePath, stagingPath);
+      const stagingPath = await withCancellableProgress(`Comparing ${path.posix.basename(remotePath)}`, () =>
+        fetchServerCopyForCompare(adapter, connection, remotePath),
+      );
       await vscode.commands.executeCommand(
         'vscode.diff',
         vscode.Uri.file(fsPath),

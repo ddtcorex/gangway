@@ -28,7 +28,8 @@ All notable changes to the Gangway extension are documented in this file.
   unchanged).
 - Workspace compare: `Compare Workspace with Server` from the Local
   Explorer — read-only `vscode.diff` of the workspace file against the
-  server's fresh bytes (staged under tmp, kept for revisit), resolved
+  server's fresh bytes (fetched under a cancellable progress notification,
+  staged owner-only and atomically under tmp, kept for revisit), resolved
   through the active connection's mappings with the same unmapped warning
   as the mapped sync commands.
 
