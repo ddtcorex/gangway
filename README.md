@@ -32,14 +32,11 @@ raw `ssh`, or a full sync tool built for a workflow you don't need.
   keybinding or command — never an autosave-triggered surprise.
 - **Remote file & folder ops.** Create, rename, duplicate, and `chmod`
   files and folders from the remote tree's context menu.
-- **Trash, not delete.** Deletes move to a timestamped trash folder next
-  to the remote root (`.gangway-trash-*`, swept after 30 days) — restore
-  from it, or empty it explicitly by typing `EMPTY TRASH`.
+- **Delete is permanent.** Remote deletes have no undo and no trash:
+  the confirm says so, folders additionally require typing the name.
 - **Clipboard + drag & drop.** Cut/copy/paste entries inside the remote
   tree, or drop files from the local Explorer/OS onto a remote folder to
   upload them. `Copy Remote Path` grabs a server path for the terminal.
-- **Backup before overwrite.** Uploads stash the previous server copy
-  under `.gangway-backup-*` first.
 - **Freeze production.** Toggling freeze on a connection refuses every
   mutating op until it is unlocked. Govard `protected` remotes import
   frozen.
@@ -58,8 +55,8 @@ raw `ssh`, or a full sync tool built for a workflow you don't need.
   read-only diff against the mapped server path — for looking only, with
   no upload/download offered afterwards.
 - **Mapped sync.** Right-click a workspace file/folder to push it to (or
-  pull it from) the mapped remote path — one confirm, direct overwrite, no
-  backup. Right-click a remote file/folder for the same trip in reverse
+  pull it from) the mapped remote path — one confirm, direct overwrite.
+  Right-click a remote file/folder for the same trip in reverse
   into the mapped workspace folder. Zero-config: the first workspace folder
   maps to the connection path. A pulled file keeps its existing local mode
   when it already exists (a fresh destination gets the default).
