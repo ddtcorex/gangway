@@ -84,6 +84,17 @@ describe('isRemoteInsideRoot', () => {
     const rooted = { ...conn, remotePath: '/' };
     expect(isRemoteInsideRoot(rooted, '/anything/at/all')).toBe(true);
   });
+
+  it('reads a blank remotePath as the root, not as the dot path', () => {
+    // Regression: `path.posix.normalize('')` returns '.', so a blank
+    // remotePath flipped from the pre-refactor `|| '/'` reading ("everything
+    // is inside") to "everything is refused". Pinned through the public
+    // gate, which is where the blank path is actually consumed.
+    const blank: ConnectionConfig = { ...base, remotePath: '' };
+    expect(isRemoteInsideRoot(blank, '/srv/app/x.php')).toBe(true);
+    expect(isRemoteInsideRoot(blank, '/anything/at/all')).toBe(true);
+    expect(isRemoteInsideRoot(blank, '/')).toBe(true);
+  });
 });
 
 describe('pathMapping hardening', () => {

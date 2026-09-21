@@ -1933,9 +1933,17 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
 
   /**
    * The shared no-match copy (spec §3): names the file, the connection, and
-   * the effective default, with the one action that fixes it. The callers
-   * always stop afterwards -- a mapped command never falls back to the tmp
-   * mirror, which would send the user somewhere they did not ask to go.
+   * the effective default, with the one action that fixes it. Serves the four
+   * local-explorer commands only, whose `explorer/context` rows carry static
+   * `when` clauses (`resourceScheme == file && !explorerResourceIsFolder`,
+   * `explorerResourceIsFolder`) -- a menu row cannot call the resolver, so
+   * these rows are shown for every workspace file and folder and an unmapped
+   * pick has to be *told* why nothing happened. The remote-tree downloads
+   * take the other route and no-op silently by design (see
+   * runDownloadToWorkspaceFileCommand / runDownloadToWorkspaceFolderCommand).
+   * Either way the caller stops there: a mapped command never falls back to
+   * the tmp mirror, which would send the user somewhere they did not ask to
+   * go.
    */
   async function warnNoMapping(connection: ConnectionConfig, roots: readonly string[], fsPath: string): Promise<void> {
     const fallback = defaultMapping(connection, roots);
@@ -1993,11 +2001,13 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   /**
    * Download one server file from the remote tree into its mapped workspace
    * file. The node names its own connection -- resolve THAT one, never the
-   * workspace binding. The remote menu is offered for every remote file, so
-   * choosing it on an item outside every mapping stays silent on purpose
-   * (nothing to resolve to, and a refusal prompt for a path the user can see
-   * is unmapped would only add noise); the tmp-mirror download next to it in
-   * the same menu is the escape hatch for that file.
+   * workspace binding. The menu is not a gate here: the row's `when` clause is
+   * static (`view == gangway.remoteExplorer && viewItem == gangway.file`), so
+   * it is shown for every remote file and the handler owns the decision.
+   * Choosing it on an item outside every mapping returns silently by design
+   * (there is nothing to resolve to, and a refusal prompt for a path the user
+   * can see is unmapped would only add noise); the tmp-mirror download next to
+   * it in the same menu is the escape hatch for that file.
    */
   async function runDownloadToWorkspaceFileCommand(node?: RemoteTreeNode): Promise<void> {
     const connection = resolveConnection(node);
@@ -2048,10 +2058,19 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
    */
   const MAPPED_SYMLINK_SKIP_REASON = 'symlink (skipped, not materialized)';
 
-  /** Why fewer files move than the folder holds, for the tail of an info line. */
+  /**
+   * Why fewer files move than the folder holds, for the tail of an info line.
+   * `excluded` is the caller's own count: the upload side composes reserved
+   * trash/backup dirs into the single predicate it hands the walk, so its
+   * `excluded` covers pattern hits *and* reserved hits, while the download
+   * side skips reserved entries silently (never counted, per the sync rule).
+   * The wording therefore names both causes instead of claiming patterns
+   * alone -- accurate for the upload count and not a false claim for the
+   * download one, which is the smaller honest fix for a shared string.
+   */
   function mappedCountNotes(excluded: number, symlinks: number): string {
     const notes: string[] = [];
-    if (excluded > 0) notes.push(`${excluded} file(s) excluded by patterns.`);
+    if (excluded > 0) notes.push(`${excluded} file(s) excluded by patterns or reserved dirs.`);
     if (symlinks > 0) notes.push(`${symlinks} symlink(s) skipped.`);
     return notes.length > 0 ? ` ${notes.join(' ')}` : '';
   }
@@ -2288,10 +2307,11 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   /**
    * Download one server folder from the remote tree into its mapped
    * workspace folder. The node names its own connection -- resolve THAT one,
-   * never the workspace binding -- and the same refusal-free rule as the
-   * single-file command applies: the remote menu is offered for every remote
-   * folder, so an item outside every mapping returns silently, with the
-   * tmp-mirror download as the escape hatch.
+   * never the workspace binding -- and the same no-gate rule as the
+   * single-file command applies: the row's `when` clause is static
+   * (`view == gangway.remoteExplorer && viewItem == gangway.folder`) and
+   * shown for every remote folder, so an item outside every mapping returns
+   * silently by design, with the tmp-mirror download as the escape hatch.
    */
   async function runDownloadToWorkspaceFolderCommand(node?: RemoteTreeNode): Promise<void> {
     const connection = resolveConnection(node);

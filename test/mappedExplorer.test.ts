@@ -381,7 +381,7 @@ describe('mapped folder commands', () => {
     );
     expect(fakeRawClient.fastPut).toHaveBeenCalledTimes(1);
     expect(fakeRawClient.fastPut).toHaveBeenCalledWith(path.join(localRoot, 'one.php'), '/var/www/app/one.php.tmp');
-    expect(infoSpy).toHaveBeenCalledWith('Uploaded 1 file(s) to /var/www/app. 1 file(s) excluded by patterns.');
+    expect(infoSpy).toHaveBeenCalledWith('Uploaded 1 file(s) to /var/www/app. 1 file(s) excluded by patterns or reserved dirs.');
     warnSpy.mockRestore();
     infoSpy.mockRestore();
   });
@@ -396,7 +396,7 @@ describe('mapped folder commands', () => {
     expect(warnSpy).not.toHaveBeenCalled();
     expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
     expect(infoSpy).toHaveBeenCalledWith(
-      `Nothing to upload for ${localRoot} → /var/www/app. 1 file(s) excluded by patterns.`,
+      `Nothing to upload for ${localRoot} → /var/www/app. 1 file(s) excluded by patterns or reserved dirs.`,
     );
     warnSpy.mockRestore();
     infoSpy.mockRestore();
@@ -530,7 +530,7 @@ describe('mapped folder commands', () => {
       '/var/www/app/one.php',
       `${path.join(localRoot, 'one.php')}.gangway-downloading`,
     );
-    expect(infoSpy).toHaveBeenCalledWith(`Downloaded 1 file(s) into ${localRoot}. 1 file(s) excluded by patterns.`);
+    expect(infoSpy).toHaveBeenCalledWith(`Downloaded 1 file(s) into ${localRoot}. 1 file(s) excluded by patterns or reserved dirs.`);
     warnSpy.mockRestore();
     infoSpy.mockRestore();
   });

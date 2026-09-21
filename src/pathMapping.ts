@@ -12,6 +12,11 @@ import type { ConnectionConfig, PathMapping } from './types';
  */
 function normalize(p: string): string {
   const forward = p.replace(/\\/g, '/');
+  // A blank path normalizes to the root, not to `path.posix.normalize('')`'s
+  // `'.'`: before this helper existed, `forward.replace(/\/+$/, '') || '/'`
+  // read an empty path as `/` ("everything is inside"), and `'.'` would flip
+  // a blank `remotePath` to "everything is refused".
+  if (forward === '') return '/';
   const resolved = path.posix.normalize(forward);
   return resolved.replace(/\/+$/, '') || '/';
 }
