@@ -751,7 +751,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       }
       await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, title: `Gangway: uploading ${remotePath}` },
-        () => uploadFile(adapter, connection.id, localPath as string, remotePath as string, byteSize, auditLog, (message) => output.appendLine(message), { backup: { connection } }),
+        () => uploadFile(adapter, connection.id, localPath as string, remotePath as string, byteSize, auditLog, (message) => output.appendLine(message)),
       );
       dirtyDecorations.refresh(vscode.Uri.file(localPath));
       treeProvider.refresh();
@@ -879,7 +879,6 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
             }
             await uploadFile(adapter, connection.id, localPath, file, byteSize, auditLog, (message) =>
               output.appendLine(message),
-              { backup: { connection } },
             );
             dirtyDecorations.refresh(vscode.Uri.file(localPath));
           },
@@ -1270,7 +1269,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   /**
    * Local-Explorer/OS drop onto a remote node. Every dropped path is
    * inspected first (missing paths and folders fail fast); large or binary
-   * files get one combined prompt; the upload loop reuses backup-first
+   * files get one combined prompt; the upload loop reuses direct-overwrite
    * uploadFile with progress + cancel.
    */
   async function handleLocalDrop(targetNode: RemoteTreeNode | undefined, uriListValue: string): Promise<void> {
@@ -1312,7 +1311,6 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
             reportProgress(remotePath);
             await uploadFile(adapter, connection.id, item.localPath, remotePath, item.byteSize, auditLog, (message) =>
               output.appendLine(message),
-              { backup: { connection } },
             );
           }
         })(),
@@ -1639,7 +1637,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
                   // Workspace uploads never leave sidecars behind: a
                   // `.meta.json` next to the user's own project files would
                   // litter their repo (and could even get committed).
-                  isWorkspace ? { backup: { connection }, writeSidecar: false } : { backup: { connection } },
+                  isWorkspace ? { writeSidecar: false } : undefined,
                 );
                 dirtyDecorations.refresh(vscode.Uri.file(row.localPath));
                 done += 1;
