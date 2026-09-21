@@ -22,6 +22,10 @@ All notable changes to the Gangway extension are documented in this file.
 - Context-menu refresh: 4 groups (clipboard/organize/transfer/danger),
   Paste on files, Restore from Trash in the folder menu, new Copy Remote
   Path command, `Sync Folder…` title.
+- Mapped sync: `Upload to Mapped Remote` / `Download to Workspace` from the
+  Local Explorer and `Download to Workspace Folder` from the Remote
+  Explorer — one confirm, direct overwrite, no backup (the hotfix flow is
+  unchanged).
 
 ## [0.1.0] - 2026-09-18
 

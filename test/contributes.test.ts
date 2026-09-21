@@ -1,0 +1,30 @@
+import { describe, it, expect } from 'vitest';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+
+describe('mapping-sync contributions', () => {
+  it('declares the 6 mapping commands with exact titles', async () => {
+    const pkg = JSON.parse(await fs.readFile(path.join(__dirname, '..', 'package.json'), 'utf8'));
+    const titles = new Map(pkg.contributes.commands.map((c: { command: string; title: string }) => [c.command, c.title]));
+    expect(titles.get('gangway.uploadMappedFile')).toBe('Gangway: Upload to Mapped Remote');
+    expect(titles.get('gangway.uploadMappedFolder')).toBe('Gangway: Upload to Mapped Remote');
+    expect(titles.get('gangway.downloadMappedFile')).toBe('Gangway: Download to Workspace');
+    expect(titles.get('gangway.downloadMappedFolder')).toBe('Gangway: Download to Workspace');
+    expect(titles.get('gangway.downloadToWorkspaceFile')).toBe('Gangway: Download to Workspace Folder');
+    expect(titles.get('gangway.downloadToWorkspaceFolder')).toBe('Gangway: Download to Workspace Folder');
+  });
+
+  it('wires explorer/context for local and view/item/context for remote', async () => {
+    const pkg = JSON.parse(await fs.readFile(path.join(__dirname, '..', 'package.json'), 'utf8'));
+    const explorer = pkg.contributes.menus['explorer/context'];
+    const byCommand = (id: string) => explorer.filter((m: { command: string }) => m.command === id);
+    expect(byCommand('gangway.uploadMappedFile').length).toBe(1);
+    expect(byCommand('gangway.uploadMappedFolder').length).toBe(1);
+    expect(byCommand('gangway.downloadMappedFile').length).toBe(1);
+    expect(byCommand('gangway.downloadMappedFolder').length).toBe(1);
+    const tree = pkg.contributes.menus['view/item/context'];
+    const treeBy = (id: string) => tree.filter((m: { command: string }) => m.command === id);
+    expect(treeBy('gangway.downloadToWorkspaceFile').length).toBe(1);
+    expect(treeBy('gangway.downloadToWorkspaceFolder').length).toBe(1);
+  });
+});

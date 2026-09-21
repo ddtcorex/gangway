@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   defaultMapping,
+  isRemoteInsideRoot,
   overlapNotes,
   resolveLocalToRemote,
   resolveRemoteToLocal,
@@ -83,6 +84,17 @@ describe('isRemoteInsideRoot', () => {
     const rooted = { ...conn, remotePath: '/' };
     expect(isRemoteInsideRoot(rooted, '/anything/at/all')).toBe(true);
   });
+
+  it('reads a blank remotePath as the root, not as the dot path', () => {
+    // Regression: `path.posix.normalize('')` returns '.', so a blank
+    // remotePath flipped from the pre-refactor `|| '/'` reading ("everything
+    // is inside") to "everything is refused". Pinned through the public
+    // gate, which is where the blank path is actually consumed.
+    const blank: ConnectionConfig = { ...base, remotePath: '' };
+    expect(isRemoteInsideRoot(blank, '/srv/app/x.php')).toBe(true);
+    expect(isRemoteInsideRoot(blank, '/anything/at/all')).toBe(true);
+    expect(isRemoteInsideRoot(blank, '/')).toBe(true);
+  });
 });
 
 describe('pathMapping hardening', () => {
@@ -101,4 +113,17 @@ describe('pathMapping hardening', () => {
     };
     expect(resolveRemoteToLocal(rogue, ['/w'], '/other/place/a.php')).toBeUndefined();
   });
+});
+
+it('refuses a mapping whose remote escapes the root via ..', () => {
+  const connection = { remotePath: '/var/www' } as unknown as import('../src/types').ConnectionConfig;
+  expect(isRemoteInsideRoot(connection, '/var/www/../etc')).toBe(false);
+  expect(isRemoteInsideRoot(connection, '/var/www/sub/../../etc')).toBe(false);
+  expect(
+    resolveLocalToRemote(
+      { ...connection, mappings: [{ localPath: '/ws', remotePath: '/var/www/../etc' }] } as unknown as import('../src/types').ConnectionConfig,
+      ['/ws'],
+      '/ws/app.php',
+    ),
+  ).toBeUndefined();
 });
