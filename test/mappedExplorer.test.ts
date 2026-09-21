@@ -659,6 +659,11 @@ describe('pure-B pins (spec §4 carve-out)', () => {
 
     expect(fakeRawClient.fastPut.mock.calls.length).toBe(putsBefore);
     expect(fakeRawClient.posixRename).toHaveBeenCalledTimes(1); // the mapped put only
+    // The frozen gate precedes the conflict-guard stat, so "nothing was put"
+    // is the freeze refusing, not the un-answered conflict prompt blocking a
+    // transfer that had already inspected the server copy: nothing was
+    // inspected at all.
+    expect(fakeRawClient.stat).not.toHaveBeenCalled();
     expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('frozen'));
     infoSpy.mockRestore();
   });
@@ -700,7 +705,8 @@ describe('pure-B pins (spec §4 carve-out)', () => {
     await fs.mkdir(localRoot, { recursive: true });
     await fs.writeFile(localFile, '<?php echo 1;');
     // The longer explicit row wins the longest-prefix match, and its remote
-    // side resolves out of the connection root ('/etc/deep.php'). The refusal
+    // side resolves out of the connection root ('/var/www/../etc' normalizes
+    // to '/var/etc', so the file lands at '/var/etc/deep.php'). The refusal
     // is the whole point: it must stop, never silently fall back to the
     // shorter default row ('/var/www/app/deep.php') the user did not select.
     await connectionManager.update(connection.id, {
@@ -763,18 +769,29 @@ describe('pure-B pins (spec §4 carve-out)', () => {
 
   it('pure-B pin: a failed download leaves the workspace file byte-identical', async () => {
     const localFile = path.join(wsRoot, 'app.php');
+    const stagingPath = `${localFile}.gangway-downloading`;
     await fs.writeFile(localFile, 'stale local content');
     mockWindow.__test_queueWarning('Download');
-    // fastGet truncates its destination before writing, so a direct write
-    // onto the real file would leave a truncated fragment here -- with no
-    // backup under pure B. The sibling staging file is what prevents that.
-    fakeRawClient.fastGet.mockRejectedValueOnce(new Error('connection lost'));
+    // The real fastGet truncates its destination before writing, so a direct
+    // write onto the workspace file would leave a truncated fragment here --
+    // with no backup under pure B. Reproducing that truncation makes the pin
+    // discriminate: drop the staging sibling in pullMappedFile and the
+    // byte-identity assertion below fails instead of passing vacuously.
+    fakeRawClient.fastGet.mockImplementationOnce(async (_remotePath: string, destination: string) => {
+      await fs.writeFile(destination, '');
+      throw new Error('connection lost');
+    });
     const errorSpy = vi.spyOn(vscode.window, 'showErrorMessage');
 
     await handlers.get('gangway.downloadMappedFile')!({ fsPath: localFile });
 
+    // The claim first: the previous bytes survived a failed overwrite...
     expect(await fs.readFile(localFile, 'utf8')).toBe('stale local content');
-    // The staging sibling is cleaned up, not left as litter next to the file.
+    // ...because the transfer staged into the sibling, never onto the
+    // workspace file...
+    expect(fakeRawClient.fastGet).toHaveBeenCalledWith('/var/www/app.php', stagingPath);
+    // ...and the half-written staging file was cleaned up, not left as litter.
+    await expect(fs.access(stagingPath)).rejects.toMatchObject({ code: 'ENOENT' });
     expect(await fs.readdir(wsRoot)).toEqual(['app.php']);
     expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
     expect(errorSpy).toHaveBeenCalled();
