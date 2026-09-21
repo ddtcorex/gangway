@@ -323,7 +323,7 @@ export async function run(): Promise<void> {
     `Upload 2 file(s) in ${folderUp} → ${REMOTE_ROOT}/folder-up? Server copies will be overwritten. (+1 excluded)`,
   );
   expectNoErrors('uploadMappedFolder');
-  expectInfo('uploadMappedFolder', `Uploaded 2 file(s) to ${REMOTE_ROOT}/folder-up. 1 file(s) excluded by patterns or reserved dirs.`);
+  expectInfo('uploadMappedFolder', `Uploaded 2 file(s) to ${REMOTE_ROOT}/folder-up. 1 file(s) excluded by patterns.`);
   assert.deepStrictEqual(
     await remoteTreeNames(REMOTE_ROOT),
     ['folder-up/one.php', 'folder-up/sub/two.php', 'up.php'],
