@@ -68,6 +68,18 @@ describe('classifyRow', () => {
       classifyRow({ localExists: false, localMtimeMs: 0, localSize: 0, remoteExists: true, remoteMtime: 1, remoteSize: 1 }),
     ).toBe('Only-remote');
   });
+
+  it('snaps a same-size 1970ms gap to Same: the e2e write gate must clear 2000ms, not just sleep past it', async () => {
+    // CI 2026-09-21: a fixed 2600ms sleep minus whole-second SFTP flooring
+    // left |local - server| at 1970ms, inside the tolerance, so the
+    // workspace-down sync wrongly reported No differences. test/e2e/mtimeGap
+    // polls until the floored gap exceeds the tolerance; this pin keeps the
+    // two in agreement if the tolerance ever changes.
+    const { classifyRow } = await import('../src/syncPreview');
+    const row = { localExists: true, localMtimeMs: 33030, localSize: 16, remoteExists: true, remoteSize: 16 };
+    expect(classifyRow({ ...row, remoteMtime: 35000 })).toBe('Same');
+    expect(classifyRow({ ...row, remoteMtime: 36000 })).toBe('Remote-newer');
+  });
 });
 
 describe('mapLimit', () => {
