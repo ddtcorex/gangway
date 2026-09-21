@@ -153,6 +153,10 @@
         "title": "Gangway: Download Folder from Server to Workspace"
       },
       {
+        "command": "gangway.compareWorkspaceFile",
+        "title": "Gangway: Compare Workspace with Server"
+      },
+      {
         "command": "gangway.toggleFreeze",
         "title": "Gangway: Toggle Freeze (Lock/Unlock Production)"
       },
@@ -333,6 +337,11 @@
         },
         {
           "command": "gangway.downloadMappedFile",
+          "when": "resourceScheme == file && !explorerResourceIsFolder",
+          "group": "gangway.mapping"
+        },
+        {
+          "command": "gangway.compareWorkspaceFile",
           "when": "resourceScheme == file && !explorerResourceIsFolder",
           "group": "gangway.mapping"
         },

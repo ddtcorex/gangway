@@ -32,9 +32,16 @@ describe('mapping-sync contributions', () => {
     expect(byCommand('gangway.uploadMappedFolder').length).toBe(1);
     expect(byCommand('gangway.downloadMappedFile').length).toBe(1);
     expect(byCommand('gangway.downloadMappedFolder').length).toBe(1);
+    expect(byCommand('gangway.compareWorkspaceFile').length).toBe(1);
     const tree = pkg.contributes.menus['view/item/context'];
     const treeBy = (id: string) => tree.filter((m: { command: string }) => m.command === id);
     expect(treeBy('gangway.downloadToWorkspaceFile').length).toBe(1);
     expect(treeBy('gangway.downloadToWorkspaceFolder').length).toBe(1);
+  });
+
+  it('declares the workspace-compare command with its exact title', async () => {
+    const pkg = JSON.parse(await fs.readFile(path.join(__dirname, '..', 'package.json'), 'utf8'));
+    const titles = new Map(pkg.contributes.commands.map((c: { command: string; title: string }) => [c.command, c.title]));
+    expect(titles.get('gangway.compareWorkspaceFile')).toBe('Gangway: Compare Workspace with Server');
   });
 });

@@ -26,6 +26,11 @@ All notable changes to the Gangway extension are documented in this file.
   Local Explorer and `Download to Workspace Folder` from the Remote
   Explorer — one confirm, direct overwrite, no backup (the hotfix flow is
   unchanged).
+- Workspace compare: `Compare Workspace with Server` from the Local
+  Explorer — read-only `vscode.diff` of the workspace file against the
+  server's fresh bytes (staged under tmp, kept for revisit), resolved
+  through the active connection's mappings with the same unmapped warning
+  as the mapped sync commands.
 
 ## [0.1.0] - 2026-09-18
 
