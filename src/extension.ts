@@ -1858,25 +1858,32 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   /** Upload one workspace file through its mapping (explorer Uri -> resolve -> confirm -> pushMappedFile). */
   async function runUploadMappedFileCommand(uri?: { fsPath: string }): Promise<void> {
     const connection = requireActiveConnection();
-    if (!connection || !uri?.fsPath) return;
+    if (!connection) return;
+    // Keybinding invocation (Ctrl+Alt+Shift+X) supplies no arguments at
+    // all -- VS Code keybindings can only pass a static `args` value
+    // declared in package.json, never "the currently active file". Derive
+    // the workspace file from the active editor, symmetric to how
+    // gangway.uploadFile derives its tmp file from the active editor.
+    const fsPath = uri?.fsPath ?? vscode.window.activeTextEditor?.document.uri.fsPath;
+    if (!fsPath) return;
     const roots = workspaceRoots();
-    const remotePath = resolveLocalToRemote(connection, roots, uri.fsPath);
+    const remotePath = resolveLocalToRemote(connection, roots, fsPath);
     if (!remotePath) {
-      await warnNoMapping(connection, roots, uri.fsPath);
+      await warnNoMapping(connection, roots, fsPath);
       return;
     }
     const choice = await vscode.window.showWarningMessage(
-      `Upload ${uri.fsPath} → ${remotePath} on "${connection.name}"? This overwrites the server copy.`,
+      `Upload ${fsPath} → ${remotePath} on "${connection.name}"? This overwrites the server copy.`,
       'Upload',
       'Cancel',
     );
     if (choice !== 'Upload') return;
     try {
       const adapter = await getAdapter(connection);
-      await pushMappedFile(adapter, uri.fsPath, remotePath);
-      await vscode.window.showInformationMessage(`Uploaded ${uri.fsPath} → ${remotePath}.`);
+      await pushMappedFile(adapter, fsPath, remotePath);
+      await vscode.window.showInformationMessage(`Uploaded ${fsPath} → ${remotePath}.`);
     } catch (err) {
-      await showCommandError(err, { retry: () => runUploadMappedFileCommand(uri), connection });
+      await showCommandError(err, { retry: () => runUploadMappedFileCommand({ fsPath }), connection });
     }
   }
 

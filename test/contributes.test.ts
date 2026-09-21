@@ -45,8 +45,18 @@ describe('mapping-sync contributions', () => {
     expect(titles.get('gangway.compareWorkspaceFile')).toBe('Gangway: Compare Workspace with Server');
   });
 
-  it('declares no trash commands and titles delete as permanent', async () => {
+  it('binds Ctrl+Alt+Shift+X to upload the mapped file open in the editor', async () => {
     const pkg = JSON.parse(await fs.readFile(path.join(__dirname, '..', 'package.json'), 'utf8'));
+    const bindings = pkg.contributes.keybindings.filter(
+      (k: { command: string }) => k.command === 'gangway.uploadMappedFile',
+    );
+    expect(bindings).toHaveLength(1);
+    expect(bindings[0].key).toBe('ctrl+alt+shift+x');
+    expect(bindings[0].mac).toBe('cmd+alt+shift+x');
+    expect(bindings[0].when).toBe('editorTextFocus && resourceScheme == file');
+  });
+
+  it('declares no trash commands and titles delete as permanent', async () => {    const pkg = JSON.parse(await fs.readFile(path.join(__dirname, '..', 'package.json'), 'utf8'));
     const ids = pkg.contributes.commands.map((c: { command: string }) => c.command);
     expect(ids).not.toContain('gangway.restoreFromTrash');
     expect(ids).not.toContain('gangway.emptyTrash');
