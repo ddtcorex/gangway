@@ -2,6 +2,13 @@
 
 All notable changes to the Gangway extension are documented in this file.
 
+## [0.4.0] - 2026-09-21
+
+- `Ctrl+Alt+Shift+X` (`Cmd+Alt+Shift+X` on macOS) uploads the mapped
+  workspace file open in the active editor, through the same mapping
+  resolution, unmapped warning, and overwrite confirm as the
+  `Upload to Mapped Remote` menu.
+
 ## [0.3.0] - 2026-09-21
 
 - BREAKING: removed server-side trash and backup (no remote footprint) —
