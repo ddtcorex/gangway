@@ -129,6 +129,30 @@
         "title": "Gangway: Sync Workspace Down"
       },
       {
+        "command": "gangway.uploadMappedFile",
+        "title": "Gangway: Upload to Mapped Remote"
+      },
+      {
+        "command": "gangway.uploadMappedFolder",
+        "title": "Gangway: Upload to Mapped Remote"
+      },
+      {
+        "command": "gangway.downloadMappedFile",
+        "title": "Gangway: Download to Workspace"
+      },
+      {
+        "command": "gangway.downloadMappedFolder",
+        "title": "Gangway: Download to Workspace"
+      },
+      {
+        "command": "gangway.downloadToWorkspaceFile",
+        "title": "Gangway: Download to Workspace Folder"
+      },
+      {
+        "command": "gangway.downloadToWorkspaceFolder",
+        "title": "Gangway: Download to Workspace Folder"
+      },
+      {
         "command": "gangway.toggleFreeze",
         "title": "Gangway: Toggle Freeze (Lock/Unlock Production)"
       },
@@ -221,6 +245,11 @@
           "group": "3_transfer"
         },
         {
+          "command": "gangway.downloadToWorkspaceFile",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.file",
+          "group": "3_transfer_ws"
+        },
+        {
           "command": "gangway.deleteRemote",
           "when": "view == gangway.remoteExplorer && viewItem == gangway.file",
           "group": "4_danger"
@@ -281,6 +310,11 @@
           "group": "3_transfer"
         },
         {
+          "command": "gangway.downloadToWorkspaceFolder",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder",
+          "group": "3_transfer_ws"
+        },
+        {
           "command": "gangway.deleteRemote",
           "when": "view == gangway.remoteExplorer && viewItem == gangway.folder",
           "group": "4_danger"
@@ -289,6 +323,28 @@
           "command": "gangway.restoreFromTrash",
           "when": "view == gangway.remoteExplorer && viewItem == gangway.folder",
           "group": "4_danger"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "gangway.uploadMappedFile",
+          "when": "resourceScheme == file && !explorerResourceIsFolder",
+          "group": "gangway.mapping"
+        },
+        {
+          "command": "gangway.downloadMappedFile",
+          "when": "resourceScheme == file && !explorerResourceIsFolder",
+          "group": "gangway.mapping"
+        },
+        {
+          "command": "gangway.uploadMappedFolder",
+          "when": "explorerResourceIsFolder",
+          "group": "gangway.mapping"
+        },
+        {
+          "command": "gangway.downloadMappedFolder",
+          "when": "explorerResourceIsFolder",
+          "group": "gangway.mapping"
         }
       ]
     },
