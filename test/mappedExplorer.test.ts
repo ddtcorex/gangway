@@ -381,7 +381,7 @@ describe('mapped folder commands', () => {
     );
     expect(fakeRawClient.fastPut).toHaveBeenCalledTimes(1);
     expect(fakeRawClient.fastPut).toHaveBeenCalledWith(path.join(localRoot, 'one.php'), '/var/www/app/one.php.tmp');
-    expect(infoSpy).toHaveBeenCalledWith('Uploaded 1 file(s) to /var/www/app. 1 file(s) excluded by patterns or reserved dirs.');
+    expect(infoSpy).toHaveBeenCalledWith('Uploaded 1 file(s) to /var/www/app. 1 file(s) excluded by patterns.');
     warnSpy.mockRestore();
     infoSpy.mockRestore();
   });
@@ -396,18 +396,17 @@ describe('mapped folder commands', () => {
     expect(warnSpy).not.toHaveBeenCalled();
     expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
     expect(infoSpy).toHaveBeenCalledWith(
-      `Nothing to upload for ${localRoot} → /var/www/app. 1 file(s) excluded by patterns or reserved dirs.`,
+      `Nothing to upload for ${localRoot} → /var/www/app. 1 file(s) excluded by patterns.`,
     );
     warnSpy.mockRestore();
     infoSpy.mockRestore();
   });
 
-  it('never transfers the reserved trash/backup trees the sync rule inherits', async () => {
-    // Spec §4 inherits the sync walk's reserved-dir rule: `.trash-gangway`
-    // (and its siblings) is Gangway's own deleted-file store, so a mapped
-    // download must neither pull its contents into the workspace nor recreate
-    // the directory there. Listed explicitly, so the skip is the filter at
-    // work -- not a listing that simply never mentioned the tree.
+  it('walks former trash dirs as ordinary remote dirs (nothing is reserved)', async () => {
+    // No remote footprint anymore: a `.trash-gangway` left by an old version
+    // is just another directory, so a mapped download pulls its contents like
+    // any other file. Listed explicitly, so the inclusion is the (absent)
+    // filter at work -- not a listing that simply never mentioned the tree.
     const localRoot = path.join(wsRoot, 'app');
     fakeRawClient.list.mockImplementation(async (dirPath: string) =>
       dirPath === '/var/www/app'
@@ -419,27 +418,29 @@ describe('mapped folder commands', () => {
           ? [{ name: 'deleted.php', type: '-', size: 9 }]
           : [],
     );
-    mockWindow.__test_queueWarning('Download 1 files');
+    mockWindow.__test_queueWarning('Download 2 files');
     const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
     const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
 
     await handlers.get('gangway.downloadMappedFolder')!({ fsPath: localRoot });
 
-    // The reserved file is not a task and not a count: the confirm describes
-    // exactly the one user file that will move.
+    // Both files are tasks now: the confirm describes the two user files
+    // that will move.
     expect(warnSpy).toHaveBeenCalledWith(
-      `Download 1 file(s) from /var/www/app → ${localRoot}? This overwrites your local files.`,
-      'Download 1 files',
+      `Download 2 file(s) from /var/www/app → ${localRoot}? This overwrites your local files.`,
+      'Download 2 files',
       'Cancel',
     );
-    expect(fakeRawClient.fastGet).toHaveBeenCalledTimes(1);
+    expect(fakeRawClient.fastGet).toHaveBeenCalledTimes(2);
     expect(fakeRawClient.fastGet).toHaveBeenCalledWith(
       '/var/www/app/one.php',
       `${path.join(localRoot, 'one.php')}.gangway-downloading`,
     );
-    expect(infoSpy).toHaveBeenCalledWith(`Downloaded 1 file(s) into ${localRoot}.`);
-    // Neither the trash file nor the trash DIRECTORY it lived in appeared.
-    expect(await fs.readdir(localRoot)).toEqual(['one.php']);
+    expect(fakeRawClient.fastGet).toHaveBeenCalledWith(
+      '/var/www/app/.trash-gangway/deleted.php',
+      `${path.join(localRoot, '.trash-gangway', 'deleted.php')}.gangway-downloading`,
+    );
+    expect(infoSpy).toHaveBeenCalledWith(`Downloaded 2 file(s) into ${localRoot}.`);
     warnSpy.mockRestore();
     infoSpy.mockRestore();
   });
@@ -530,7 +531,7 @@ describe('mapped folder commands', () => {
       '/var/www/app/one.php',
       `${path.join(localRoot, 'one.php')}.gangway-downloading`,
     );
-    expect(infoSpy).toHaveBeenCalledWith(`Downloaded 1 file(s) into ${localRoot}. 1 file(s) excluded by patterns or reserved dirs.`);
+    expect(infoSpy).toHaveBeenCalledWith(`Downloaded 1 file(s) into ${localRoot}. 1 file(s) excluded by patterns.`);
     warnSpy.mockRestore();
     infoSpy.mockRestore();
   });

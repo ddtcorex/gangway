@@ -32,17 +32,11 @@ async function resetFixture(): Promise<void> {
     await fs.mkdir(path.join(fixtureDir, 'node_modules'), { recursive: true });
     await fs.writeFile(path.join(fixtureDir, 'node_modules', 'skip.js'), 'skip me', 'utf8');
     await fs.writeFile(path.join(fixtureDir, 'conflict.php'), "<?php echo 'base';", 'utf8');
-    // Prior runs leave trash/backup/e2e dirs in the bind mount: sweep them
-    // so every run starts from the same tree.
+    // Prior runs leave e2e scratch dirs in the bind mount: sweep them so
+    // every run starts from the same tree. (Trash/backup roots are gone:
+    // the extension no longer creates them, so they are not swept.)
     for (const entry of await fs.readdir(fixtureDir)) {
-      if (
-        entry.startsWith('.gangway-trash-') ||
-        entry.startsWith('.gangway-backup-') ||
-        entry === '.trash-gangway' ||
-        entry === '.backup-gangway' ||
-        entry === 'e2e-ws' ||
-        entry === 'mapped-sync'
-      ) {
+      if (entry === 'e2e-ws' || entry === 'mapped-sync') {
         await fs.rm(path.join(fixtureDir, entry), { recursive: true, force: true });
       }
     }

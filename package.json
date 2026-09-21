@@ -86,7 +86,7 @@
       },
       {
         "command": "gangway.deleteRemote",
-        "title": "Gangway: Delete Remote File/Folder (to Trash)"
+        "title": "Gangway: Delete Remote File/Folder (Permanent)"
       },
       {
         "command": "gangway.duplicateRemote",
@@ -107,14 +107,6 @@
       {
         "command": "gangway.pasteEntries",
         "title": "Gangway: Paste"
-      },
-      {
-        "command": "gangway.restoreFromTrash",
-        "title": "Gangway: Restore from Trash…"
-      },
-      {
-        "command": "gangway.emptyTrash",
-        "title": "Gangway: Empty Trash (Permanent)"
       },
       {
         "command": "gangway.syncFolder",
@@ -320,11 +312,6 @@
         },
         {
           "command": "gangway.deleteRemote",
-          "when": "view == gangway.remoteExplorer && viewItem == gangway.folder",
-          "group": "4_danger"
-        },
-        {
-          "command": "gangway.restoreFromTrash",
           "when": "view == gangway.remoteExplorer && viewItem == gangway.folder",
           "group": "4_danger"
         }

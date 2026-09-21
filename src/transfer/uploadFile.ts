@@ -1,14 +1,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AuditLog } from '../auditLog';
-import { backupFile, isNotFoundError, type BackupStaging } from '../remoteOps';
 import { writeSidecar } from '../tmpStore';
-import type { ConnectionConfig, RemoteStat } from '../types';
+import type { RemoteStat } from '../types';
 
 export interface UploadClient {
   fastPut(localPath: string, remotePath: string): Promise<unknown>;
-  /** Needed for backup-before-overwrite: the server original is staged locally, then put to the backup path. */
-  fastGet(remotePath: string, localPath: string): Promise<unknown>;
   /**
    * Must be the `posix-rename@openssh.com` extension (OpenSSH 4.8+), not
    * plain SFTP rename: standard SFTP v3 rename fails with "file already
@@ -57,49 +54,19 @@ export async function uploadFile(
    */
   logWarning: (message: string) => void = () => {},
   /**
-   * - `backup`: when present, the existing server file is copied to the
-   *   backup dir before overwriting (spec §5). A failed backup never blocks
-   *   the push the user explicitly asked for: it is reported and the upload
-   *   proceeds.
    * - `writeSidecar` (default true): refresh the tmp sidecar baseline after
    *   the push. Workspace sync passes false — a `.meta.json` next to the
    *   user's own project files would litter their repo (and could even get
    *   committed).
    */
-  options?: { backup?: { connection: ConnectionConfig; staging?: BackupStaging }; writeSidecar?: boolean },
+  options?: { writeSidecar?: boolean },
 ): Promise<void> {
-  const backup = options?.backup;
   const writeSidecarBaseline = options?.writeSidecar ?? true;
   // The parent may never have existed remotely (a locally-created folder
   // pushed for the first time). Recursive mkdir is idempotent on the lib
   // ("already exists" is not an error), and anything it cannot fix surfaces
   // as the put's own error below -- so this is best-effort by design.
   await client.mkdir(path.posix.dirname(remotePath), true).catch(() => {});
-  if (backup) {
-    let exists = false;
-    try {
-      await client.stat(remotePath);
-      exists = true;
-    } catch (err) {
-      // A brand-new remote file has nothing to back up; any other stat
-      // failure is reported once and the push proceeds without a backup
-      // rather than refusing a hotfix the user explicitly pushed.
-      if (!isNotFoundError(err)) {
-        logWarning(
-          `Could not back up ${remotePath} before upload (${err instanceof Error ? err.message : String(err)}). Proceeding without a backup.`,
-        );
-      }
-    }
-    if (exists) {
-      try {
-        await backupFile(client, backup.connection, remotePath, backup.staging);
-      } catch (err) {
-        logWarning(
-          `Could not back up ${remotePath} before upload (${err instanceof Error ? err.message : String(err)}). Proceeding without a backup.`,
-        );
-      }
-    }
-  }
   const tmpRemotePath = `${remotePath}.tmp`;
   await client.fastPut(localPath, tmpRemotePath);
 

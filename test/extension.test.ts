@@ -67,6 +67,7 @@ vi.mock('../src/transfer/connectionPool', () => ({
 }));
 
 import { activate } from '../src/extension';
+import { AuditLog } from '../src/auditLog';
 import { ConnectionPool } from '../src/transfer/connectionPool';
 import type { ConnectionManager } from '../src/connectionManager';
 import { writeSidecar } from '../src/tmpStore';
@@ -582,19 +583,108 @@ describe('activate - realistic command invocation', () => {
       infoSpy.mockRestore();
     });
 
-    it('gangway.deleteRemote retries the trash move when the user picks Retry', async () => {
-      mockWindow.__test_queueWarning('Move to Trash', 'Move to Trash');
-      mockWindow.__test_queueError('Retry');
-      fakeRawClient.posixRename.mockRejectedValueOnce(new Error('boom'));
-      fakeRawClient.stat.mockResolvedValue({ size: 5, modifyTime: 1, isDirectory: false, isSymbolicLink: false });
+    it('gangway.deleteRemote hard-deletes a file with permanence copy and a delete audit line', async () => {
+      mockWindow.__test_queueWarning('Delete');
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
 
       await handlers.get('gangway.deleteRemote')!(fileNode('/var/www/app/a.php'));
 
-      expect(fakeRawClient.posixRename).toHaveBeenCalledTimes(2);
-      expect(fakeRawClient.posixRename).toHaveBeenLastCalledWith(
-        '/var/www/app/a.php',
-        expect.stringMatching(/\.gangway-trash-[0-9a-f]{10}\//),
+      expect(warnSpy).toHaveBeenCalledWith(
+        'Permanently delete /var/www/app/a.php on "staging"? There is no undo.',
+        'Delete',
+        'Cancel',
       );
+      expect(fakeRawClient.delete).toHaveBeenCalledWith('/var/www/app/a.php');
+      expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+      expect(infoSpy).toHaveBeenCalledWith('Permanently deleted /var/www/app/a.php.');
+      const logPath = path.join(os.tmpdir(), 'gangway-global-storage', 'sftp-hotfix-uploads.log');
+      const contents = await fs.readFile(logPath, 'utf8');
+      expect(JSON.parse(contents.trim().split('\n').pop()!)).toMatchObject({
+        connectionId: connection.id,
+        remotePath: '/var/www/app/a.php',
+        op: 'delete',
+      });
+      warnSpy.mockRestore();
+      infoSpy.mockRestore();
+    });
+
+    it('gangway.deleteRemote recursive-rmdirs a folder after typed confirm', async () => {
+      mockWindow.__test_queueInput('dir');
+      const inputSpy = vi.spyOn(vscode.window, 'showInputBox');
+
+      await handlers.get('gangway.deleteRemote')!(folderNode('/var/www/app/dir'));
+
+      expect(inputSpy).toHaveBeenCalledWith({
+        prompt: expect.stringContaining('permanently delete'),
+      });
+      expect(inputSpy.mock.calls[0][0]).toMatchObject({
+        prompt: expect.stringContaining('There is no undo.'),
+      });
+      expect(fakeRawClient.rmdir).toHaveBeenCalledWith('/var/www/app/dir', true);
+      inputSpy.mockRestore();
+    });
+
+    it('gangway.deleteRemote deletes the link, never recursing, for a symlink entry', async () => {
+      mockWindow.__test_queueWarning('Delete');
+
+      await handlers.get('gangway.deleteRemote')!({
+        connectionId: connection.id,
+        entry: { path: '/var/www/app/link', isDirectory: false, isSymbolicLink: true, size: 0 },
+      });
+
+      expect(fakeRawClient.delete).toHaveBeenCalledWith('/var/www/app/link');
+      expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
+    });
+
+    it('gangway.deleteRemote retries the whole flow on Retry: recount, reconfirm, then delete and audit', async () => {
+      mockWindow.__test_queueInput('dir');
+      mockWindow.__test_queueInput('dir');
+      mockWindow.__test_queueError('Retry');
+      fakeRawClient.rmdir.mockRejectedValueOnce(new Error('boom'));
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.deleteRemote')!(folderNode('/var/www/app/dir'));
+
+      expect(fakeRawClient.rmdir).toHaveBeenCalledTimes(2);
+      expect(fakeRawClient.rmdir).toHaveBeenLastCalledWith('/var/www/app/dir', true);
+      expect(infoSpy).toHaveBeenCalledWith('Permanently deleted /var/www/app/dir.');
+      const logPath = path.join(os.tmpdir(), 'gangway-global-storage', 'sftp-hotfix-uploads.log');
+      const contents = await fs.readFile(logPath, 'utf8');
+      expect(JSON.parse(contents.trim().split('\n').pop()!)).toMatchObject({
+        remotePath: '/var/www/app/dir',
+        op: 'delete',
+      });
+      infoSpy.mockRestore();
+    });
+
+    it('gangway.deleteRemote surfaces rmdir failure with no success message and no delete audit', async () => {
+      mockWindow.__test_queueInput('dir');
+      fakeRawClient.rmdir.mockRejectedValueOnce(new Error('boom'));
+      const errorSpy = vi.spyOn(vscode.window, 'showErrorMessage');
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.deleteRemote')!(folderNode('/var/www/app/dir'));
+
+      expect(errorSpy).toHaveBeenCalled();
+      expect(infoSpy).not.toHaveBeenCalledWith(expect.stringContaining('Permanently deleted'));
+      errorSpy.mockRestore();
+      infoSpy.mockRestore();
+    });
+
+    it('gangway.deleteRemote still reports success when the audit append fails', async () => {
+      mockWindow.__test_queueWarning('Delete');
+      const appendSpy = vi.spyOn(AuditLog.prototype, 'append').mockRejectedValueOnce(new Error('EACCES'));
+      const errorSpy = vi.spyOn(vscode.window, 'showErrorMessage');
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.deleteRemote')!(fileNode('/var/www/app/a.php'));
+
+      expect(infoSpy).toHaveBeenCalledWith('Permanently deleted /var/www/app/a.php.');
+      expect(errorSpy).not.toHaveBeenCalled();
+      appendSpy.mockRestore();
+      errorSpy.mockRestore();
+      infoSpy.mockRestore();
     });
 
     it.each([
@@ -619,22 +709,7 @@ describe('activate - realistic command invocation', () => {
     });
   });
 
-  describe('trash and clipboard commands', () => {
-    function trashListFixture() {
-      fakeRawClient.list.mockImplementation(async (dirPath: string) => {
-        // Stamp-specific branch first: a stamp dir path also contains the
-        // trash-root segment, so matching the root first would recurse into
-        // the stamp forever (walkRemoteFiles keeps descending).
-        if (dirPath.includes('20260901-000000-op')) {
-          return [{ name: 'a.php', type: 'f', size: 3 }];
-        }
-        if (dirPath.includes('.gangway-trash-') || dirPath === '/var/www/.trash-gangway') {
-          return [{ name: '20260901-000000-op', type: 'd' }];
-        }
-        return [];
-      });
-    }
-
+  describe('clipboard commands', () => {
     async function activateFrozenConnection() {
       const fresh = activate(fakeContext());
       const frozen = await fresh.connectionManager.add({
@@ -654,48 +729,8 @@ describe('activate - realistic command invocation', () => {
       mockWindow.__test_resetAnswers();
     });
 
-    it('gangway.emptyTrash does nothing when the typed confirm does not match', async () => {
-      trashListFixture();
-      mockWindow.__test_queueInput('never mind');
-      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
-
-      await handlers.get('gangway.emptyTrash')!();
-
-      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Empty Trash cancelled'));
-      expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
-      infoSpy.mockRestore();
-    });
-
-    it('gangway.emptyTrash removes stamp dirs on the literal confirm', async () => {
-      trashListFixture();
-      mockWindow.__test_queueInput('EMPTY TRASH');
-      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
-
-      await handlers.get('gangway.emptyTrash')!();
-
-      expect(fakeRawClient.rmdir).toHaveBeenCalledWith(
-        expect.stringContaining('20260901-000000-op'),
-        true,
-      );
-      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Emptied trash'));
-      infoSpy.mockRestore();
-    });
-
-    it('gangway.restoreFromTrash moves the trashed file back on overwrite', async () => {
-      trashListFixture();
-      mockWindow.__test_queuePick((items: unknown[]) => [(items as unknown[])[0]]);
-      mockWindow.__test_queuePick('Restore to original locations');
-      mockWindow.__test_queueWarning('Overwrite server');
-      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
-
-      await handlers.get('gangway.restoreFromTrash')!();
-
-      expect(fakeRawClient.posixRename).toHaveBeenCalledWith(
-        expect.stringContaining('20260901-000000-op/a.php'),
-        '/var/www/a.php',
-      );
-      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Restored 1'));
-      infoSpy.mockRestore();
+    it.each([['gangway.restoreFromTrash'], ['gangway.emptyTrash']])('%s is not registered', (id) => {
+      expect(handlers.has(id)).toBe(false);
     });
 
     it('cut then paste moves server-side with no re-upload', async () => {
@@ -716,7 +751,7 @@ describe('activate - realistic command invocation', () => {
       expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
     });
 
-    it.each([['gangway.pasteEntries'], ['gangway.restoreFromTrash'], ['gangway.emptyTrash']])(
+    it.each([['gangway.pasteEntries']])(
       '%s stops on a frozen connection before any prompt or network call',
       async (commandId) => {
         const frozen = await activateFrozenConnection();

@@ -44,4 +44,15 @@ describe('mapping-sync contributions', () => {
     const titles = new Map(pkg.contributes.commands.map((c: { command: string; title: string }) => [c.command, c.title]));
     expect(titles.get('gangway.compareWorkspaceFile')).toBe('Gangway: Compare Workspace with Server');
   });
+
+  it('declares no trash commands and titles delete as permanent', async () => {
+    const pkg = JSON.parse(await fs.readFile(path.join(__dirname, '..', 'package.json'), 'utf8'));
+    const ids = pkg.contributes.commands.map((c: { command: string }) => c.command);
+    expect(ids).not.toContain('gangway.restoreFromTrash');
+    expect(ids).not.toContain('gangway.emptyTrash');
+    const titles = new Map(pkg.contributes.commands.map((c: { command: string; title: string }) => [c.command, c.title]));
+    expect(titles.get('gangway.deleteRemote')).toBe('Gangway: Delete Remote File/Folder (Permanent)');
+    const menus = [...pkg.contributes.menus['view/item/context'], ...(pkg.contributes.menus['view/title'] ?? [])];
+    expect(menus.filter((m: { command: string }) => m.command === 'gangway.restoreFromTrash' || m.command === 'gangway.emptyTrash')).toHaveLength(0);
+  });
 });
