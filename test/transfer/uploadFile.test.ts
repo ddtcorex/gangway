@@ -5,17 +5,6 @@ import path from 'node:path';
 import { uploadFile } from '../../src/transfer/uploadFile';
 import { readSidecar } from '../../src/tmpStore';
 import { AuditLog } from '../../src/auditLog';
-import type { ConnectionConfig } from '../../src/types';
-
-const backupConnection: ConnectionConfig = {
-  id: 'c1',
-  name: 'p',
-  host: 'h',
-  port: 22,
-  username: 'u',
-  remotePath: '/srv/app',
-  authMethod: 'agent',
-};
 
 let tmpHome: string;
 let localPath: string;
@@ -43,7 +32,6 @@ describe('uploadFile', () => {
       fastPut: vi.fn().mockImplementation(async (local: string, remote: string) => {
         calls.push(`put:${local}->${remote}`);
       }),
-      fastGet: vi.fn().mockResolvedValue(undefined),
       posixRename: vi.fn().mockImplementation(async (from: string, to: string) => {
         calls.push(`posixRename:${from}->${to}`);
       }),
@@ -83,7 +71,6 @@ describe('uploadFile', () => {
     // upload.
     const client = {
       fastPut: vi.fn().mockResolvedValue(undefined),
-      fastGet: vi.fn().mockResolvedValue(undefined),
       posixRename: vi.fn().mockResolvedValue(undefined),
       delete: vi.fn().mockResolvedValue(undefined),
       mkdir: vi.fn().mockResolvedValue(undefined),
@@ -112,7 +99,6 @@ describe('uploadFile', () => {
     const renameFailure = new Error('Permission denied');
     const client = {
       fastPut: vi.fn().mockResolvedValue(undefined),
-      fastGet: vi.fn().mockResolvedValue(undefined),
       posixRename: vi.fn().mockRejectedValue(renameFailure),
       delete: vi.fn().mockResolvedValue(undefined),
       mkdir: vi.fn().mockResolvedValue(undefined),
@@ -131,7 +117,6 @@ describe('uploadFile', () => {
     const renameFailure = new Error('Permission denied');
     const client = {
       fastPut: vi.fn().mockResolvedValue(undefined),
-      fastGet: vi.fn().mockResolvedValue(undefined),
       posixRename: vi.fn().mockRejectedValue(renameFailure),
       delete: vi.fn().mockRejectedValue(new Error('cleanup also failed')),
       mkdir: vi.fn().mockResolvedValue(undefined),
@@ -150,7 +135,6 @@ describe('uploadFile', () => {
     // on its own channel instead.
     const client = {
       fastPut: vi.fn().mockResolvedValue(undefined),
-      fastGet: vi.fn().mockResolvedValue(undefined),
       posixRename: vi.fn().mockResolvedValue(undefined),
       delete: vi.fn().mockResolvedValue(undefined),
       mkdir: vi.fn().mockResolvedValue(undefined),
@@ -174,7 +158,6 @@ describe('uploadFile', () => {
     const putFailure = new Error('fastPut: Permission denied');
     const client = {
       fastPut: vi.fn().mockRejectedValue(putFailure),
-      fastGet: vi.fn().mockResolvedValue(undefined),
       posixRename: vi.fn().mockResolvedValue(undefined),
       delete: vi.fn().mockResolvedValue(undefined),
       mkdir: vi.fn().mockRejectedValue(new Error('mkdir: Permission denied')),
@@ -186,62 +169,27 @@ describe('uploadFile', () => {
     expect(client.fastPut).toHaveBeenCalledTimes(1);
   });
 
-  it('backs up the existing server file before overwriting, skips backup for new files', async () => {
-    const puts: string[] = [];
-    const gets: string[] = [];
+  it('has no backup option: overwrites directly without staging a server copy', async () => {
     const client = {
       mkdir: vi.fn().mockResolvedValue(undefined),
       stat: vi.fn().mockResolvedValue({ mtime: 5, size: 3, isDirectory: false, isSymbolicLink: false }),
-      fastGet: vi.fn().mockImplementation(async (remote: string, local: string) => {
-        gets.push(remote);
-        await fs.writeFile(local, 'orig');
-      }),
-      fastPut: vi.fn().mockImplementation(async (local: string, remote: string) => {
-        puts.push(`${local}->${remote}`);
-      }),
-      posixRename: vi.fn().mockResolvedValue(undefined),
-      delete: vi.fn().mockResolvedValue(undefined),
-    };
-    const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
-
-    await uploadFile(client, 'c1', localPath, '/srv/app/a.php', 14, auditLog, () => {}, {
-      backup: { connection: backupConnection },
-    });
-
-    expect(gets).toEqual(['/srv/app/a.php']);
-    expect(puts[0]).toMatch(/\.gangway-backup-[0-9a-f]{10}\//);
-    expect(puts[1]).toMatch(/a\.php\.tmp$/);
-  });
-
-  it('skips the backup silently for a brand-new remote file', async () => {
-    const client = {
-      mkdir: vi.fn().mockResolvedValue(undefined),
-      // First stat (backup existence check) says the file is new; the later
-      // post-upload stat (sidecar refresh) sees the just-pushed file.
-      stat: vi
-        .fn()
-        .mockRejectedValueOnce(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
-        .mockResolvedValue({ mtime: 7, size: 14, isDirectory: false, isSymbolicLink: false }),
-      fastGet: vi.fn(),
       fastPut: vi.fn().mockResolvedValue(undefined),
       posixRename: vi.fn().mockResolvedValue(undefined),
       delete: vi.fn().mockResolvedValue(undefined),
     };
     const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
 
-    await uploadFile(client, 'c1', localPath, '/srv/app/new.php', 14, auditLog, () => {}, {
-      backup: { connection: backupConnection },
-    });
+    await uploadFile(client, 'c1', localPath, '/srv/app/a.php', 14, auditLog);
 
-    expect(client.fastGet).not.toHaveBeenCalled();
-    expect(client.fastPut).toHaveBeenCalledTimes(1);
+    expect(client.fastPut).toHaveBeenCalledWith(localPath, '/srv/app/a.php.tmp');
+    expect(client.posixRename).toHaveBeenCalledWith('/srv/app/a.php.tmp', '/srv/app/a.php');
+    expect((client as unknown as Record<string, unknown>)['fastGet']).toBeUndefined();
   });
 
   it('skips the sidecar refresh for workspace uploads, leaving no meta.json behind', async () => {
     const client = {
       mkdir: vi.fn().mockResolvedValue(undefined),
       stat: vi.fn(),
-      fastGet: vi.fn(),
       fastPut: vi.fn().mockResolvedValue(undefined),
       posixRename: vi.fn().mockResolvedValue(undefined),
       delete: vi.fn().mockResolvedValue(undefined),
