@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   defaultMapping,
+  isRemoteInsideRoot,
   overlapNotes,
   resolveLocalToRemote,
   resolveRemoteToLocal,
@@ -101,4 +102,17 @@ describe('pathMapping hardening', () => {
     };
     expect(resolveRemoteToLocal(rogue, ['/w'], '/other/place/a.php')).toBeUndefined();
   });
+});
+
+it('refuses a mapping whose remote escapes the root via ..', () => {
+  const connection = { remotePath: '/var/www' } as unknown as import('../src/types').ConnectionConfig;
+  expect(isRemoteInsideRoot(connection, '/var/www/../etc')).toBe(false);
+  expect(isRemoteInsideRoot(connection, '/var/www/sub/../../etc')).toBe(false);
+  expect(
+    resolveLocalToRemote(
+      { ...connection, mappings: [{ localPath: '/ws', remotePath: '/var/www/../etc' }] } as unknown as import('../src/types').ConnectionConfig,
+      ['/ws'],
+      '/ws/app.php',
+    ),
+  ).toBeUndefined();
 });

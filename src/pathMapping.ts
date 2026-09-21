@@ -1,14 +1,19 @@
+import path from 'node:path';
+
 import type { ConnectionConfig, PathMapping } from './types';
 
 /**
- * Normalizes a path for prefix matching: forward slashes, no trailing
- * slash (except the root itself). Comparison stays case-sensitive; a typed
- * Windows drive letter (`C:\x`) is slash-normalized but otherwise taken
- * literally (documented gap: no case folding).
+ * Normalizes a path for prefix matching: forward slashes, dot-segments
+ * resolved (`.`/`..`, lexically only — no filesystem access, so symlinks are
+ * still not resolved), no trailing slash except the root itself. Comparison
+ * stays case-sensitive; a typed Windows drive letter (`C:\x`) is
+ * slash-normalized but otherwise taken literally (documented gap: no case
+ * folding).
  */
 function normalize(p: string): string {
   const forward = p.replace(/\\/g, '/');
-  return forward.replace(/\/+$/, '') || '/';
+  const resolved = path.posix.normalize(forward);
+  return resolved.replace(/\/+$/, '') || '/';
 }
 
 function isWithinOrEqual(candidate: string, prefix: string): boolean {
