@@ -72,7 +72,7 @@ describe.runIf(enabled)('mapping integration (docker sftp)', () => {
     expect(result).toMatchObject({ ok: false, kind: 'auth-failed' });
   });
 
-  it('backup-first upload then download round-trips bytes', { timeout: 30_000 }, async () => {
+  it('direct-overwrite upload then download round-trips bytes', { timeout: 30_000 }, async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mapping-it-'));
     const localPath = path.join(dir, 'roundtrip.php');
     const content = `<?php echo 'it-${Date.now()}';`;
@@ -85,9 +85,7 @@ describe.runIf(enabled)('mapping integration (docker sftp)', () => {
       const logPath = path.join(dir, 'audit.log');
       const auditLog = new AuditLog(logPath);
       const byteSize = (await fs.stat(localPath)).size;
-      await uploadFile(adapter, connection.id, localPath, remotePath, byteSize, auditLog, () => {}, {
-        backup: { connection },
-      });
+      await uploadFile(adapter, connection.id, localPath, remotePath, byteSize, auditLog);
       const { localPath: downloaded } = await downloadFile(adapter, connection, remotePath);
       expect(await fs.readFile(downloaded, 'utf8')).toBe(content);
     } finally {

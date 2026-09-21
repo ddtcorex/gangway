@@ -5,14 +5,7 @@ import path from 'node:path';
 import Client from 'ssh2-sftp-client';
 import { SftpClientAdapter } from '../src/transfer/sftpClientAdapter';
 import { uploadFile } from '../src/transfer/uploadFile';
-import {
-  backupRootsFor,
-  emptyTrash,
-  inventoryTrash,
-  moveToTrash,
-  renameRemote,
-  restoreEntries,
-} from '../src/remoteOps';
+import { renameRemote } from '../src/remoteOps';
 import { AuditLog } from '../src/auditLog';
 import type { ConnectionConfig } from '../src/types';
 
@@ -88,92 +81,38 @@ describe.runIf(enabled)('remoteOps integration (docker sftp)', () => {
     );
   });
 
-  it('trash-delete then restore round-trips outside the docroot', { timeout: 30_000 }, async () => {
-    const local = await stageLocal('t.php', 'trash me');
+  function trashBackupNames(names: string[]): string[] {
+    return names.filter(
+      (n) => n.startsWith('.gangway-trash-') || n === '.trash-gangway' || n.startsWith('.gangway-backup-') || n === '.backup-gangway',
+    );
+  }
+
+  it('delete is a hard delete that creates no trash dir', { timeout: 30_000 }, async () => {
+    const before = trashBackupNames((await adapter.list('/var/www')).map((e) => e.name));
+    const local = await stageLocal('t.php', 'bye');
     const target = `${IT_ROOT}/t.php`;
     await adapter.fastPut(local, target);
-    const { trashPath } = await moveToTrash(adapter, connection, target, auditLog);
-    // The fixture user cannot write outside its area, so the in-root
-    // fallback applies here by design (sibling placement needs a writable
-    // parent, verified by the unit test with a cooperative fake).
-    const inRoot = trashPath.includes('/.trash-gangway/');
-    expect(trashPath).toMatch(inRoot ? /\.trash-gangway\// : /\.gangway-trash-[0-9a-f]{10}\//);
-    expect(trashPath.startsWith('/var/www/')).toBe(true);
+    await adapter.delete(target);
     await expect(adapter.stat(target)).rejects.toMatchObject({ code: 'ENOENT' });
-    const auditLines = (await fs.readFile(logPath, 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
-    const deleteLine = auditLines.find((l) => l.op === 'delete' && l.remotePath === target);
-    expect(deleteLine).toBeDefined();
-    expect(deleteLine.note ?? null).toBe(inRoot ? 'in-root-fallback' : null);
-    const picks = await inventoryTrash(adapter, connection);
-    const pick = picks.find((p) => p.items.some((i) => i.originalPath === target));
-    expect(pick).toBeDefined();
-    const result = await restoreEntries(adapter, connection, [pick!], undefined, {
-      confirmOverwrite: async () => 'overwrite' as const,
-      auditLog,
-    });
-    expect(result.restored).toEqual([target]);
-    expect(await adapter.stat(target)).toMatchObject({ isDirectory: false });
+    const after = trashBackupNames((await adapter.list('/var/www')).map((e) => e.name));
+    expect(after).toEqual(before);
   });
 
-  it('backup-before-overwrite keeps the original bytes', { timeout: 30_000 }, async () => {
+  it('upload overwrites directly with no backup copy kept anywhere', { timeout: 30_000 }, async () => {
     const target = `${IT_ROOT}/hot.php`;
+    const before = trashBackupNames((await adapter.list('/var/www')).map((e) => e.name));
     await adapter.fastPut(await stageLocal('v1.php', 'version-one'), target);
-    await uploadFile(
-      adapter, connection.id, await stageLocal('v2.php', 'version-two'), target, 11, auditLog, () => {},
-      { backup: { connection } },
-    );
+    await uploadFile(adapter, connection.id, await stageLocal('v2.php', 'version-two'), target, 11, auditLog);
     const lines = (await fs.readFile(logPath, 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
     const uploadLine = lines.find((l) => l.op === 'upload' && l.remotePath === target);
     expect(uploadLine).toBeDefined();
-    // The backup copy must hold the pre-overwrite bytes (sibling root, or
-    // the in-root fallback when the parent is not writable — same rule as
-    // trash, so probe both).
-    const backupStat = await adapter.stat(`${target}.tmp`).catch(() => undefined);
-    expect(backupStat).toBeUndefined();
-    const candidateRoots = [backupRootsFor(connection).dir, '/var/www/.backup-gangway'];
-    let stampFiles: string[] = [];
-    for (const root of candidateRoots) {
-      try {
-        const stamps = await adapter.list(root);
-        for (const stamp of stamps) {
-          if (stamp.type !== 'd') continue;
-          const walk: string[] = [`${root}/${stamp.name}`];
-          while (walk.length > 0) {
-            const dir = walk.pop() as string;
-            for (const entry of await adapter.list(dir)) {
-              const full = `${dir}/${entry.name}`;
-              if (entry.type === 'd') walk.push(full);
-              else stampFiles.push(full);
-            }
-          }
-        }
-        if (stampFiles.length > 0) break;
-      } catch {
-        continue;
-      }
-    }
-    const backedUp = stampFiles.filter((f) => f.endsWith('hot.php'));
-    expect(backedUp.length).toBeGreaterThan(0);
-    const backupLocal = path.join(tmpHome, 'backup-copy.php');
-    await adapter.fastGet(backedUp[0], backupLocal);
-    expect(await fs.readFile(backupLocal, 'utf8')).toBe('version-one');
     const fresh = path.join(tmpHome, 'fresh.php');
     await adapter.fastGet(target, fresh);
     expect(await fs.readFile(fresh, 'utf8')).toBe('version-two');
-  });
-
-  it('emptyTrash permanently removes entries with per-entry audit lines', { timeout: 30_000 }, async () => {
-    const target = `${IT_ROOT}/gone.php`;
-    await adapter.fastPut(await stageLocal('g.php', 'bye'), target);
-    await moveToTrash(adapter, connection, target, auditLog);
-    const picks = await inventoryTrash(adapter, connection);
-    const mine = picks.filter((p) => p.items.some((i) => i.originalPath === target));
-    expect(mine.length).toBeGreaterThan(0);
-    const result = await emptyTrash(adapter, connection, mine, auditLog);
-    expect(result.entries).toBe(mine.length);
-    const lines = (await fs.readFile(logPath, 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
-    expect(lines.some((l) => l.op === 'empty-trash')).toBe(true);
-    await expect(adapter.stat(target)).rejects.toMatchObject({ code: 'ENOENT' });
+    // No backup root may have appeared: neither the sibling form nor the
+    // legacy in-root form.
+    const after = trashBackupNames((await adapter.list('/var/www')).map((e) => e.name));
+    expect(after).toEqual(before);
   });
 
   it('audit lines never carry secret-shaped keys', { timeout: 30_000 }, async () => {
