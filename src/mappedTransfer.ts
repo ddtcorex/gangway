@@ -58,7 +58,11 @@ export async function pullMappedFile(
   try {
     await client.fastGet(remotePath, stagingPath);
   } catch (err) {
-    await fs.rm(stagingPath, { force: true });
+    try {
+      await fs.rm(stagingPath, { force: true });
+    } catch {
+      /* keep the original error */
+    }
     throw err;
   }
   await fs.rename(stagingPath, localDest);
@@ -69,13 +73,15 @@ export async function pullMappedFile(
  * dir) are collected into `skippedSymlinks` by rel and never transferred:
  * `Dirent.isFile()`/`isDirectory()` both return false for a symlink, so an
  * explicit `isSymbolicLink()` check comes first — otherwise symlinks vanish
- * silently and the confirm count lies. Also skips directories outright
- * (caller recreates them), `.meta.json` sidecars, and anything with
- * `.gangway-` in the name (compare-fresh leftovers must never be pushed).
- * Excluded subtrees still count into `excluded` so the confirm dialog stays
- * honest — same convention as walkLocalSyncTree. `skippedSymlinks` is
+ * silently and the confirm count lies. Recurses into directories (caller
+ * recreates them on the remote side), and skips `.meta.json` sidecars and
+ * anything with `.gangway-` in the name (compare-fresh leftovers must never
+ * be pushed). Excluded subtrees are still descended (cheap: no stats) so
+ * every file beneath them counts into `excluded` and the confirm dialog
+ * stays honest — same convention as walkLocalSyncTree. `skippedSymlinks` is
  * reported separately from `excluded` (pattern hits) so the dialog can name
- * both reasons.
+ * both reasons; the symlink check runs before the exclusion test, so an
+ * excluded symlink is still reported, never silently folded into `excluded`.
  */
 export async function walkMappedLocalFiles(
   localRoot: string,
@@ -84,9 +90,9 @@ export async function walkMappedLocalFiles(
   const files: Array<{ localPath: string; rel: string }> = [];
   const skippedSymlinks: string[] = [];
   let excluded = 0;
-  const stack: string[] = [localRoot];
+  const stack: Array<{ dir: string; excludedBelow: boolean }> = [{ dir: localRoot, excludedBelow: false }];
   while (stack.length > 0) {
-    const dir = stack.pop() as string;
+    const { dir, excludedBelow } = stack.pop() as { dir: string; excludedBelow: boolean };
     let entries: import('node:fs').Dirent[];
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
@@ -97,16 +103,17 @@ export async function walkMappedLocalFiles(
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
       const rel = path.relative(localRoot, full).split(path.sep).join('/');
+      const excludedHere = excludedBelow || exclude(rel);
       if (entry.isSymbolicLink()) {
         skippedSymlinks.push(rel);
         continue;
       }
       if (entry.isDirectory()) {
-        stack.push(full);
+        stack.push({ dir: full, excludedBelow: excludedHere });
         continue;
       }
       if (!entry.isFile() || entry.name.endsWith('.meta.json') || entry.name.includes('.gangway-')) continue;
-      if (exclude(rel)) {
+      if (excludedHere) {
         excluded += 1;
         continue;
       }

@@ -51,12 +51,18 @@ describe('pullMappedFile', () => {
     await fs.rm(dir, { recursive: true, force: true });
   });
 
-  it('a failed fastGet leaves the previous dest untouched and removes staging', async () => {
+  it('a partial transfer that then fails leaves the previous dest byte-identical and removes staging', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mapped-pull-'));
     const dest = path.join(dir, 'app.php');
     await fs.writeFile(dest, 'good copy');
-    const client = { fastGet: vi.fn().mockRejectedValue(new Error('network boom')) };
+    const client = {
+      fastGet: vi.fn().mockImplementation(async (_r: string, l: string) => {
+        await fs.writeFile(l, 'partial server bytes');
+        throw new Error('network boom');
+      }),
+    };
     await expect(pullMappedFile(client, '/var/www/app.php', dest)).rejects.toThrow('network boom');
+    expect(client.fastGet).toHaveBeenCalledWith('/var/www/app.php', `${dest}.gangway-downloading`);
     expect(await fs.readFile(dest, 'utf8')).toBe('good copy');
     await expect(fs.stat(`${dest}.gangway-downloading`)).rejects.toMatchObject({ code: 'ENOENT' });
     await fs.rm(dir, { recursive: true, force: true });
@@ -85,6 +91,13 @@ describe('walkMappedLocalFiles', () => {
     const { files, excluded } = await walkMappedLocalFiles(dir, (rel) => rel.startsWith('sub/'));
     expect(files.map((f) => f.rel)).toEqual(['a.php']);
     expect(excluded).toBe(1);
+  });
+
+  it('excludes a whole subtree when the directory itself matches, still counting its files', async () => {
+    const { files, excluded, skippedSymlinks } = await walkMappedLocalFiles(dir, (rel) => rel === 'sub');
+    expect(files.map((f) => f.rel)).toEqual(['a.php']);
+    expect(excluded).toBe(1);
+    expect(skippedSymlinks).toEqual([]);
   });
 
   it('reports symlinks separately instead of silently dropping them', async () => {
