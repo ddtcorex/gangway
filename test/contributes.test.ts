@@ -10,8 +10,18 @@ describe('mapping-sync contributions', () => {
     expect(titles.get('gangway.uploadMappedFolder')).toBe('Gangway: Upload to Mapped Remote');
     expect(titles.get('gangway.downloadMappedFile')).toBe('Gangway: Download to Workspace');
     expect(titles.get('gangway.downloadMappedFolder')).toBe('Gangway: Download to Workspace');
-    expect(titles.get('gangway.downloadToWorkspaceFile')).toBe('Gangway: Download to Workspace Folder');
-    expect(titles.get('gangway.downloadToWorkspaceFolder')).toBe('Gangway: Download to Workspace Folder');
+    expect(titles.get('gangway.downloadToWorkspaceFile')).toBe('Gangway: Download File from Server to Workspace');
+    expect(titles.get('gangway.downloadToWorkspaceFolder')).toBe('Gangway: Download Folder from Server to Workspace');
+  });
+
+  it('names folder menus by destination (temp vs workspace) and safety (preview)', async () => {
+    const pkg = JSON.parse(await fs.readFile(path.join(__dirname, '..', 'package.json'), 'utf8'));
+    const titles = new Map(pkg.contributes.commands.map((c: { command: string; title: string }) => [c.command, c.title]));
+    expect(titles.get('gangway.downloadFolder')).toBe('Gangway: Download Folder from Server to Temp');
+    expect(titles.get('gangway.uploadFolder')).toBe('Gangway: Upload Folder from Temp to Server');
+    expect(titles.get('gangway.syncFolder')).toBe('Gangway: Preview Sync Folder with Server…');
+    expect(titles.get('gangway.syncWorkspaceUp')).toBe('Gangway: Sync Workspace to Server (Preview)');
+    expect(titles.get('gangway.syncWorkspaceDown')).toBe('Gangway: Sync Workspace from Server (Preview)');
   });
 
   it('wires explorer/context for local and view/item/context for remote', async () => {

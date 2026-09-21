@@ -57,11 +57,11 @@
       },
       {
         "command": "gangway.downloadFolder",
-        "title": "Gangway: Download Folder"
+        "title": "Gangway: Download Folder from Server to Temp"
       },
       {
         "command": "gangway.uploadFolder",
-        "title": "Gangway: Upload Folder"
+        "title": "Gangway: Upload Folder from Temp to Server"
       },
       {
         "command": "gangway.compareFile",
@@ -118,15 +118,15 @@
       },
       {
         "command": "gangway.syncFolder",
-        "title": "Gangway: Sync Folder…"
+        "title": "Gangway: Preview Sync Folder with Server…"
       },
       {
         "command": "gangway.syncWorkspaceUp",
-        "title": "Gangway: Sync Workspace Up"
+        "title": "Gangway: Sync Workspace to Server (Preview)"
       },
       {
         "command": "gangway.syncWorkspaceDown",
-        "title": "Gangway: Sync Workspace Down"
+        "title": "Gangway: Sync Workspace from Server (Preview)"
       },
       {
         "command": "gangway.uploadMappedFile",
@@ -146,11 +146,11 @@
       },
       {
         "command": "gangway.downloadToWorkspaceFile",
-        "title": "Gangway: Download to Workspace Folder"
+        "title": "Gangway: Download File from Server to Workspace"
       },
       {
         "command": "gangway.downloadToWorkspaceFolder",
-        "title": "Gangway: Download to Workspace Folder"
+        "title": "Gangway: Download Folder from Server to Workspace"
       },
       {
         "command": "gangway.toggleFreeze",
