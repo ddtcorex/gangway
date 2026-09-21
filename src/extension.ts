@@ -16,7 +16,7 @@ import { mapSftpError, actionLabel, isConnectionError } from './errorMapper';
 import { mapListingToEntries } from './remoteListing';
 import { GangwayTreeProvider, isSelectorNode, type RemoteTreeNode, type GangwayTreeNode } from './ui/gangwayTreeProvider';
 import { TmpStatusBar } from './ui/statusBar';
-import { AUTO_OPEN_PROMPT_THRESHOLD_BYTES, isProbablyBinary } from './folderQueue';
+import { AUTO_OPEN_PROMPT_THRESHOLD_BYTES, isProbablyBinary, buildDownloadPlan, type RemoteEntry } from './folderQueue';
 import { DirtyDecorationProvider } from './ui/dirtyDecoration';
 import { buildConnectionFormHtml, resolveConnectionFormFields, toConnectionsJson } from './ui/connectionFormHtml';
 import { ConnectionFormPanel } from './ui/connectionFormPanel';
@@ -51,7 +51,7 @@ import {
 import { clearClipboard, copyToClipboard, cutToClipboard, type ClipboardState } from './ui/treeClipboard';
 import { classifyRow, describeExcludedSelection, mapLimit, toQuickPickRow, type SyncRow } from './syncPreview';
 import { effectiveExcludes, matchesExcludes } from './excludes';
-import { pullMappedFile, pushMappedFile } from './mappedTransfer';
+import { pullMappedFile, pushMappedFile, walkMappedLocalFiles } from './mappedTransfer';
 import { defaultMapping, isRemoteInsideRoot, resolveLocalToRemote, resolveRemoteToLocal } from './pathMapping';
 import type { FileConflictDecision } from './conflictGuard';
 import type { ConnectionConfig, SidecarMeta } from './types';
@@ -2017,6 +2017,246 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   }
 
   /**
+   * Mapped-folder commands (spec §4 folder bullet): the folder counterpart of
+   * the single-file pair above, under the identical pure-B carve-out -- no
+   * frozen check, no backup, no Conflict Guard, no audit, no sidecar. One
+   * count-confirm carries the child file count of a fresh walk taken
+   * immediately before the prompt, so the number the user approves is the
+   * task list that runs (a file appearing behind the prompt is a miss, never
+   * a crash). The same prompt accounts for what is deliberately left behind
+   * (excluded files, skipped symlinks), so the count never lies about the
+   * folder it describes.
+   */
+  const MAPPED_SYMLINK_SKIP_REASON = 'symlink (skipped, not materialized)';
+
+  /** Why fewer files move than the folder holds, for the tail of an info line. */
+  function mappedCountNotes(excluded: number, symlinks: number): string {
+    const notes: string[] = [];
+    if (excluded > 0) notes.push(`${excluded} file(s) excluded by patterns.`);
+    if (symlinks > 0) notes.push(`${symlinks} symlink(s) skipped.`);
+    return notes.length > 0 ? ` ${notes.join(' ')}` : '';
+  }
+
+  /** The same two facts as a confirm suffix, e.g. ` (+3 excluded)`. */
+  function mappedConfirmSuffix(excluded: number, symlinks: number): string {
+    let suffix = '';
+    if (excluded > 0) suffix += ` (+${excluded} excluded)`;
+    if (symlinks > 0) suffix += ` (+${symlinks} symlinks skipped)`;
+    return suffix;
+  }
+
+  /** Upload one mapped local folder: walk -> count-confirm -> pushMappedFile each. */
+  async function runUploadMappedFolderCommand(uri?: { fsPath: string }): Promise<void> {
+    const connection = requireActiveConnection();
+    if (!connection || !uri?.fsPath) return;
+    const roots = workspaceRoots();
+    const localRoot = uri.fsPath;
+    const remoteRoot = resolveLocalToRemote(connection, roots, localRoot);
+    if (!remoteRoot) {
+      await warnNoMapping(connection, roots, localRoot);
+      return;
+    }
+    const label = `${localRoot} → ${remoteRoot}`;
+    const excludes = effectiveExcludes(connection);
+    // Copied from runSyncFlow's joinSync: plain concatenation would build
+    // `//rel` for a connection rooted at `/`, which servers reject.
+    const joinRemote = (rel: string): string => (remoteRoot === '/' ? `/${rel}` : `${remoteRoot}/${rel}`);
+    try {
+      const walk = await walkMappedLocalFiles(localRoot, (rel) => matchesExcludes(rel, excludes));
+      const notes = mappedCountNotes(walk.excluded, walk.skippedSymlinks.length);
+      if (walk.files.length === 0) {
+        await vscode.window.showInformationMessage(`Nothing to upload for ${label}.${notes}`);
+        return;
+      }
+      const uploadLabel = `Upload ${walk.files.length} files`;
+      const choice = await vscode.window.showWarningMessage(
+        `Upload ${walk.files.length} file(s) in ${localRoot} → ${remoteRoot}? Server copies will be overwritten.` +
+          mappedConfirmSuffix(walk.excluded, walk.skippedSymlinks.length),
+        uploadLabel,
+        'Cancel',
+      );
+      if (choice !== uploadLabel) return;
+      const adapter = await getAdapter(connection);
+      const result = await withCancellableProgress(`Uploading ${label}`, (signal, reportProgress) =>
+        (async () => {
+          const done: string[] = [];
+          const failed: Array<{ remotePath: string; message: string }> = [];
+          for (const file of walk.files) {
+            // Cancellation is honoured between files, never mid-file: a
+            // half-written remote file is exactly what the tmp+rename put
+            // exists to prevent. What already landed stays landed -- there is
+            // nothing to roll back to under pure B, and no message claims
+            // otherwise.
+            if (signal.aborted) break;
+            const remotePath = joinRemote(file.rel);
+            reportProgress(remotePath);
+            try {
+              await pushMappedFile(adapter, file.localPath, remotePath);
+              done.push(remotePath);
+            } catch (err) {
+              failed.push({ remotePath, message: err instanceof Error ? err.message : String(err) });
+            }
+          }
+          return { done, failed, cancelled: signal.aborted };
+        })(),
+      );
+      for (const remotePath of result.done) output.appendLine(`Uploaded ${remotePath}`);
+      for (const rel of walk.skippedSymlinks) output.appendLine(`Upload skipped symlink: ${rel}`);
+      for (const entry of result.failed) output.appendLine(`Upload failed: ${entry.remotePath}: ${entry.message}`);
+      if (result.failed.length > 0 || walk.skippedSymlinks.length > 0) output.show();
+      treeProvider.refresh();
+      await vscode.window.showInformationMessage(
+        (result.cancelled
+          ? `Cancelled after uploading ${result.done.length} file(s).`
+          : `Uploaded ${result.done.length} file(s) to ${remoteRoot}.`) +
+          (result.failed.length > 0 ? ` ${result.failed.length} failed (see Output).` : '') +
+          notes,
+      );
+      // Whole-batch retry by design: the failed-path set is deliberately
+      // ignored (unlike the tmp-mirror folder commands' onlyPaths retry).
+      // Re-putting an already-succeeded file under direct overwrite is
+      // idempotent, and it keeps this handler stateless.
+      await handleFolderFailures('upload', result.failed, () => runUploadMappedFolderCommand(uri));
+    } catch (err) {
+      await showCommandError(err, { retry: () => runUploadMappedFolderCommand(uri), connection });
+    }
+  }
+
+  /**
+   * Download one mapped remote folder over the mapped local folder. Both
+   * callers (local Uri, remote tree node) land here so the walk, the
+   * not-found tolerance, the exclude/symlink filtering and the confirm exist
+   * once. `retry` re-invokes the calling command, so a retry re-resolves the
+   * mapping.
+   */
+  async function runMappedFolderDownload(
+    connection: ConnectionConfig,
+    remoteRoot: string,
+    localRoot: string,
+    retry: () => Promise<void>,
+  ): Promise<void> {
+    const label = `${remoteRoot} → ${localRoot}`;
+    const excludes = effectiveExcludes(connection);
+    // `relative()` against a root with a trailing slash still works, but the
+    // confirm and the info line read better without one.
+    const root = remoteRoot === '/' ? remoteRoot : remoteRoot.replace(/\/+$/, '');
+    try {
+      const adapter = await getAdapter(connection);
+      // A mapped remote root the server does not have yet (a fresh mapping,
+      // or a directory someone creates later) scans as empty, never as a
+      // failure -- the same not-found tolerance walkRemoteSyncTree applies,
+      // including the numeric SFTP status ('2') the real server reports.
+      // folderQueue's own walk has no such handling, so this closure owns it.
+      const listRemote = async (dirPath: string): Promise<RemoteEntry[]> => {
+        try {
+          return mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName);
+        } catch (err) {
+          if (isNotFoundError(err)) return [];
+          throw err;
+        }
+      };
+      const plan = await buildDownloadPlan({ path: root, isDirectory: true, isSymbolicLink: false, size: 0 }, listRemote);
+      const tasks: Array<{ remotePath: string; rel: string }> = [];
+      const skippedSymlinks: string[] = [];
+      let excluded = 0;
+      for (const task of plan.tasks) {
+        const rel = path.posix.relative(root, task.remotePath);
+        if (matchesExcludes(rel, excludes)) {
+          excluded += 1;
+          continue;
+        }
+        if (task.isSymlink) {
+          // A server symlink is never recreated in the workspace (the target
+          // may not exist locally at all); it is reported with its reason
+          // instead of arriving as a plain file that looks like the target.
+          skippedSymlinks.push(`${task.remotePath}: ${MAPPED_SYMLINK_SKIP_REASON}`);
+          continue;
+        }
+        tasks.push({ remotePath: task.remotePath, rel });
+      }
+      const notes = mappedCountNotes(excluded, skippedSymlinks.length);
+      if (tasks.length === 0) {
+        await vscode.window.showInformationMessage(`Nothing on the server under ${root} yet.${notes}`);
+        return;
+      }
+      const downloadLabel = `Download ${tasks.length} files`;
+      const choice = await vscode.window.showWarningMessage(
+        `Download ${tasks.length} file(s) from ${root} → ${localRoot}? This overwrites your local files.` +
+          mappedConfirmSuffix(excluded, skippedSymlinks.length),
+        downloadLabel,
+        'Cancel',
+      );
+      if (choice !== downloadLabel) return;
+      const result = await withCancellableProgress(`Downloading ${label}`, (signal, reportProgress) =>
+        (async () => {
+          const done: string[] = [];
+          const failed: Array<{ remotePath: string; message: string }> = [];
+          for (const task of tasks) {
+            if (signal.aborted) break;
+            reportProgress(task.remotePath);
+            const localDest = path.join(localRoot, ...task.rel.split('/'));
+            try {
+              await pullMappedFile(adapter, task.remotePath, localDest);
+              dirtyDecorations.refresh(vscode.Uri.file(localDest));
+              done.push(task.remotePath);
+            } catch (err) {
+              failed.push({ remotePath: task.remotePath, message: err instanceof Error ? err.message : String(err) });
+            }
+          }
+          return { done, failed, cancelled: signal.aborted };
+        })(),
+      );
+      for (const remotePath of result.done) output.appendLine(`Downloaded ${remotePath}`);
+      for (const skipped of skippedSymlinks) output.appendLine(`Download skipped ${skipped}`);
+      for (const entry of result.failed) output.appendLine(`Download failed: ${entry.remotePath}: ${entry.message}`);
+      if (result.failed.length > 0 || skippedSymlinks.length > 0) output.show();
+      treeProvider.refresh();
+      await vscode.window.showInformationMessage(
+        (result.cancelled
+          ? `Cancelled after downloading ${result.done.length} file(s).`
+          : `Downloaded ${result.done.length} file(s) into ${localRoot}.`) +
+          (result.failed.length > 0 ? ` ${result.failed.length} failed (see Output).` : '') +
+          notes,
+      );
+      // Whole-batch retry, same rationale as the upload above: the failed
+      // subset is not carried into the retry.
+      await handleFolderFailures('download', result.failed, () => retry());
+    } catch (err) {
+      await showCommandError(err, { retry, connection });
+    }
+  }
+
+  /** Download the mapped remote folder over its mapped local folder (explorer Uri). */
+  async function runDownloadMappedFolderCommand(uri?: { fsPath: string }): Promise<void> {
+    const connection = requireActiveConnection();
+    if (!connection || !uri?.fsPath) return;
+    const roots = workspaceRoots();
+    const remoteRoot = resolveLocalToRemote(connection, roots, uri.fsPath);
+    if (!remoteRoot) {
+      await warnNoMapping(connection, roots, uri.fsPath);
+      return;
+    }
+    await runMappedFolderDownload(connection, remoteRoot, uri.fsPath, () => runDownloadMappedFolderCommand(uri));
+  }
+
+  /**
+   * Download one server folder from the remote tree into its mapped
+   * workspace folder. The node names its own connection -- resolve THAT one,
+   * never the workspace binding -- and an item outside every mapping returns
+   * silently: the context menu is only offered for mapped items, and the
+   * tmp-mirror download next to it stays the escape hatch.
+   */
+  async function runDownloadToWorkspaceFolderCommand(node?: RemoteTreeNode): Promise<void> {
+    const connection = resolveConnection(node);
+    if (!connection || !node?.entry?.path) return;
+    const localRoot = resolveRemoteToLocal(connection, workspaceRoots(), node.entry.path);
+    if (!localRoot) return;
+    await runMappedFolderDownload(connection, node.entry.path, localRoot, () =>
+      runDownloadToWorkspaceFolderCommand(node),
+    );
+  }
+
+  /**
    * Govard remote import (see docs/specs/2026-09-18-gangway-govard-import-design.md).
    *
    * Workspaces carrying a `.govard.yml` already know their servers, so offer
@@ -2232,6 +2472,9 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     vscode.commands.registerCommand('gangway.uploadMappedFile', (uri?: { fsPath: string }) => runUploadMappedFileCommand(uri)),
     vscode.commands.registerCommand('gangway.downloadMappedFile', (uri?: { fsPath: string }) => runDownloadMappedFileCommand(uri)),
     vscode.commands.registerCommand('gangway.downloadToWorkspaceFile', (node?: RemoteTreeNode) => runDownloadToWorkspaceFileCommand(node)),
+    vscode.commands.registerCommand('gangway.uploadMappedFolder', (uri?: { fsPath: string }) => runUploadMappedFolderCommand(uri)),
+    vscode.commands.registerCommand('gangway.downloadMappedFolder', (uri?: { fsPath: string }) => runDownloadMappedFolderCommand(uri)),
+    vscode.commands.registerCommand('gangway.downloadToWorkspaceFolder', (node?: RemoteTreeNode) => runDownloadToWorkspaceFolderCommand(node)),
     vscode.commands.registerCommand('gangway.refreshExplorer', () => treeProvider.refresh()),
     vscode.commands.registerCommand('gangway.toggleFreeze', async (node?: RemoteTreeNode) => {
       const connection = node
