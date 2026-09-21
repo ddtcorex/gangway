@@ -69,6 +69,8 @@ vi.mock('../src/transfer/connectionPool', () => ({
 }));
 
 import { activate } from '../src/extension';
+import { tmpFilePathFor } from '../src/tmpPath';
+import { writeSidecar } from '../src/tmpStore';
 import type { ConnectionManager } from '../src/connectionManager';
 import type { RemoteTreeNode } from '../src/ui/gangwayTreeProvider';
 import type { ConnectionConfig } from '../src/types';
@@ -554,5 +556,228 @@ describe('mapped folder commands', () => {
     // There is no backup under pure B, so nothing may claim a rollback.
     expect(summary).not.toMatch(/rollback|restor|backup/i);
     infoSpy.mockRestore();
+  });
+});
+
+/**
+ * Pure-B anti-regression pins (spec §4 carve-out).
+ *
+ * Tasks 4–5 built the mapped commands; this block freezes the deliberate
+ * *absences* that make them pure B -- no backup staging, no audit line, no
+ * frozen gate on the mapped path -- plus the refusals that keep the carve-out
+ * safe (an escape-root mapping, an unmapped second workspace root, a server
+ * symlink, a failed download). Every pin asserts an observable effect only
+ * (fakeRawClient calls, bytes on disk, prompt copy, the Output channel), so a
+ * refactor that keeps the behaviour stays green while a regression that
+ * reintroduces the hotfix safety net -- or drops a refusal -- fails loudly.
+ * The same harness as the blocks above; the one test that needs the Output
+ * channel re-activates with a spy in place, exactly like
+ * `test/extension.test.ts`'s "Open Output from the error dialog" test.
+ */
+describe('pure-B pins (spec §4 carve-out)', () => {
+  /** The connection shape `beforeEach` seeds, re-seeded by the frozen pin. */
+  function seedAttrs() {
+    return {
+      name: 'staging',
+      host: 'example.com',
+      port: 22,
+      username: 'deploy',
+      remotePath: '/var/www',
+      authMethod: 'password' as const,
+      scope: 'workspace' as const,
+      mappings: [{ localPath: wsRoot, remotePath: '/var/www' }],
+    };
+  }
+
+  it('pure-B pin: mapped upload writes no backup and no audit line', async () => {
+    const localFile = path.join(wsRoot, 'app.php');
+    await fs.writeFile(localFile, '<?php echo 1;');
+    // Created up front so the readdir below is a real read of a real
+    // directory: on a missing path it would resolve to [] for the wrong
+    // reason and the pin would pass vacuously.
+    await fs.mkdir(globalStorageDir, { recursive: true });
+    mockWindow.__test_queueWarning('Upload');
+
+    await handlers.get('gangway.uploadMappedFile')!({ fsPath: localFile });
+
+    expect(fakeRawClient.fastPut).toHaveBeenCalledTimes(1);
+    expect(fakeRawClient.fastPut).toHaveBeenCalledWith(localFile, '/var/www/app.php.tmp');
+    // The only mkdir is the best-effort parent of the target: a positive
+    // assertion first, so the negative one below cannot pass because nothing
+    // ran at all.
+    expect(fakeRawClient.mkdir).toHaveBeenCalledWith('/var/www', true);
+    // No backup staging anywhere under the connection root (the hotfix path
+    // creates `.gangway-backup-<slug>` through remoteOps; pure B must not).
+    expect(fakeRawClient.mkdir).not.toHaveBeenCalledWith(
+      expect.stringContaining('.gangway-backup-'),
+      expect.anything(),
+    );
+    // No audit line either: AuditLog.append would mkdir globalStorageDir and
+    // drop `sftp-hotfix-uploads.log` there.
+    const globalStorageEntries = await fs.readdir(globalStorageDir);
+    expect(globalStorageEntries.filter((name) => name.endsWith('.log'))).toEqual([]);
+  });
+
+  it('pure-B pin: frozen connection still allows mapped upload but blocks hotfix upload', async () => {
+    const localFile = path.join(wsRoot, 'app.php');
+    await fs.writeFile(localFile, '<?php echo 1;');
+    // Flip frozen through the ConnectionManager itself -- the same mechanism
+    // test/extension.test.ts's 'frozen connection guard' uses. There is no
+    // setFrozen() API, and inventing one here would pin nothing real.
+    const frozen = await connectionManager.add({ ...seedAttrs(), frozen: true });
+    await connectionManager.setWorkspaceBinding(frozen.id);
+    mockWindow.__test_queueWarning('Upload');
+    const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+    await handlers.get('gangway.uploadMappedFile')!({ fsPath: localFile });
+
+    // The mapped path is pure B by design: it never consults `frozen`.
+    expect(fakeRawClient.fastPut).toHaveBeenCalledWith(localFile, '/var/www/app.php.tmp');
+    expect(infoSpy).toHaveBeenCalledWith(`Uploaded ${localFile} → /var/www/app.php.`);
+
+    // ...while the hotfix path on that SAME connection still refuses before
+    // any network mutation. Seed the tmp mirror + sidecar a tree-node upload
+    // derives its local path from (the extension.test.ts pattern), so the
+    // refusal is proven to come from the frozen gate, not from a missing
+    // sidecar.
+    const hotfixLocalPath = tmpFilePathFor(frozen, '/var/www/app.php');
+    await fs.mkdir(path.dirname(hotfixLocalPath), { recursive: true });
+    await fs.writeFile(hotfixLocalPath, 'hotfix');
+    await writeSidecar(hotfixLocalPath, {
+      connectionId: frozen.id,
+      remotePath: '/var/www/app.php',
+      mtime: 1,
+      size: 6,
+      downloadedAt: 1,
+    });
+    const putsBefore = fakeRawClient.fastPut.mock.calls.length;
+
+    await handlers.get('gangway.uploadFile')!({
+      connectionId: frozen.id,
+      entry: { path: '/var/www/app.php', isDirectory: false, isSymbolicLink: false, size: 1 },
+    });
+
+    expect(fakeRawClient.fastPut.mock.calls.length).toBe(putsBefore);
+    expect(fakeRawClient.posixRename).toHaveBeenCalledTimes(1); // the mapped put only
+    expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('frozen'));
+    infoSpy.mockRestore();
+  });
+
+  it('pure-B pin: an unmapped second workspace root offers Open Mappings', async () => {
+    // Only workspaceRoots[0] gets the zero-config default, so a file in a
+    // second root is unmapped until the user writes an explicit row.
+    const secondRoot = path.join(tmpHome, 'other-proj');
+    await fs.mkdir(secondRoot, { recursive: true });
+    const unmappedFile = path.join(secondRoot, 'app.php');
+    await fs.writeFile(unmappedFile, '<?php echo 1;');
+    mockWorkspace.workspaceFolders = [
+      { uri: { fsPath: wsRoot }, name: 'proj' },
+      { uri: { fsPath: secondRoot }, name: 'other' },
+    ];
+    mockWindow.__test_queueWarning('Open Mappings');
+    const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+    const execSpy = vi.spyOn(vscode.commands, 'executeCommand');
+
+    await handlers.get('gangway.uploadMappedFile')!({ fsPath: unmappedFile });
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      `${unmappedFile} is not inside any path mapping of "staging" (default: ${wsRoot} → /var/www).`,
+      'Open Mappings',
+      'Cancel',
+    );
+    // The offered action must actually do something: a button that discards
+    // the choice is a bug, not a TODO.
+    expect(execSpy).toHaveBeenCalledWith('gangway.manageRemotes');
+    expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+    expect(fakeRawClient.mkdir).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+    execSpy.mockRestore();
+  });
+
+  it('pure-B pin: an escape-root mapping refuses instead of falling back', async () => {
+    const localRoot = path.join(wsRoot, 'app');
+    const localFile = path.join(localRoot, 'deep.php');
+    await fs.mkdir(localRoot, { recursive: true });
+    await fs.writeFile(localFile, '<?php echo 1;');
+    // The longer explicit row wins the longest-prefix match, and its remote
+    // side resolves out of the connection root ('/etc/deep.php'). The refusal
+    // is the whole point: it must stop, never silently fall back to the
+    // shorter default row ('/var/www/app/deep.php') the user did not select.
+    await connectionManager.update(connection.id, {
+      mappings: [{ localPath: localRoot, remotePath: '/var/www/../etc' }],
+    });
+    mockWindow.__test_queueWarning('Open Mappings');
+    const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+
+    await handlers.get('gangway.uploadMappedFile')!({ fsPath: localFile });
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      `${localFile} is not inside any path mapping of "staging" (default: ${wsRoot} → /var/www).`,
+      'Open Mappings',
+      'Cancel',
+    );
+    expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+    expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+    expect(fakeRawClient.mkdir).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it('pure-B pin: a skipped symlink download is reported in the Output channel', async () => {
+    const createSpy = vi.spyOn(vscode.window, 'createOutputChannel');
+    const fresh = activate(fakeContext());
+    const freshConnection = await fresh.connectionManager.add(seedAttrs());
+    await fresh.connectionManager.setWorkspaceBinding(freshConnection.id);
+    const channel = createSpy.mock.results[createSpy.mock.results.length - 1].value as {
+      appendLine: (line: string) => void;
+      show: () => void;
+    };
+    const logged: string[] = [];
+    const appendSpy = vi.spyOn(channel, 'appendLine').mockImplementation((line: string) => {
+      logged.push(line);
+    });
+    const showSpy = vi.spyOn(channel, 'show');
+    fakeRawClient.list.mockImplementation(async (dirPath: string) =>
+      dirPath === '/var/www/app'
+        ? [
+            { name: 'one.php', type: '-', size: 5 },
+            { name: 'link.php', type: 'l', size: 3 },
+          ]
+        : [],
+    );
+    mockWindow.__test_queueWarning('Download 1 files');
+    const localRoot = path.join(wsRoot, 'app');
+
+    await handlers.get('gangway.downloadMappedFolder')!({ fsPath: localRoot });
+
+    // The confirm names the skip; the Output channel carries the per-entry
+    // reason and is revealed, so a "1 symlink(s) skipped" count is never the
+    // only trace of a file the user expected to arrive.
+    expect(logged).toContain('Download skipped /var/www/app/link.php: symlink (skipped, not materialized)');
+    expect(showSpy).toHaveBeenCalled();
+    expect(fakeRawClient.fastGet).toHaveBeenCalledTimes(1);
+    expect(await fs.readdir(localRoot)).toEqual(['one.php']);
+    appendSpy.mockRestore();
+    showSpy.mockRestore();
+    createSpy.mockRestore();
+  });
+
+  it('pure-B pin: a failed download leaves the workspace file byte-identical', async () => {
+    const localFile = path.join(wsRoot, 'app.php');
+    await fs.writeFile(localFile, 'stale local content');
+    mockWindow.__test_queueWarning('Download');
+    // fastGet truncates its destination before writing, so a direct write
+    // onto the real file would leave a truncated fragment here -- with no
+    // backup under pure B. The sibling staging file is what prevents that.
+    fakeRawClient.fastGet.mockRejectedValueOnce(new Error('connection lost'));
+    const errorSpy = vi.spyOn(vscode.window, 'showErrorMessage');
+
+    await handlers.get('gangway.downloadMappedFile')!({ fsPath: localFile });
+
+    expect(await fs.readFile(localFile, 'utf8')).toBe('stale local content');
+    // The staging sibling is cleaned up, not left as litter next to the file.
+    expect(await fs.readdir(wsRoot)).toEqual(['app.php']);
+    expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });
