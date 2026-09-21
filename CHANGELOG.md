@@ -2,7 +2,7 @@
 
 All notable changes to the Gangway extension are documented in this file.
 
-## [Unreleased]
+## [0.2.0] - 2026-09-21
 
 - Remote file/folder ops from the tree context menu: new file/folder,
   rename, duplicate, `chmod`, cut/copy/paste, and drag & drop upload
