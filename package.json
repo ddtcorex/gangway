@@ -43,11 +43,13 @@
       },
       {
         "command": "gangway.downloadFile",
-        "title": "Gangway: Download File"
+        "title": "Gangway: Download from Server to Edit",
+        "icon": "$(cloud-download)"
       },
       {
         "command": "gangway.uploadFile",
-        "title": "Gangway: Upload File"
+        "title": "Gangway: Upload Local Changes to Server",
+        "icon": "$(cloud-upload)"
       },
       {
         "command": "gangway.cleanupCache",
@@ -63,7 +65,8 @@
       },
       {
         "command": "gangway.compareFile",
-        "title": "Gangway: Compare File with Server"
+        "title": "Gangway: Compare Local vs Server",
+        "icon": "$(diff)"
       },
       {
         "command": "gangway.copyRemotePath",
@@ -208,12 +211,12 @@
           "group": "3_transfer"
         },
         {
-          "command": "gangway.uploadFile",
+          "command": "gangway.compareFile",
           "when": "view == gangway.remoteExplorer && viewItem == gangway.file",
           "group": "3_transfer"
         },
         {
-          "command": "gangway.compareFile",
+          "command": "gangway.uploadFile",
           "when": "view == gangway.remoteExplorer && viewItem == gangway.file",
           "group": "3_transfer"
         },
