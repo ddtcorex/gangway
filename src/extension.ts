@@ -1477,6 +1477,23 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     return reserved.some((dir) => remotePath === dir || remotePath.startsWith(`${dir}/`));
   }
 
+  /**
+   * The same reserved rule for walks whose entries are relative (the mapped
+   * local walk has no remote path to compare): a rel is reserved when ANY of
+   * its segments is one of the trash/backup directory names, so a reserved
+   * tree nested anywhere under the walked root — not only at the connection
+   * root — is never transferred in either direction.
+   */
+  function isReservedSyncRel(connection: ConnectionConfig, rel: string): boolean {
+    const reserved = new Set([
+      path.posix.basename(trashRootsFor(connection).dir),
+      '.trash-gangway',
+      path.posix.basename(backupRootsFor(connection).dir),
+      '.backup-gangway',
+    ]);
+    return rel.split('/').some((segment) => reserved.has(segment));
+  }
+
   async function walkRemoteSyncTree(
     adapter: SftpClientAdapter,
     connection: ConnectionConfig,
@@ -1976,9 +1993,11 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   /**
    * Download one server file from the remote tree into its mapped workspace
    * file. The node names its own connection -- resolve THAT one, never the
-   * workspace binding -- and an item outside every mapping returns silently:
-   * the context menu is only offered for mapped items, and the tmp-mirror
-   * download next to it stays the escape hatch.
+   * workspace binding. The remote menu is offered for every remote file, so
+   * choosing it on an item outside every mapping stays silent on purpose
+   * (nothing to resolve to, and a refusal prompt for a path the user can see
+   * is unmapped would only add noise); the tmp-mirror download next to it in
+   * the same menu is the escape hatch for that file.
    */
   async function runDownloadToWorkspaceFileCommand(node?: RemoteTreeNode): Promise<void> {
     const connection = resolveConnection(node);
@@ -2062,7 +2081,15 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     // `//rel` for a connection rooted at `/`, which servers reject.
     const joinRemote = (rel: string): string => (remoteRoot === '/' ? `/${rel}` : `${remoteRoot}/${rel}`);
     try {
-      const walk = await walkMappedLocalFiles(localRoot, (rel) => matchesExcludes(rel, excludes));
+      // Reserved trash/backup dirs are inherited from the sync rule (§4):
+      // composed into the same predicate as the connection's excludes, so a
+      // local `.trash-gangway`/`.gangway-backup-*` tree is never walked into
+      // the transfer list (it is counted with the excluded files — both are
+      // "left behind on purpose" and the confirm already accounts for them).
+      const walk = await walkMappedLocalFiles(
+        localRoot,
+        (rel) => isReservedSyncRel(connection, rel) || matchesExcludes(rel, excludes),
+      );
       const notes = mappedCountNotes(walk.excluded, walk.skippedSymlinks.length);
       if (walk.files.length === 0) {
         await vscode.window.showInformationMessage(`Nothing to upload for ${label}.${notes}`);
@@ -2102,7 +2129,6 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       );
       for (const remotePath of result.done) output.appendLine(`Uploaded ${remotePath}`);
       for (const rel of walk.skippedSymlinks) output.appendLine(`Upload skipped symlink: ${rel}`);
-      for (const entry of result.failed) output.appendLine(`Upload failed: ${entry.remotePath}: ${entry.message}`);
       if (result.failed.length > 0 || walk.skippedSymlinks.length > 0) output.show();
       treeProvider.refresh();
       await vscode.window.showInformationMessage(
@@ -2157,10 +2183,15 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       };
       const plan = await buildDownloadPlan({ path: root, isDirectory: true, isSymbolicLink: false, size: 0 }, listRemote);
       const tasks: Array<{ remotePath: string; rel: string }> = [];
+      const localDirs: string[] = [];
       const skippedSymlinks: string[] = [];
       let excluded = 0;
       for (const task of plan.tasks) {
         const rel = path.posix.relative(root, task.remotePath);
+        // Reserved trash/backup dirs are inherited from the sync rule (§4):
+        // never a task, never counted as an excluded user file — the same
+        // silent skip walkRemoteSyncTree applies.
+        if (isReservedSyncRel(connection, rel)) continue;
         if (matchesExcludes(rel, excludes)) {
           excluded += 1;
           continue;
@@ -2173,6 +2204,17 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
           continue;
         }
         tasks.push({ remotePath: task.remotePath, rel });
+      }
+      // The plan's directories (root first), mapped the same way the tasks
+      // are: pullMappedFile only mkdirs the parent of a file it transfers, so
+      // a remote directory holding no transferable file at all (truly empty,
+      // or only excluded/symlinked/reserved entries) would otherwise never
+      // materialize locally. Filtered by the two rules above, so no excluded
+      // or reserved tree is recreated in the workspace.
+      for (const dir of plan.dirs) {
+        const rel = path.posix.relative(root, dir);
+        if (matchesExcludes(rel, excludes) || isReservedSyncRel(connection, rel)) continue;
+        localDirs.push(rel === '' ? localRoot : path.join(localRoot, ...rel.split('/')));
       }
       const notes = mappedCountNotes(excluded, skippedSymlinks.length);
       if (tasks.length === 0) {
@@ -2187,6 +2229,11 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         'Cancel',
       );
       if (choice !== downloadLabel) return;
+      // Directories exist before their files (and whether or not they have
+      // any): cheap, recursive, and idempotent for the dirs a file already
+      // creates on its own.
+      const fs = (await import('node:fs/promises')).default;
+      for (const dir of localDirs) await fs.mkdir(dir, { recursive: true });
       const result = await withCancellableProgress(`Downloading ${label}`, (signal, reportProgress) =>
         (async () => {
           const done: string[] = [];
@@ -2208,7 +2255,6 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       );
       for (const remotePath of result.done) output.appendLine(`Downloaded ${remotePath}`);
       for (const skipped of skippedSymlinks) output.appendLine(`Download skipped ${skipped}`);
-      for (const entry of result.failed) output.appendLine(`Download failed: ${entry.remotePath}: ${entry.message}`);
       if (result.failed.length > 0 || skippedSymlinks.length > 0) output.show();
       treeProvider.refresh();
       await vscode.window.showInformationMessage(
@@ -2242,9 +2288,10 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   /**
    * Download one server folder from the remote tree into its mapped
    * workspace folder. The node names its own connection -- resolve THAT one,
-   * never the workspace binding -- and an item outside every mapping returns
-   * silently: the context menu is only offered for mapped items, and the
-   * tmp-mirror download next to it stays the escape hatch.
+   * never the workspace binding -- and the same refusal-free rule as the
+   * single-file command applies: the remote menu is offered for every remote
+   * folder, so an item outside every mapping returns silently, with the
+   * tmp-mirror download as the escape hatch.
    */
   async function runDownloadToWorkspaceFolderCommand(node?: RemoteTreeNode): Promise<void> {
     const connection = resolveConnection(node);

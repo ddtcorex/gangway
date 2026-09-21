@@ -47,6 +47,15 @@ export async function pushMappedFile(
  * atomicity/robustness, not a backup feature, so it stays inside the pure-B
  * carve-out. No sidecar is written next to workspace files (same litter
  * rule as workspace sync).
+ *
+ * Mode policy (explicit, because a pull must not silently change what the
+ * user can do with the file): an existing `localDest` keeps ITS mode across
+ * the pull — the mode is read before the transfer and re-applied after the
+ * rename, so pulling over a 0600 secrets file (or an executable script)
+ * neither widens nor loses its permissions. A destination that does not
+ * exist yet keeps the staging file's default mode (the process umask
+ * applied to a fresh file): there is no prior mode to preserve, and
+ * inventing one would be a policy this command has no basis for.
  */
 export async function pullMappedFile(
   client: MappedGetClient,
@@ -55,6 +64,10 @@ export async function pullMappedFile(
 ): Promise<void> {
   await fs.mkdir(path.dirname(localDest), { recursive: true });
   const stagingPath = `${localDest}.gangway-downloading`;
+  const previousMode = await fs.stat(localDest).then(
+    (stat) => stat.mode & 0o7777,
+    () => undefined,
+  );
   try {
     await client.fastGet(remotePath, stagingPath);
   } catch (err) {
@@ -65,7 +78,20 @@ export async function pullMappedFile(
     }
     throw err;
   }
-  await fs.rename(stagingPath, localDest);
+  // A failed rename would otherwise strand the fully-downloaded staging file
+  // next to the destination forever (nothing else ever collects it): remove
+  // it, keeping the rename error as the one the caller sees and retries on.
+  try {
+    await fs.rename(stagingPath, localDest);
+  } catch (err) {
+    try {
+      await fs.rm(stagingPath, { force: true });
+    } catch {
+      /* keep the original error */
+    }
+    throw err;
+  }
+  if (previousMode !== undefined) await fs.chmod(localDest, previousMode);
 }
 
 /**
@@ -80,8 +106,10 @@ export async function pullMappedFile(
  * every file beneath them counts into `excluded` and the confirm dialog
  * stays honest — same convention as walkLocalSyncTree. `skippedSymlinks` is
  * reported separately from `excluded` (pattern hits) so the dialog can name
- * both reasons; the symlink check runs before the exclusion test, so an
- * excluded symlink is still reported, never silently folded into `excluded`.
+ * both reasons, and the actual order is: `exclude()` is evaluated for every
+ * entry first, then a symlink is recorded in `skippedSymlinks` before any
+ * `excluded` counting — so an excluded symlink is still reported as a
+ * symlink and never silently folded into `excluded`.
  */
 export async function walkMappedLocalFiles(
   localRoot: string,
