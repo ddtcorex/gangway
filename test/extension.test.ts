@@ -67,6 +67,7 @@ vi.mock('../src/transfer/connectionPool', () => ({
 }));
 
 import { activate } from '../src/extension';
+import { AuditLog } from '../src/auditLog';
 import { ConnectionPool } from '../src/transfer/connectionPool';
 import type { ConnectionManager } from '../src/connectionManager';
 import { writeSidecar } from '../src/tmpStore';
@@ -582,19 +583,87 @@ describe('activate - realistic command invocation', () => {
       infoSpy.mockRestore();
     });
 
-    it('gangway.deleteRemote retries the trash move when the user picks Retry', async () => {
-      mockWindow.__test_queueWarning('Move to Trash', 'Move to Trash');
-      mockWindow.__test_queueError('Retry');
-      fakeRawClient.posixRename.mockRejectedValueOnce(new Error('boom'));
-      fakeRawClient.stat.mockResolvedValue({ size: 5, modifyTime: 1, isDirectory: false, isSymbolicLink: false });
+    it('gangway.deleteRemote hard-deletes a file with permanence copy and a delete audit line', async () => {
+      mockWindow.__test_queueWarning('Delete');
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
 
       await handlers.get('gangway.deleteRemote')!(fileNode('/var/www/app/a.php'));
 
-      expect(fakeRawClient.posixRename).toHaveBeenCalledTimes(2);
-      expect(fakeRawClient.posixRename).toHaveBeenLastCalledWith(
-        '/var/www/app/a.php',
-        expect.stringMatching(/\.gangway-trash-[0-9a-f]{10}\//),
+      expect(warnSpy).toHaveBeenCalledWith(
+        'Permanently delete /var/www/app/a.php on "staging"? There is no undo.',
+        'Delete',
+        'Cancel',
       );
+      expect(fakeRawClient.delete).toHaveBeenCalledWith('/var/www/app/a.php');
+      expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+      expect(infoSpy).toHaveBeenCalledWith('Permanently deleted /var/www/app/a.php.');
+      const logPath = path.join(os.tmpdir(), 'gangway-global-storage', 'sftp-hotfix-uploads.log');
+      const contents = await fs.readFile(logPath, 'utf8');
+      expect(JSON.parse(contents.trim().split('\n').pop()!)).toMatchObject({
+        connectionId: connection.id,
+        remotePath: '/var/www/app/a.php',
+        op: 'delete',
+      });
+      warnSpy.mockRestore();
+      infoSpy.mockRestore();
+    });
+
+    it('gangway.deleteRemote recursive-rmdirs a folder after typed confirm', async () => {
+      mockWindow.__test_queueInput('dir');
+      const inputSpy = vi.spyOn(vscode.window, 'showInputBox');
+
+      await handlers.get('gangway.deleteRemote')!(folderNode('/var/www/app/dir'));
+
+      expect(inputSpy).toHaveBeenCalledWith({
+        prompt: expect.stringContaining('permanently delete'),
+      });
+      expect(inputSpy.mock.calls[0][0]).toMatchObject({
+        prompt: expect.stringContaining('There is no undo.'),
+      });
+      expect(fakeRawClient.rmdir).toHaveBeenCalledWith('/var/www/app/dir', true);
+      inputSpy.mockRestore();
+    });
+
+    it('gangway.deleteRemote deletes the link, never recursing, for a symlink entry', async () => {
+      mockWindow.__test_queueWarning('Delete');
+
+      await handlers.get('gangway.deleteRemote')!({
+        connectionId: connection.id,
+        entry: { path: '/var/www/app/link', isDirectory: false, isSymbolicLink: true, size: 0 },
+      });
+
+      expect(fakeRawClient.delete).toHaveBeenCalledWith('/var/www/app/link');
+      expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
+    });
+
+    it('gangway.deleteRemote surfaces rmdir failure with no success message and no delete audit', async () => {
+      mockWindow.__test_queueInput('dir');
+      fakeRawClient.rmdir.mockRejectedValueOnce(new Error('boom'));
+      const errorSpy = vi.spyOn(vscode.window, 'showErrorMessage');
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.deleteRemote')!(folderNode('/var/www/app/dir'));
+
+      expect(errorSpy).toHaveBeenCalled();
+      expect(infoSpy).not.toHaveBeenCalledWith(expect.stringContaining('Permanently deleted'));
+      errorSpy.mockRestore();
+      infoSpy.mockRestore();
+    });
+
+    it('gangway.deleteRemote still reports success when the audit append fails', async () => {
+      mockWindow.__test_queueWarning('Delete');
+      const appendSpy = vi.spyOn(AuditLog.prototype, 'append').mockRejectedValueOnce(new Error('EACCES'));
+      const errorSpy = vi.spyOn(vscode.window, 'showErrorMessage');
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.deleteRemote')!(fileNode('/var/www/app/a.php'));
+
+      expect(infoSpy).toHaveBeenCalledWith('Permanently deleted /var/www/app/a.php.');
+      expect(errorSpy).not.toHaveBeenCalled();
+      appendSpy.mockRestore();
+      errorSpy.mockRestore();
+      infoSpy.mockRestore();
     });
 
     it.each([

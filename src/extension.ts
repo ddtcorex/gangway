@@ -29,23 +29,17 @@ import { resolveFileConflict, type ConflictResolutionUi } from './ui/conflictRes
 import { checkEditSession, acquireEditSession, releaseEditSession } from './editSession';
 import {
   FrozenError,
+  assertInsideRoot,
   assertMutatingAllowed,
-  backupRootsFor,
   chmodRemote,
   collectDropUploads,
   createRemote,
   duplicateRemote,
-  emptyTrash,
   guardUploadTarget,
-  inventoryTrash,
   isNotFoundError,
-  moveToTrash,
   parseUriList,
   pasteEntries,
   renameRemote,
-  restoreEntries,
-  sweepOldRemoteDirs,
-  trashRootsFor,
   typedConfirmMatches,
 } from './remoteOps';
 import { clearClipboard, copyToClipboard, cutToClipboard, type ClipboardState } from './ui/treeClipboard';
@@ -169,36 +163,8 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         raceWithCancellation(pool.getClient(connection), token, () => pool.invalidate(connection.id)),
     );
     const adapter = new SftpClientAdapter(client as unknown as RawSftpClient);
-    // Trash/backup retention is lazy, not boot-time: the first successful
-    // connect per connection sweeps expired trash/backup entries once per
-    // session. A boot-time sweep would SSH on startup, which this extension
-    // never does unasked.
-    void sweepTrashFor(connection, adapter);
     return adapter;
   };
-
-  const sweptTrashRoots = new Set<string>();
-
-  /** Trash + backup retention: 30 days, swept lazily on first connect (see getAdapter). */
-  const TRASH_BACKUP_RETENTION_MS = 30 * 24 * 3600 * 1000;
-
-  async function sweepTrashFor(connection: ConnectionConfig, adapter: SftpClientAdapter): Promise<void> {
-    if (sweptTrashRoots.has(connection.id)) return;
-    sweptTrashRoots.add(connection.id);
-    const roots = [
-      trashRootsFor(connection).dir,
-      `${connection.remotePath}/.trash-gangway`,
-      backupRootsFor(connection).dir,
-      `${connection.remotePath}/.backup-gangway`,
-    ];
-    for (const root of roots) {
-      try {
-        await sweepOldRemoteDirs(adapter, root, TRASH_BACKUP_RETENTION_MS);
-      } catch {
-        // Best-effort: a later command retries the sweep the same way.
-      }
-    }
-  }
 
   /**
    * A listing entry the server sent that could not be turned into a safe
@@ -1130,33 +1096,36 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     const target = node.entry.path;
     try {
       const adapter = await getAdapter(connection);
+      assertInsideRoot(connection, target);
       if (!node.entry.isDirectory) {
         const choice = await vscode.window.showWarningMessage(
-          `Move ${target} to the Gangway trash on the server?`,
-          'Move to Trash',
+          `Permanently delete ${target} on "${connection.name}"? There is no undo.`,
+          'Delete',
           'Cancel',
         );
-        if (choice !== 'Move to Trash') return;
-        await moveToTrash(adapter, connection, target, auditLog, {
-          onAuditError: (message) => output.appendLine(message),
-        });
+        if (choice !== 'Delete') return;
+        await adapter.delete(target);
       } else {
         const fileCount = await countRemoteFiles(adapter, target);
         const base = path.posix.basename(target);
         const typed = await vscode.window.showInputBox({
-          prompt: `Type "${base}" to move this folder (${fileCount} file(s)) to the Gangway trash`,
+          prompt: `Type "${base}" to permanently delete this folder (${fileCount} file(s)). There is no undo.`,
         });
         if (!typedConfirmMatches(base, typed)) {
           await vscode.window.showInformationMessage('Delete cancelled: the typed name did not match.');
           return;
         }
-        await moveToTrash(adapter, connection, target, auditLog, {
-          count: fileCount,
-          onAuditError: (message) => output.appendLine(message),
-        });
+        await adapter.rmdir(target, true);
+      }
+      try {
+        await auditLog.append({ connectionId: connection.id, remotePath: target, timestamp: Date.now(), op: 'delete' });
+      } catch (err) {
+        output.appendLine(
+          `Deleted ${target}, but could not write the audit log entry: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
       treeProvider.refresh();
-      await vscode.window.showInformationMessage(`Moved ${target} to trash.`);
+      await vscode.window.showInformationMessage(`Permanently deleted ${target}.`);
     } catch (err) {
       await showCommandError(err, { retry: () => runDeleteRemoteCommand(node), connection });
     }
