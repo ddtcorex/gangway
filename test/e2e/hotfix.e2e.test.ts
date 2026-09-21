@@ -80,8 +80,8 @@ export async function run(): Promise<void> {
       warnedAboutConflict = true;
       return undefined;
     }
-    // File/folder-ops suite: confirm trash moves the same way a user would.
-    if (/to the Gangway trash/i.test(msg)) return 'Move to Trash';
+    // File/folder-ops suite: confirm permanent deletes the same way a user would.
+    if (/There is no undo/i.test(msg)) return 'Delete';
     return undefined;
   }) as unknown as ShowMessage;
 
@@ -245,33 +245,26 @@ export async function run(): Promise<void> {
   log('conflict block verified: server content untouched');
 
   // --- File/folder ops path ------------------------------------------------
-  // Delete → restore → rename → folder sync, all through the real registered
+  // Delete → rename → folder sync, all through the real registered
   // commands against the real server. Input/modal answers come from the
-  // shared stubs at the top (trash confirm, input queue, pick-all,
+  // shared stubs at the top (delete confirm, input queue, pick-all,
   // auto-dismissed info): nothing here can hang headless.
   const opsNode = (remotePath: string, isDirectory: boolean) => ({
     connectionId: connection.id,
     entry: { path: remotePath, isDirectory, isSymbolicLink: false, size: 0 },
   });
 
-  log('invoking gangway.deleteRemote on conflict.php (expect trash move)');
+  log('invoking gangway.deleteRemote on conflict.php (expect permanent delete)');
   await vscode.commands.executeCommand('gangway.deleteRemote', opsNode('/var/www/conflict.php', false));
   log('gangway.deleteRemote returned');
   const conflictHostPath = path.join(repoRoot(), 'test', 'fixtures', 'sftp-data', 'conflict.php');
   await assert.rejects(fs.stat(conflictHostPath), 'expected the deleted file gone from its server path');
-  const trashHosts = await fs.readdir(path.join(repoRoot(), 'test', 'fixtures', 'sftp-data', '.trash-gangway'));
-  assert.ok(trashHosts.length > 0, 'expected a trash stamp dir in the fallback trash root');
-  log('trash move verified on the server tree');
-
-  log('invoking gangway.restoreFromTrash');
-  await vscode.commands.executeCommand('gangway.restoreFromTrash');
-  log('gangway.restoreFromTrash returned');
-  assert.strictEqual(
-    await fs.readFile(conflictHostPath, 'utf8'),
-    "<?php echo 'base';",
-    'expected the trashed file restored with its original bytes',
+  const fixtureNames = await fs.readdir(path.join(repoRoot(), 'test', 'fixtures', 'sftp-data'));
+  assert.ok(
+    fixtureNames.every((n) => !n.startsWith('.gangway-trash-') && n !== '.trash-gangway'),
+    'expected no trash dir created by the delete',
   );
-  log('restore verified with original bytes');
+  log('permanent delete verified on the server tree');
 
   log('invoking gangway.renameRemote on nested/inner.php');
   inputQueue.push('renamed.php');
