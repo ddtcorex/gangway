@@ -2,6 +2,7 @@ import * as assert from 'node:assert';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import * as vscode from 'vscode';
+import { waitForWriteBucket } from './mtimeGap';
 
 /**
  * This suite runs inside a real VS Code extension host (@vscode/test-electron)
@@ -320,11 +321,16 @@ export async function run(): Promise<void> {
   );
   log('workspace up verified on the real server-side file');
 
-  // Same-size out-of-band server edit, but the no-sidecar fallback compares
-  // mtimes with a 2s tolerance: sleep past it so the download direction is
-  // unambiguous instead of flaky.
-  log('sleeping 2600ms to clear the no-baseline mtime tolerance');
-  await sleep(2600);
+  // Same-size out-of-band server edit, but the no-sidecar fallback snaps to
+  // Same when |local - remote| <= 2s, and SFTP floors server mtimes to whole
+  // seconds: gate the write on the wall clock so it lands in a bucket
+  // strictly past local + tolerance, then write immediately. A fixed sleep
+  // flakes both ways -- a post-write 2600ms sleep left a 1970ms floored gap
+  // on CI 2026-09-21 (wrongly No differences), and no sleep at all lands in
+  // the same bucket as the upload (~18ms gap, CI 2026-09-21 rerun).
+  const localMs = (await fs.stat(path.join(e2eWsDir, 'mapped.php'))).mtimeMs;
+  const bucket = await waitForWriteBucket(localMs);
+  log(`write bucket cleared past local + tolerance (local=${bucket.localMtimeMs} bucket=${bucket.writeFloorMs})`);
   await fs.writeFile(hostMappedPath, "<?php echo 'w2';", 'utf8');
   log('wrote out-of-band server edit');
   log('invoking gangway.syncWorkspaceDown');
