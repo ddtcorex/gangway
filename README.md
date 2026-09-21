@@ -54,6 +54,9 @@ raw `ssh`, or a full sync tool built for a workflow you don't need.
   its context menu.
 - **Compare with server.** Diff your local copy against a fresh pull from
   the server before deciding whether to push or discard.
+- **Compare workspace with server.** Right-click a workspace file for a
+  read-only diff against the mapped server path — for looking only, with
+  no upload/download offered afterwards.
 - **Mapped sync.** Right-click a workspace file/folder to push it to (or
   pull it from) the mapped remote path — one confirm, direct overwrite, no
   backup. Right-click a remote file/folder for the same trip in reverse

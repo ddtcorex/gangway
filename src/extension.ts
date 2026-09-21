@@ -52,6 +52,7 @@ import { clearClipboard, copyToClipboard, cutToClipboard, type ClipboardState } 
 import { classifyRow, describeExcludedSelection, mapLimit, toQuickPickRow, type SyncRow } from './syncPreview';
 import { effectiveExcludes, matchesExcludes } from './excludes';
 import { pullMappedFile, pushMappedFile, walkMappedLocalFiles } from './mappedTransfer';
+import { diffTitleForWorkspaceCompare, fetchServerCopyForCompare } from './ui/compareWorkspace';
 import { defaultMapping, isRemoteInsideRoot, resolveLocalToRemote, resolveRemoteToLocal } from './pathMapping';
 import type { FileConflictDecision } from './conflictGuard';
 import type { ConnectionConfig, SidecarMeta } from './types';
@@ -1956,6 +1957,54 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     if (choice === 'Open Mappings') await vscode.commands.executeCommand('gangway.manageRemotes');
   }
 
+  /**
+   * Compare one workspace file against the server's current bytes, read-only:
+   * resolve through the ACTIVE connection's mappings, fetch fresh bytes under
+   * a cancellable progress notification, and open `vscode.diff`. The fetch is
+   * owner-only and atomic (stage-then-rename, same shape as
+   * `transfer/downloadFile.ts`) so a failed second compare never truncates
+   * the revisit-kept staging copy. No frozen gate, no confirm, no
+   * Upload/Download offer afterwards -- for looking only. A remote that does
+   * not exist is a plain warning (no action): there is nothing to diff.
+   */
+  async function runCompareWorkspaceFileCommand(uri?: { fsPath: string }): Promise<void> {
+    const connection = requireActiveConnection();
+    const fsPath = uri?.fsPath ?? vscode.window.activeTextEditor?.document.uri.fsPath;
+    if (!connection || !fsPath) return;
+    const roots = workspaceRoots();
+    const remotePath = resolveLocalToRemote(connection, roots, fsPath);
+    if (!remotePath) {
+      await warnNoMapping(connection, roots, fsPath);
+      return;
+    }
+    try {
+      const adapter = await getAdapter(connection);
+      const remoteStat = await adapter.stat(remotePath).catch((statErr: unknown) => {
+        if (isNotFoundError(statErr)) return undefined;
+        throw statErr;
+      });
+      if (!remoteStat) {
+        await vscode.window.showWarningMessage(`No such file on server: ${remotePath}.`);
+        return;
+      }
+      if (remoteStat.isDirectory) {
+        await vscode.window.showWarningMessage('Compare works on files, not folders.');
+        return;
+      }
+      const stagingPath = await withCancellableProgress(`Comparing ${path.posix.basename(remotePath)}`, () =>
+        fetchServerCopyForCompare(adapter, connection, remotePath),
+      );
+      await vscode.commands.executeCommand(
+        'vscode.diff',
+        vscode.Uri.file(fsPath),
+        vscode.Uri.file(stagingPath),
+        diffTitleForWorkspaceCompare(remotePath),
+      );
+    } catch (err) {
+      await showCommandError(err, { retry: () => runCompareWorkspaceFileCommand(uri), connection });
+    }
+  }
+
   /** Upload one workspace file through its mapping (explorer Uri -> resolve -> confirm -> pushMappedFile). */
   async function runUploadMappedFileCommand(uri?: { fsPath: string }): Promise<void> {
     const connection = requireActiveConnection();
@@ -2539,6 +2588,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     vscode.commands.registerCommand('gangway.uploadMappedFile', (uri?: { fsPath: string }) => runUploadMappedFileCommand(uri)),
     vscode.commands.registerCommand('gangway.downloadMappedFile', (uri?: { fsPath: string }) => runDownloadMappedFileCommand(uri)),
     vscode.commands.registerCommand('gangway.downloadToWorkspaceFile', (node?: RemoteTreeNode) => runDownloadToWorkspaceFileCommand(node)),
+    vscode.commands.registerCommand('gangway.compareWorkspaceFile', (uri?: { fsPath: string }) => runCompareWorkspaceFileCommand(uri)),
     vscode.commands.registerCommand('gangway.uploadMappedFolder', (uri?: { fsPath: string }) => runUploadMappedFolderCommand(uri)),
     vscode.commands.registerCommand('gangway.downloadMappedFolder', (uri?: { fsPath: string }) => runDownloadMappedFolderCommand(uri)),
     vscode.commands.registerCommand('gangway.downloadToWorkspaceFolder', (node?: RemoteTreeNode) => runDownloadToWorkspaceFolderCommand(node)),
