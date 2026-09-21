@@ -206,6 +206,21 @@ describe('mapped single file commands', () => {
     expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
   });
 
+  it('uploads the active editor file when invoked with no uri (keybinding)', async () => {
+    const localFile = path.join(wsRoot, 'app.php');
+    await fs.writeFile(localFile, '<?php echo 1;');
+    vscode.window.activeTextEditor = { document: { uri: { fsPath: localFile } } } as unknown as vscode.TextEditor;
+    mockWindow.__test_queueWarning('Upload');
+    const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+    await handlers.get('gangway.uploadMappedFile')!();
+
+    expect(fakeRawClient.fastPut).toHaveBeenCalledWith(localFile, '/var/www/app.php.tmp');
+    expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/app.php.tmp', '/var/www/app.php');
+    expect(infoSpy).toHaveBeenCalledWith(`Uploaded ${localFile} → /var/www/app.php.`);
+    infoSpy.mockRestore();
+  });
+
   it('warns with the effective default and offers Open Mappings when the file sits outside every mapping', async () => {
     const outside = path.join(tmpHome, 'elsewhere', 'app.php');
     await fs.mkdir(path.dirname(outside), { recursive: true });
