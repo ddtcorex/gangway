@@ -40,7 +40,8 @@ async function resetFixture(): Promise<void> {
         entry.startsWith('.gangway-backup-') ||
         entry === '.trash-gangway' ||
         entry === '.backup-gangway' ||
-        entry === 'e2e-ws'
+        entry === 'e2e-ws' ||
+        entry === 'mapped-sync'
       ) {
         await fs.rm(path.join(fixtureDir, entry), { recursive: true, force: true });
       }
@@ -84,30 +85,64 @@ async function main() {
   }
 }
 
+/**
+ * The suites the extension host runs, in order. Each one gets its own fresh
+ * workspace folder and VS Code instance, so neither can inherit state (a bound
+ * connection, an open editor) from the other.
+ */
+const SUITES = ['e2e/hotfix.e2e.test.js', 'e2e/mapping-sync.e2e.test.js'];
+
+/**
+ * `--grep <text>` / `--grep=<text>` selects the suites whose file name
+ * contains <text> (case-insensitive), which is what
+ * `pnpm run test:e2e -- --grep "mapping-sync"` relies on to run one suite
+ * while iterating. No --grep means every suite runs — the plain
+ * `node ./out/test/runE2e.js` CI step, unchanged in behavior.
+ */
+function selectedSuites(argv: readonly string[]): string[] {
+  let pattern: string | undefined;
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--grep') pattern = argv[i + 1];
+    else if (arg.startsWith('--grep=')) pattern = arg.slice('--grep='.length);
+  }
+  if (pattern === undefined) return SUITES;
+  const needle = pattern.toLowerCase();
+  const matched = SUITES.filter((suite) => suite.toLowerCase().includes(needle));
+  if (matched.length === 0) {
+    throw new Error(`--grep "${pattern}" matched no suite; available: ${SUITES.join(', ')}`);
+  }
+  return matched;
+}
+
 async function runSuite() {
   await resetFixture();
 
   const extensionDevelopmentPath = repoRoot;
-  const extensionTestsPath = path.resolve(__dirname, 'e2e/hotfix.e2e.test.js');
 
-  // Isolated empty workspace folder so the extension host boots with a real
-  // (if empty) workspace rather than no folder at all -- closer to how a
-  // real user invokes the commands under test.
-  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), 'gangway-e2e-workspace-'));
+  for (const suite of selectedSuites(process.argv.slice(2))) {
+    const extensionTestsPath = path.resolve(__dirname, suite);
 
-  await runTests({
-    extensionDevelopmentPath,
-    extensionTestsPath,
-    launchArgs: [workspacePath, '--disable-gpu'],
-    // runTests copies the whole parent environment into the VS Code child.
-    // If the caller's shell has ELECTRON_RUN_AS_NODE=1 (editor-integrated and
-    // agent-hosted terminals commonly do), VS Code boots as plain Node, tries
-    // to `require()` the first positional launch arg, and dies with an
-    // inscrutable "Cannot find module '/tmp/gangway-e2e-workspace-XXXX'" that
-    // looks nothing like its actual cause. Node's spawn drops keys whose
-    // value is undefined, so this removes the variable for the child only.
-    extensionTestsEnv: { ELECTRON_RUN_AS_NODE: undefined },
-  });
+    // Isolated empty workspace folder so the extension host boots with a real
+    // (if empty) workspace rather than no folder at all -- closer to how a
+    // real user invokes the commands under test.
+    const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), 'gangway-e2e-workspace-'));
+    console.log(`[e2e] running ${suite}`);
+
+    await runTests({
+      extensionDevelopmentPath,
+      extensionTestsPath,
+      launchArgs: [workspacePath, '--disable-gpu'],
+      // runTests copies the whole parent environment into the VS Code child.
+      // If the caller's shell has ELECTRON_RUN_AS_NODE=1 (editor-integrated and
+      // agent-hosted terminals commonly do), VS Code boots as plain Node, tries
+      // to `require()` the first positional launch arg, and dies with an
+      // inscrutable "Cannot find module '/tmp/gangway-e2e-workspace-XXXX'" that
+      // looks nothing like its actual cause. Node's spawn drops keys whose
+      // value is undefined, so this removes the variable for the child only.
+      extensionTestsEnv: { ELECTRON_RUN_AS_NODE: undefined },
+    });
+  }
 }
 
 main().catch((err) => {
