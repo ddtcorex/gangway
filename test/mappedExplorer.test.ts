@@ -402,6 +402,73 @@ describe('mapped folder commands', () => {
     infoSpy.mockRestore();
   });
 
+  it('never transfers the reserved trash/backup trees the sync rule inherits', async () => {
+    // Spec §4 inherits the sync walk's reserved-dir rule: `.trash-gangway`
+    // (and its siblings) is Gangway's own deleted-file store, so a mapped
+    // download must neither pull its contents into the workspace nor recreate
+    // the directory there. Listed explicitly, so the skip is the filter at
+    // work -- not a listing that simply never mentioned the tree.
+    const localRoot = path.join(wsRoot, 'app');
+    fakeRawClient.list.mockImplementation(async (dirPath: string) =>
+      dirPath === '/var/www/app'
+        ? [
+            { name: 'one.php', type: '-', size: 5 },
+            { name: '.trash-gangway', type: 'd' },
+          ]
+        : dirPath === '/var/www/app/.trash-gangway'
+          ? [{ name: 'deleted.php', type: '-', size: 9 }]
+          : [],
+    );
+    mockWindow.__test_queueWarning('Download 1 files');
+    const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+    const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+    await handlers.get('gangway.downloadMappedFolder')!({ fsPath: localRoot });
+
+    // The reserved file is not a task and not a count: the confirm describes
+    // exactly the one user file that will move.
+    expect(warnSpy).toHaveBeenCalledWith(
+      `Download 1 file(s) from /var/www/app → ${localRoot}? This overwrites your local files.`,
+      'Download 1 files',
+      'Cancel',
+    );
+    expect(fakeRawClient.fastGet).toHaveBeenCalledTimes(1);
+    expect(fakeRawClient.fastGet).toHaveBeenCalledWith(
+      '/var/www/app/one.php',
+      `${path.join(localRoot, 'one.php')}.gangway-downloading`,
+    );
+    expect(infoSpy).toHaveBeenCalledWith(`Downloaded 1 file(s) into ${localRoot}.`);
+    // Neither the trash file nor the trash DIRECTORY it lived in appeared.
+    expect(await fs.readdir(localRoot)).toEqual(['one.php']);
+    warnSpy.mockRestore();
+    infoSpy.mockRestore();
+  });
+
+  it('materializes a remote directory that holds no file at all', async () => {
+    // An empty remote directory has no task of its own, and pullMappedFile
+    // only mkdirs a transferred file's parent -- so without the plan's dirs
+    // the directory would silently never appear locally.
+    const localRoot = path.join(wsRoot, 'app');
+    fakeRawClient.list.mockImplementation(async (dirPath: string) =>
+      dirPath === '/var/www/app'
+        ? [
+            { name: 'one.php', type: '-', size: 5 },
+            { name: 'empty', type: 'd' },
+            { name: 'nested', type: 'd' },
+          ]
+        : dirPath === '/var/www/app/nested'
+          ? [{ name: 'deeper', type: 'd' }]
+          : [],
+    );
+    mockWindow.__test_queueWarning('Download 1 files');
+
+    await handlers.get('gangway.downloadMappedFolder')!({ fsPath: localRoot });
+
+    expect((await fs.stat(path.join(localRoot, 'empty'))).isDirectory()).toBe(true);
+    expect((await fs.stat(path.join(localRoot, 'nested', 'deeper'))).isDirectory()).toBe(true);
+    expect(await fs.readdir(path.join(localRoot, 'empty'))).toEqual([]);
+  });
+
   it('downloads the mapped remote folder into the workspace tree, skipping a symlinked entry', async () => {
     const localRoot = path.join(wsRoot, 'app');
     fakeRawClient.list.mockImplementation(async (dirPath: string) =>
@@ -693,6 +760,7 @@ describe('pure-B pins (spec §4 carve-out)', () => {
     // The offered action must actually do something: a button that discards
     // the choice is a bug, not a TODO.
     expect(execSpy).toHaveBeenCalledWith('gangway.manageRemotes');
+    expect(handlers.has('gangway.manageRemotes')).toBe(true);
     expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
     expect(fakeRawClient.mkdir).not.toHaveBeenCalled();
     warnSpy.mockRestore();

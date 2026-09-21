@@ -67,6 +67,65 @@ describe('pullMappedFile', () => {
     await expect(fs.stat(`${dest}.gangway-downloading`)).rejects.toMatchObject({ code: 'ENOENT' });
     await fs.rm(dir, { recursive: true, force: true });
   });
+
+  it('removes the fully-downloaded staging file when the rename fails, then rethrows', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mapped-pull-'));
+    const dest = path.join(dir, 'app.php');
+    // A directory at the destination makes the real rename(2) fail (EISDIR),
+    // so this is a genuine rename failure, not a mocked rejection: the point
+    // is that the staged bytes are collected instead of being stranded
+    // forever as `<dest>.gangway-downloading` next to the destination.
+    await fs.mkdir(dest, { recursive: true });
+    const client = {
+      fastGet: vi.fn().mockImplementation(async (_r: string, l: string) => {
+        await fs.writeFile(l, 'complete server bytes');
+      }),
+    };
+
+    await expect(pullMappedFile(client, '/var/www/app.php', dest)).rejects.toThrow();
+
+    await expect(fs.access(`${dest}.gangway-downloading`)).rejects.toMatchObject({ code: 'ENOENT' });
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('preserves an existing destination mode across the pull', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mapped-pull-'));
+    const dest = path.join(dir, 'secrets.env');
+    await fs.writeFile(dest, 'previous copy');
+    // 0600 explicitly, never via the write mode: the umask would otherwise
+    // decide whether the assertion below can even discriminate.
+    await fs.chmod(dest, 0o600);
+    const client = {
+      fastGet: vi.fn().mockImplementation(async (_r: string, l: string) => {
+        await fs.writeFile(l, 'server');
+      }),
+    };
+
+    await pullMappedFile(client, '/var/www/secrets.env', dest);
+
+    expect(await fs.readFile(dest, 'utf8')).toBe('server');
+    expect((await fs.stat(dest)).mode & 0o7777).toBe(0o600);
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('leaves a fresh destination at the staging default mode (no invented policy)', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mapped-pull-'));
+    const dest = path.join(dir, 'new.php');
+    // 0640 is deliberately not what a default umask produces, so it can only
+    // survive if the destination was never chmodded by this command.
+    const client = {
+      fastGet: vi.fn().mockImplementation(async (_r: string, l: string) => {
+        await fs.writeFile(l, 'server');
+        await fs.chmod(l, 0o640);
+      }),
+    };
+
+    await pullMappedFile(client, '/var/www/new.php', dest);
+
+    expect(await fs.readFile(dest, 'utf8')).toBe('server');
+    expect((await fs.stat(dest)).mode & 0o7777).toBe(0o640);
+    await fs.rm(dir, { recursive: true, force: true });
+  });
 });
 
 describe('walkMappedLocalFiles', () => {

@@ -98,15 +98,28 @@ const SUITES = ['e2e/hotfix.e2e.test.js', 'e2e/mapping-sync.e2e.test.js'];
  * `pnpm run test:e2e -- --grep "mapping-sync"` relies on to run one suite
  * while iterating. No --grep means every suite runs — the plain
  * `node ./out/test/runE2e.js` CI step, unchanged in behavior.
+ *
+ * A `--grep` with no value is an error, never "no pattern": silently running
+ * every suite would look like the filter was applied and quietly re-run (and
+ * re-mutate) both fixture trees, which is the opposite of what the flag is
+ * for. The message mirrors the no-match error below.
  */
 function selectedSuites(argv: readonly string[]): string[] {
   let pattern: string | undefined;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === '--grep') pattern = argv[i + 1];
-    else if (arg.startsWith('--grep=')) pattern = arg.slice('--grep='.length);
+    if (arg === '--grep') {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith('--')) {
+        throw new Error(`--grep needs a value; usage: --grep <suite text>. Available: ${SUITES.join(', ')}`);
+      }
+      pattern = value;
+    } else if (arg.startsWith('--grep=')) pattern = arg.slice('--grep='.length);
   }
   if (pattern === undefined) return SUITES;
+  if (pattern === '') {
+    throw new Error(`--grep needs a value; usage: --grep <suite text>. Available: ${SUITES.join(', ')}`);
+  }
   const needle = pattern.toLowerCase();
   const matched = SUITES.filter((suite) => suite.toLowerCase().includes(needle));
   if (matched.length === 0) {
@@ -116,11 +129,15 @@ function selectedSuites(argv: readonly string[]): string[] {
 }
 
 async function runSuite() {
+  // Resolve the selection before touching the fixture: a bad --grep must fail
+  // fast, not after resetting (i.e. mutating) the bind-mounted fixture tree.
+  const suites = selectedSuites(process.argv.slice(2));
+
   await resetFixture();
 
   const extensionDevelopmentPath = repoRoot;
 
-  for (const suite of selectedSuites(process.argv.slice(2))) {
+  for (const suite of suites) {
     const extensionTestsPath = path.resolve(__dirname, suite);
 
     // Isolated empty workspace folder so the extension host boots with a real

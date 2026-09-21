@@ -58,7 +58,8 @@ raw `ssh`, or a full sync tool built for a workflow you don't need.
   pull it from) the mapped remote path — one confirm, direct overwrite, no
   backup. Right-click a remote file/folder for the same trip in reverse
   into the mapped workspace folder. Zero-config: the first workspace folder
-  maps to the connection path.
+  maps to the connection path. A pulled file keeps its existing local mode
+  when it already exists (a fresh destination gets the default).
 - **Conflict detection.** Uploading is refused, not silently overwritten,
   if the server copy has changed since you downloaded it.
 - **Edit-session awareness.** If the same file is already open for

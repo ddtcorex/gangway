@@ -28,7 +28,10 @@ import type { ConnectionConfig } from '../src/types';
  */
 const enabled = process.env.GANGWAY_SFTP === '1';
 
-const SSH = { host: '127.0.0.1', port: 2222, username: 'testuser' };
+// Port 2223: the fixture's host mapping (docker-compose.sftp.yml). It moved
+// off 2222, and on a dev machine that port is commonly another SSH server,
+// which turns these suites into a misleading "auth failed" instead of a test.
+const SSH = { host: '127.0.0.1', port: 2223, username: 'testuser' };
 
 const connection: ConnectionConfig = {
   id: 'ops-it',
@@ -65,9 +68,12 @@ describe.runIf(enabled)('remoteOps integration (docker sftp)', () => {
   }, 30_000);
 
   afterAll(async () => {
-    await adapter.rmdir(IT_ROOT, true).catch(() => {});
-    await raw.end().catch(() => {});
-    await fs.rm(tmpHome, { recursive: true, force: true });
+    // Guarded like the sibling integration suite: when beforeAll's connect
+    // throws, `adapter` was never assigned and the teardown must not add a
+    // second, louder failure on top of the real one.
+    if (adapter) await adapter.rmdir(IT_ROOT, true).catch(() => {});
+    if (raw) await raw.end().catch(() => {});
+    if (tmpHome) await fs.rm(tmpHome, { recursive: true, force: true });
   });
 
   it('rename moves server-side and refuses clashes', { timeout: 30_000 }, async () => {

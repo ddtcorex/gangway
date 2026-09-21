@@ -37,7 +37,9 @@ import { isNotFoundError } from '../../src/remoteOps';
  * instead of failing it. Confirm answers come from `answerWarning()` and are
  * only ever a label the handler actually offered; a mismatch or an
  * unconsumed answer fails loudly instead of letting the command silently
- * no-op and the suite pass vacuously.
+ * no-op and the suite pass vacuously. `answerWarning()` also opens a step:
+ * both the queued answer and the recorded fragment list are step-local, so a
+ * confirm an earlier command produced can never satisfy a later assertion.
  */
 
 type ShowMessage = typeof vscode.window.showWarningMessage;
@@ -131,7 +133,13 @@ export async function run(): Promise<void> {
     'test bug: the showWarningMessage stub did not actually replace the real property',
   );
 
-  /** Queues the label the next confirm must be answered with. */
+  /** Index into `warningCalls` where the current step begins. */
+  let stepStart = 0;
+
+  /** Queues the label the next confirm must be answered with, and opens a new
+   * step: the fragment list below is scoped from here, so `expectConfirmed`
+   * only ever sees the confirms the command about to run actually produced
+   * (an earlier step's confirm can never satisfy a later step's assertion). */
   function answerWarning(label: string): void {
     assert.strictEqual(
       pendingWarningAnswer,
@@ -139,6 +147,7 @@ export async function run(): Promise<void> {
       `test bug: a confirm answer was queued while "${pendingWarningAnswer}" was still unused`,
     );
     pendingWarningAnswer = label;
+    stepStart = warningCalls.length;
   }
 
   /** Fails unless the confirm was shown with `fragment` and its answer was
@@ -151,9 +160,10 @@ export async function run(): Promise<void> {
       `${step}: the queued confirm answer was never consumed — the command returned before asking`,
     );
     assert.strictEqual(warningAnswerProblem, undefined, `${step}: ${warningAnswerProblem}`);
+    const stepCalls = warningCalls.slice(stepStart);
     assert.ok(
-      warningCalls.some((call) => call.message.includes(fragment)),
-      `${step}: expected a confirm containing "${fragment}"; saw ${JSON.stringify(warningCalls.map((call) => call.message))}`,
+      stepCalls.some((call) => call.message.includes(fragment)),
+      `${step}: expected a confirm containing "${fragment}"; this step saw ${JSON.stringify(stepCalls.map((call) => call.message))}`,
     );
   }
 

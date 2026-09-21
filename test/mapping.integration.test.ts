@@ -32,7 +32,7 @@ function fakeKeyValueStore() {
   };
 }
 
-const SSH = { host: '127.0.0.1', port: 2222, username: 'testuser' };
+const SSH = { host: '127.0.0.1', port: 2223, username: 'testuser' };
 
 const connection: ConnectionConfig = {
   id: 'mapping-it',

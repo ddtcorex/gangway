@@ -107,6 +107,19 @@ describe.skipIf(process.env.GANGWAY_SFTP !== '1')('mapped transfer integration (
     await pullMappedFile(adapter, remotePath, localDest);
     expect(await fs.readFile(localDest, 'utf8')).toBe(original);
 
+    // The overwrite half of the same put: a SECOND push onto the path the
+    // first one just created. This is the case a plain SFTP rename cannot do
+    // (it fails when the destination exists), which is why pushMappedFile
+    // renames via posixRename -- so the new bytes must land and the "no .tmp
+    // orphan" guarantee must hold on this path too.
+    const replaced = "<?php echo 'second push ✓';\n";
+    await fs.writeFile(localSource, replaced, 'utf8');
+    await pushMappedFile(adapter, localSource, remotePath);
+    const rePushed = await adapter.stat(remotePath);
+    expect(rePushed).toMatchObject({ size: Buffer.byteLength(replaced), isDirectory: false });
+    await expectNotFound(() => adapter.stat(`${remotePath}.tmp`));
+    expect(await fetchRemoteText(remotePath, 'roundtrip.php')).toBe(replaced);
+
     // Pull reflects the LIVE server copy, not the local file it overwrote:
     // edit the server side out of band, dirty the destination, pull again.
     const serverContent = "<?php echo 'live-server';\n";
