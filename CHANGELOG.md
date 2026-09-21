@@ -2,7 +2,7 @@
 
 All notable changes to the Gangway extension are documented in this file.
 
-## [Unreleased]
+## [0.3.0] - 2026-09-21
 
 - BREAKING: removed server-side trash and backup (no remote footprint) —
   deletes are permanent with no undo and uploads overwrite directly.
