@@ -637,6 +637,27 @@ describe('activate - realistic command invocation', () => {
       expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
     });
 
+    it('gangway.deleteRemote retries the whole flow on Retry: recount, reconfirm, then delete and audit', async () => {
+      mockWindow.__test_queueInput('dir');
+      mockWindow.__test_queueInput('dir');
+      mockWindow.__test_queueError('Retry');
+      fakeRawClient.rmdir.mockRejectedValueOnce(new Error('boom'));
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.deleteRemote')!(folderNode('/var/www/app/dir'));
+
+      expect(fakeRawClient.rmdir).toHaveBeenCalledTimes(2);
+      expect(fakeRawClient.rmdir).toHaveBeenLastCalledWith('/var/www/app/dir', true);
+      expect(infoSpy).toHaveBeenCalledWith('Permanently deleted /var/www/app/dir.');
+      const logPath = path.join(os.tmpdir(), 'gangway-global-storage', 'sftp-hotfix-uploads.log');
+      const contents = await fs.readFile(logPath, 'utf8');
+      expect(JSON.parse(contents.trim().split('\n').pop()!)).toMatchObject({
+        remotePath: '/var/www/app/dir',
+        op: 'delete',
+      });
+      infoSpy.mockRestore();
+    });
+
     it('gangway.deleteRemote surfaces rmdir failure with no success message and no delete audit', async () => {
       mockWindow.__test_queueInput('dir');
       fakeRawClient.rmdir.mockRejectedValueOnce(new Error('boom'));

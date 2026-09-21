@@ -255,14 +255,18 @@ export async function run(): Promise<void> {
   });
 
   log('invoking gangway.deleteRemote on conflict.php (expect permanent delete)');
+  const fixtureDir = path.join(repoRoot(), 'test', 'fixtures', 'sftp-data');
+  const trashLike = (n: string) => n.startsWith('.gangway-trash-') || n === '.trash-gangway';
+  const trashBefore = (await fs.readdir(fixtureDir)).filter(trashLike);
   await vscode.commands.executeCommand('gangway.deleteRemote', opsNode('/var/www/conflict.php', false));
   log('gangway.deleteRemote returned');
-  const conflictHostPath = path.join(repoRoot(), 'test', 'fixtures', 'sftp-data', 'conflict.php');
+  const conflictHostPath = path.join(fixtureDir, 'conflict.php');
   await assert.rejects(fs.stat(conflictHostPath), 'expected the deleted file gone from its server path');
-  const fixtureNames = await fs.readdir(path.join(repoRoot(), 'test', 'fixtures', 'sftp-data'));
-  assert.ok(
-    fixtureNames.every((n) => !n.startsWith('.gangway-trash-') && n !== '.trash-gangway'),
-    'expected no trash dir created by the delete',
+  const trashAfter = (await fs.readdir(fixtureDir)).filter(trashLike);
+  assert.deepStrictEqual(
+    trashAfter,
+    trashBefore,
+    'expected the delete to create no new trash dir (legacy leftovers from old runs do not count)',
   );
   log('permanent delete verified on the server tree');
 
