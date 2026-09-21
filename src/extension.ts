@@ -1342,35 +1342,9 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   /**
    * Excludes are evaluated relative to the synced folder (not the
    * connection root): a pattern like `node_modules/**` hides that subtree
-   * wherever the sync starts. Reserved trash/backup dirs and local sidecar
-   * scratch files are never walkable, regardless of user patterns.
+   * wherever the sync starts. Local sidecar scratch files are never
+   * walkable, regardless of user patterns.
    */
-  function isReservedSyncPath(connection: ConnectionConfig, remotePath: string): boolean {
-    const reserved = [
-      trashRootsFor(connection).dir,
-      `${connection.remotePath}/.trash-gangway`,
-      backupRootsFor(connection).dir,
-      `${connection.remotePath}/.backup-gangway`,
-    ];
-    return reserved.some((dir) => remotePath === dir || remotePath.startsWith(`${dir}/`));
-  }
-
-  /**
-   * The same reserved rule for walks whose entries are relative (the mapped
-   * local walk has no remote path to compare): a rel is reserved when ANY of
-   * its segments is one of the trash/backup directory names, so a reserved
-   * tree nested anywhere under the walked root — not only at the connection
-   * root — is never transferred in either direction.
-   */
-  function isReservedSyncRel(connection: ConnectionConfig, rel: string): boolean {
-    const reserved = new Set([
-      path.posix.basename(trashRootsFor(connection).dir),
-      '.trash-gangway',
-      path.posix.basename(backupRootsFor(connection).dir),
-      '.backup-gangway',
-    ]);
-    return rel.split('/').some((segment) => reserved.has(segment));
-  }
 
   async function walkRemoteSyncTree(
     adapter: SftpClientAdapter,
@@ -1401,7 +1375,6 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       }
       for (const entry of entries) {
         const rel = path.posix.relative(syncRoot, entry.path);
-        if (isReservedSyncPath(connection, entry.path)) continue;
         const excluded = excludedBelow || exclude(rel);
         if (entry.isDirectory) {
           if (!seen.has(entry.path)) {
@@ -1986,17 +1959,11 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
 
   /**
    * Why fewer files move than the folder holds, for the tail of an info line.
-   * `excluded` is the caller's own count: the upload side composes reserved
-   * trash/backup dirs into the single predicate it hands the walk, so its
-   * `excluded` covers pattern hits *and* reserved hits, while the download
-   * side skips reserved entries silently (never counted, per the sync rule).
-   * The wording therefore names both causes instead of claiming patterns
-   * alone -- accurate for the upload count and not a false claim for the
-   * download one, which is the smaller honest fix for a shared string.
+   * `excluded` is the caller's own pattern-hit count.
    */
   function mappedCountNotes(excluded: number, symlinks: number): string {
     const notes: string[] = [];
-    if (excluded > 0) notes.push(`${excluded} file(s) excluded by patterns or reserved dirs.`);
+    if (excluded > 0) notes.push(`${excluded} file(s) excluded by patterns.`);
     if (symlinks > 0) notes.push(`${symlinks} symlink(s) skipped.`);
     return notes.length > 0 ? ` ${notes.join(' ')}` : '';
   }
@@ -2026,14 +1993,11 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     // `//rel` for a connection rooted at `/`, which servers reject.
     const joinRemote = (rel: string): string => (remoteRoot === '/' ? `/${rel}` : `${remoteRoot}/${rel}`);
     try {
-      // Reserved trash/backup dirs are inherited from the sync rule (§4):
-      // composed into the same predicate as the connection's excludes, so a
-      // local `.trash-gangway`/`.gangway-backup-*` tree is never walked into
-      // the transfer list (it is counted with the excluded files — both are
-      // "left behind on purpose" and the confirm already accounts for them).
+      // The walk counts pattern-excluded files so the confirm can account
+      // for them ("left behind on purpose").
       const walk = await walkMappedLocalFiles(
         localRoot,
-        (rel) => isReservedSyncRel(connection, rel) || matchesExcludes(rel, excludes),
+        (rel) => matchesExcludes(rel, excludes),
       );
       const notes = mappedCountNotes(walk.excluded, walk.skippedSymlinks.length);
       if (walk.files.length === 0) {
@@ -2133,10 +2097,6 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       let excluded = 0;
       for (const task of plan.tasks) {
         const rel = path.posix.relative(root, task.remotePath);
-        // Reserved trash/backup dirs are inherited from the sync rule (§4):
-        // never a task, never counted as an excluded user file — the same
-        // silent skip walkRemoteSyncTree applies.
-        if (isReservedSyncRel(connection, rel)) continue;
         if (matchesExcludes(rel, excludes)) {
           excluded += 1;
           continue;
@@ -2153,12 +2113,12 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       // The plan's directories (root first), mapped the same way the tasks
       // are: pullMappedFile only mkdirs the parent of a file it transfers, so
       // a remote directory holding no transferable file at all (truly empty,
-      // or only excluded/symlinked/reserved entries) would otherwise never
-      // materialize locally. Filtered by the two rules above, so no excluded
-      // or reserved tree is recreated in the workspace.
+      // or only excluded/symlinked entries) would otherwise never
+      // materialize locally. Filtered by the rule above, so no excluded
+      // tree is recreated in the workspace.
       for (const dir of plan.dirs) {
         const rel = path.posix.relative(root, dir);
-        if (matchesExcludes(rel, excludes) || isReservedSyncRel(connection, rel)) continue;
+        if (matchesExcludes(rel, excludes)) continue;
         localDirs.push(rel === '' ? localRoot : path.join(localRoot, ...rel.split('/')));
       }
       const notes = mappedCountNotes(excluded, skippedSymlinks.length);
