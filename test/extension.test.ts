@@ -688,22 +688,7 @@ describe('activate - realistic command invocation', () => {
     });
   });
 
-  describe('trash and clipboard commands', () => {
-    function trashListFixture() {
-      fakeRawClient.list.mockImplementation(async (dirPath: string) => {
-        // Stamp-specific branch first: a stamp dir path also contains the
-        // trash-root segment, so matching the root first would recurse into
-        // the stamp forever (walkRemoteFiles keeps descending).
-        if (dirPath.includes('20260901-000000-op')) {
-          return [{ name: 'a.php', type: 'f', size: 3 }];
-        }
-        if (dirPath.includes('.gangway-trash-') || dirPath === '/var/www/.trash-gangway') {
-          return [{ name: '20260901-000000-op', type: 'd' }];
-        }
-        return [];
-      });
-    }
-
+  describe('clipboard commands', () => {
     async function activateFrozenConnection() {
       const fresh = activate(fakeContext());
       const frozen = await fresh.connectionManager.add({
@@ -723,48 +708,8 @@ describe('activate - realistic command invocation', () => {
       mockWindow.__test_resetAnswers();
     });
 
-    it('gangway.emptyTrash does nothing when the typed confirm does not match', async () => {
-      trashListFixture();
-      mockWindow.__test_queueInput('never mind');
-      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
-
-      await handlers.get('gangway.emptyTrash')!();
-
-      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Empty Trash cancelled'));
-      expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
-      infoSpy.mockRestore();
-    });
-
-    it('gangway.emptyTrash removes stamp dirs on the literal confirm', async () => {
-      trashListFixture();
-      mockWindow.__test_queueInput('EMPTY TRASH');
-      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
-
-      await handlers.get('gangway.emptyTrash')!();
-
-      expect(fakeRawClient.rmdir).toHaveBeenCalledWith(
-        expect.stringContaining('20260901-000000-op'),
-        true,
-      );
-      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Emptied trash'));
-      infoSpy.mockRestore();
-    });
-
-    it('gangway.restoreFromTrash moves the trashed file back on overwrite', async () => {
-      trashListFixture();
-      mockWindow.__test_queuePick((items: unknown[]) => [(items as unknown[])[0]]);
-      mockWindow.__test_queuePick('Restore to original locations');
-      mockWindow.__test_queueWarning('Overwrite server');
-      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
-
-      await handlers.get('gangway.restoreFromTrash')!();
-
-      expect(fakeRawClient.posixRename).toHaveBeenCalledWith(
-        expect.stringContaining('20260901-000000-op/a.php'),
-        '/var/www/a.php',
-      );
-      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Restored 1'));
-      infoSpy.mockRestore();
+    it.each([['gangway.restoreFromTrash'], ['gangway.emptyTrash']])('%s is not registered', (id) => {
+      expect(handlers.has(id)).toBe(false);
     });
 
     it('cut then paste moves server-side with no re-upload', async () => {
@@ -785,7 +730,7 @@ describe('activate - realistic command invocation', () => {
       expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
     });
 
-    it.each([['gangway.pasteEntries'], ['gangway.restoreFromTrash'], ['gangway.emptyTrash']])(
+    it.each([['gangway.pasteEntries']])(
       '%s stops on a frozen connection before any prompt or network call',
       async (commandId) => {
         const frozen = await activateFrozenConnection();

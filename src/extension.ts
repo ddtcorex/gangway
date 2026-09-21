@@ -1267,96 +1267,6 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     await vscode.window.showInformationMessage(`Copied remote path: ${remotePath}`);
   }
 
-  async function runRestoreFromTrashCommand(): Promise<void> {    const connection = await requireMutableConnection();
-    if (!connection) return;
-    try {
-      const adapter = await getAdapter(connection);
-      const picks = await withCancellableProgress('Listing trash…', () => inventoryTrash(adapter, connection));
-      if (picks.length === 0) {
-        await vscode.window.showInformationMessage('Trash is empty.');
-        return;
-      }
-      type TrashRow = vscode.QuickPickItem & { pick: (typeof picks)[number] };
-      const rows: TrashRow[] = picks.map((pick) => ({ label: pick.label, detail: pick.detail, pick }));
-      const selected = await vscode.window.showQuickPick(rows, {
-        canPickMany: true,
-        placeHolder: 'Select trash entries to restore',
-      });
-      if (!selected || selected.length === 0) return;
-      let override: string | undefined;
-      if (selected.length === 1) {
-        const destChoice = await vscode.window.showQuickPick(['Restore to original locations', 'Choose alternate folder…'], {
-          placeHolder: 'Where should the files go?',
-        });
-        if (!destChoice) return;
-        if (destChoice !== 'Restore to original locations') {
-          override = await vscode.window.showInputBox({
-            prompt: 'Alternate folder (remote path)',
-            value: path.posix.dirname(selected[0].pick.items[0]?.originalPath ?? connection.remotePath),
-          });
-          if (!override) return;
-        }
-      }
-      const result = await withCancellableProgress('Restoring…', (signal) =>
-        restoreEntries(
-          adapter,
-          connection,
-          selected.map((row) => row.pick),
-          override,
-          {
-            confirmOverwrite: ({ remotePath, stagingPath }) =>
-              resolveFileConflict(adapter, connection.id, stagingPath as string, remotePath, conflictUi),
-            auditLog,
-          },
-          { signal, onAuditError: (message) => output.appendLine(message) },
-        ),
-      );
-      treeProvider.refresh();
-      if (result.skipped.length > 0) {
-        for (const skip of result.skipped) output.appendLine(`Restore skipped: ${skip.path} (${skip.reason})`);
-        output.show();
-      }
-      await vscode.window.showInformationMessage(
-        `Restored ${result.restored.length}, skipped ${result.skipped.length}.`,
-      );
-    } catch (err) {
-      await showCommandError(err, { retry: () => runRestoreFromTrashCommand(), connection });
-    }
-  }
-
-  async function runEmptyTrashCommand(): Promise<void> {
-    const connection = await requireMutableConnection();
-    if (!connection) return;
-    try {
-      const adapter = await getAdapter(connection);
-      const picks = await withCancellableProgress('Listing trash…', () => inventoryTrash(adapter, connection));
-      if (picks.length === 0) {
-        await vscode.window.showInformationMessage('Trash is empty.');
-        return;
-      }
-      const files = picks.reduce((total, pick) => total + pick.count, 0);
-      const typed = await vscode.window.showInputBox({
-        prompt: `Type EMPTY TRASH to permanently delete ${picks.length} trash entr${picks.length === 1 ? 'y' : 'ies'} (${files} file(s)). There is no undo.`,
-      });
-      if (!typedConfirmMatches('EMPTY TRASH', typed)) {
-        await vscode.window.showInformationMessage('Empty Trash cancelled.');
-        return;
-      }
-      const result = await withCancellableProgress('Emptying trash…', (signal) =>
-        emptyTrash(adapter, connection, picks, auditLog, {
-          signal,
-          onAuditError: (message) => output.appendLine(message),
-        }),
-      );
-      treeProvider.refresh();
-      await vscode.window.showInformationMessage(
-        `Emptied trash: ${result.files} file(s) in ${result.entries} entries deleted permanently.`,
-      );
-    } catch (err) {
-      await showCommandError(err, { retry: () => runEmptyTrashCommand(), connection });
-    }
-  }
-
   /**
    * Local-Explorer/OS drop onto a remote node. Every dropped path is
    * inspected first (missing paths and folders fail fast); large or binary
@@ -2549,8 +2459,6 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     vscode.commands.registerCommand('gangway.cutEntries', (node?: RemoteTreeNode | RemoteTreeNode[]) => runCutCopyCommand(true, node)),
     vscode.commands.registerCommand('gangway.copyEntries', (node?: RemoteTreeNode | RemoteTreeNode[]) => runCutCopyCommand(false, node)),
     vscode.commands.registerCommand('gangway.pasteEntries', runPasteEntriesCommand),
-    vscode.commands.registerCommand('gangway.restoreFromTrash', runRestoreFromTrashCommand),
-    vscode.commands.registerCommand('gangway.emptyTrash', runEmptyTrashCommand),
     vscode.commands.registerCommand('gangway.syncFolder', runSyncFolderCommand),
     vscode.commands.registerCommand('gangway.syncWorkspaceUp', () => runSyncWorkspaceCommand('up')),
     vscode.commands.registerCommand('gangway.syncWorkspaceDown', () => runSyncWorkspaceCommand('down')),
