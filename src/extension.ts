@@ -51,7 +51,8 @@ import {
 import { clearClipboard, copyToClipboard, cutToClipboard, type ClipboardState } from './ui/treeClipboard';
 import { classifyRow, describeExcludedSelection, mapLimit, toQuickPickRow, type SyncRow } from './syncPreview';
 import { effectiveExcludes, matchesExcludes } from './excludes';
-import { defaultMapping, isRemoteInsideRoot } from './pathMapping';
+import { pullMappedFile, pushMappedFile } from './mappedTransfer';
+import { defaultMapping, isRemoteInsideRoot, resolveLocalToRemote, resolveRemoteToLocal } from './pathMapping';
 import type { FileConflictDecision } from './conflictGuard';
 import type { ConnectionConfig, SidecarMeta } from './types';
 import { testConnection } from './testConnection';
@@ -1899,6 +1900,123 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   }
 
   /**
+   * Mapped-file commands (spec §3–§4): the user points at one workspace file
+   * (explorer context menu) or one server file (remote tree context menu) and
+   * Gangway transfers exactly that file through the connection's path
+   * mappings. Pure B by design: no frozen check, no backup, no Conflict
+   * Guard, no audit line, no sidecar -- a resolve, one confirm stating the
+   * overwrite, and the mappedTransfer primitive. Launched from an explicit
+   * menu, so the deliberate absence of the hotfix safety net is the user's
+   * choice rather than a silent downgrade. All transfer math lives in
+   * pathMapping.ts / mappedTransfer.ts; these handlers stay thin wiring.
+   */
+  function workspaceRoots(): string[] {
+    return (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+  }
+
+  /**
+   * The shared no-match copy (spec §3): names the file, the connection, and
+   * the effective default, with the one action that fixes it. The callers
+   * always stop afterwards -- a mapped command never falls back to the tmp
+   * mirror, which would send the user somewhere they did not ask to go.
+   */
+  async function warnNoMapping(connection: ConnectionConfig, roots: readonly string[], fsPath: string): Promise<void> {
+    const fallback = defaultMapping(connection, roots);
+    const fallbackNote = fallback ? `${fallback.local} → ${fallback.remote}` : 'none';
+    const choice = await vscode.window.showWarningMessage(
+      `${fsPath} is not inside any path mapping of "${connection.name}" (default: ${fallbackNote}).`,
+      'Open Mappings',
+      'Cancel',
+    );
+    if (choice === 'Open Mappings') await vscode.commands.executeCommand('gangway.manageRemotes');
+  }
+
+  /** Upload one workspace file through its mapping (explorer Uri -> resolve -> confirm -> pushMappedFile). */
+  async function runUploadMappedFileCommand(uri?: { fsPath: string }): Promise<void> {
+    const connection = requireActiveConnection();
+    if (!connection || !uri?.fsPath) return;
+    const roots = workspaceRoots();
+    const remotePath = resolveLocalToRemote(connection, roots, uri.fsPath);
+    if (!remotePath) {
+      await warnNoMapping(connection, roots, uri.fsPath);
+      return;
+    }
+    const choice = await vscode.window.showWarningMessage(
+      `Upload ${uri.fsPath} → ${remotePath} on "${connection.name}"? This overwrites the server copy.`,
+      'Upload',
+      'Cancel',
+    );
+    if (choice !== 'Upload') return;
+    try {
+      const adapter = await getAdapter(connection);
+      await pushMappedFile(adapter, uri.fsPath, remotePath);
+      await vscode.window.showInformationMessage(`Uploaded ${uri.fsPath} → ${remotePath}.`);
+    } catch (err) {
+      await showCommandError(err, { retry: () => runUploadMappedFileCommand(uri), connection });
+    }
+  }
+
+  /**
+   * Download one mapped server file over the workspace file the same Uri
+   * names: the remote side comes from the identical local->remote resolution,
+   * so both directions agree on which pair they operate on.
+   */
+  async function runDownloadMappedFileCommand(uri?: { fsPath: string }): Promise<void> {
+    const connection = requireActiveConnection();
+    if (!connection || !uri?.fsPath) return;
+    const roots = workspaceRoots();
+    const remotePath = resolveLocalToRemote(connection, roots, uri.fsPath);
+    if (!remotePath) {
+      await warnNoMapping(connection, roots, uri.fsPath);
+      return;
+    }
+    await pullMappedIntoWorkspace(connection, remotePath, uri.fsPath, () => runDownloadMappedFileCommand(uri));
+  }
+
+  /**
+   * Download one server file from the remote tree into its mapped workspace
+   * file. The node names its own connection -- resolve THAT one, never the
+   * workspace binding -- and an item outside every mapping returns silently:
+   * the context menu is only offered for mapped items, and the tmp-mirror
+   * download next to it stays the escape hatch.
+   */
+  async function runDownloadToWorkspaceFileCommand(node?: RemoteTreeNode): Promise<void> {
+    const connection = resolveConnection(node);
+    if (!connection || !node) return;
+    const localPath = resolveRemoteToLocal(connection, workspaceRoots(), node.entry.path);
+    if (!localPath) return;
+    await pullMappedIntoWorkspace(connection, node.entry.path, localPath, () => runDownloadToWorkspaceFileCommand(node));
+  }
+
+  /**
+   * The download half both mapped download commands share: one confirm naming
+   * both sides and the overwrite, then pullMappedFile -- which stages into a
+   * sibling and renames, so a failed transfer leaves the previous workspace
+   * file byte-identical instead of truncated. `retry` re-invokes the calling
+   * command (never this helper), so a retry re-resolves the mapping.
+   */
+  async function pullMappedIntoWorkspace(
+    connection: ConnectionConfig,
+    remotePath: string,
+    localPath: string,
+    retry: () => Promise<void>,
+  ): Promise<void> {
+    const choice = await vscode.window.showWarningMessage(
+      `Download ${remotePath} on "${connection.name}" → ${localPath}? This overwrites your local file.`,
+      'Download',
+      'Cancel',
+    );
+    if (choice !== 'Download') return;
+    try {
+      const adapter = await getAdapter(connection);
+      await pullMappedFile(adapter, remotePath, localPath);
+      await vscode.window.showInformationMessage(`Downloaded ${remotePath} → ${localPath}.`);
+    } catch (err) {
+      await showCommandError(err, { retry, connection });
+    }
+  }
+
+  /**
    * Govard remote import (see docs/specs/2026-09-18-gangway-govard-import-design.md).
    *
    * Workspaces carrying a `.govard.yml` already know their servers, so offer
@@ -2111,6 +2229,9 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     vscode.commands.registerCommand('gangway.syncFolder', runSyncFolderCommand),
     vscode.commands.registerCommand('gangway.syncWorkspaceUp', () => runSyncWorkspaceCommand('up')),
     vscode.commands.registerCommand('gangway.syncWorkspaceDown', () => runSyncWorkspaceCommand('down')),
+    vscode.commands.registerCommand('gangway.uploadMappedFile', (uri?: { fsPath: string }) => runUploadMappedFileCommand(uri)),
+    vscode.commands.registerCommand('gangway.downloadMappedFile', (uri?: { fsPath: string }) => runDownloadMappedFileCommand(uri)),
+    vscode.commands.registerCommand('gangway.downloadToWorkspaceFile', (node?: RemoteTreeNode) => runDownloadToWorkspaceFileCommand(node)),
     vscode.commands.registerCommand('gangway.refreshExplorer', () => treeProvider.refresh()),
     vscode.commands.registerCommand('gangway.toggleFreeze', async (node?: RemoteTreeNode) => {
       const connection = node
