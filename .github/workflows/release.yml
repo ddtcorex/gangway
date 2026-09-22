@@ -7,6 +7,9 @@ on:
 
 permissions:
   contents: write
+  # The VS Code Marketplace step exchanges a GitHub Actions OIDC token for a
+  # short-lived credential, so no PAT secret is stored (see docs/publishing.md).
+  id-token: write
 
 jobs:
   publish:
@@ -56,16 +59,26 @@ jobs:
       - name: Package
         run: pnpm dlx --allow-build=@vscode/vsce-sign @vscode/vsce package --no-dependencies -o gangway.vsix
 
-      # Publishing to the VS Code Marketplace needs an Azure DevOps
-      # publisher account, which needs a card on file for identity
-      # verification -- not available here (see the design spec's
-      # "Amendment" section). Open VSX (open-vsx.org, used by VSCodium/
-      # Gitpod/Theia) authenticates via GitHub only. Re-adding the
-      # Marketplace as a second target later just needs one more step
-      # here (`vsce publish --packagePath gangway.vsix -p $VSCE_PAT`,
-      # reusing this same .vsix) plus a VSCE_PAT secret.
+      # Open VSX (open-vsx.org, used by VSCodium, Gitpod, Theia) still
+      # authenticates with a PAT secret. --skip-duplicate keeps a re-run of an
+      # already-published tag idempotent, which matters because the Marketplace
+      # step below can fail on its own (see docs/publishing.md).
       - name: Publish to Open VSX
-        run: pnpm dlx --allow-build=@vscode/vsce-sign --allow-build=keytar ovsx publish gangway.vsix -p ${{ secrets.OVSX_PAT }}
+        run: pnpm dlx --allow-build=@vscode/vsce-sign --allow-build=keytar ovsx publish gangway.vsix -p ${{ secrets.OVSX_PAT }} --skip-duplicate
+
+      # Kept next to its sibling publish. A failure here (a trusted publishing
+      # policy that does not match this repository and workflow, for example)
+      # stops the run before the GitHub Release step, so a release is not
+      # announced while the Marketplace is still missing. Both publish steps
+      # pass --skip-duplicate, so re-running the same tag after fixing the
+      # policy is idempotent.
+      #
+      # No stored secret: vsce requests a GitHub Actions OIDC token for the
+      # marketplace.visualstudio.com audience and exchanges it for a
+      # short-lived credential, which is why this job needs `id-token: write`.
+      # --oidc is intentionally hidden from `vsce publish --help`.
+      - name: Publish to VS Code Marketplace
+        run: pnpm dlx --allow-build=@vscode/vsce-sign @vscode/vsce publish --packagePath gangway.vsix --oidc --skip-duplicate
 
       # Same pattern as ddtcorex/dsh-maestro-ci node-release.yml: take the
       # matching `## [X.Y.Z]` section from CHANGELOG.md as the release body
