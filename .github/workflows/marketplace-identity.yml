@@ -1,0 +1,50 @@
+name: Marketplace identity
+
+# Manual helper for the one-time Entra ID setup in docs/publishing.md. It signs
+# in with the same federated identity the release workflow uses and prints the
+# Azure DevOps profile id that the Marketplace publisher member entry needs.
+# The publisher member is that profile id, not the app's client id.
+#
+# It publishes nothing and changes nothing outside its own run.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    # Must match the federated credential's subject
+    # (repo:ddtcorex/gangway:environment:marketplace), exactly like the release job.
+    environment: marketplace
+    steps:
+      - name: Sign in with the federated identity
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Resolve the publisher member profile id
+        run: |
+          set -euo pipefail
+          az rest \
+            --uri https://app.vssps.visualstudio.com/_apis/profile/profiles/me \
+            --resource 499b84ac-1321-427f-aa17-267ca6975798 > profile.json
+          id="$(jq -r '.id // empty' profile.json)"
+          if [ -z "$id" ]; then
+            echo "The profile endpoint returned no id:"; cat profile.json; exit 1
+          fi
+          {
+            echo "### Marketplace publisher member identity"
+            echo
+            echo "Add this value under the publisher's Members with the Contributor role:"
+            echo
+            echo '```'
+            echo "$id"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "profile id: $id"
