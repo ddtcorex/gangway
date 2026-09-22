@@ -19,15 +19,15 @@ surface that matters here is small but sharp.
 
 ## Reporting a vulnerability
 
-Please do not open a public issue containing exploit details.
+Private vulnerability reporting is enabled on this repository. Open the
+**Security** tab and click **Report a vulnerability**, or go straight to
+<https://github.com/ddtcorex/gangway/security/advisories/new>. The report
+stays private between you and the maintainer until an advisory is published.
 
-- Preferred: GitHub private vulnerability reporting. Open the repository's
-  **Security** tab and click **Report a vulnerability**. If that button is not
-  visible, it has not been enabled for this repository yet, so use the
-  fallback below and it will be turned on.
-- Fallback: open a public issue titled `Security contact request` with no
-  technical detail beyond "I have a vulnerability report", and a private
-  advisory will be opened for the details.
+Please do not open a public issue containing exploit details. If GitHub is not
+an option for you, open a public issue titled `Security contact request` with
+no technical detail beyond "I have a vulnerability report", and a private
+channel will be opened for the details.
 
 Include the Gangway version, your VS Code client and version, and the
 smallest reproduction you can manage. Redact real hostnames, credentials, and
