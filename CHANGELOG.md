@@ -5,6 +5,17 @@ All notable changes to the Gangway extension are documented in this file.
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and
 breaking changes are marked `BREAKING:`.
 
+## [0.4.1] - 2026-09-22
+
+No runtime changes. This release refreshes the listing and the repository
+metadata:
+
+- README rewritten for the listing page: install steps for Open VSX and for
+  the VSIX, a keybindings table, where local temp copies live and when they
+  are purged, the per-connection configuration fields, and the dev commands.
+- `SECURITY.md`, bug and feature issue templates, and a PR template added.
+- Extension keywords widened for search.
+
 ## [0.4.0] - 2026-09-21
 
 - `Ctrl+Alt+Shift+X` (`Cmd+Alt+Shift+X` on macOS) uploads the mapped
