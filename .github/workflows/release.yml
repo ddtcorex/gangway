@@ -7,13 +7,19 @@ on:
 
 permissions:
   contents: write
-  # The VS Code Marketplace step exchanges a GitHub Actions OIDC token for a
-  # short-lived credential, so no PAT secret is stored (see docs/publishing.md).
+  # azure/login@v3 requests a GitHub Actions OIDC token to assume the Entra ID
+  # identity federated to the `marketplace` environment. No client secret is
+  # stored anywhere (see docs/publishing.md).
   id-token: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # The federated credential's subject is
+    # repo:ddtcorex/gangway:environment:marketplace, so this job must be bound to
+    # that environment for the token exchange to match. Required reviewers on
+    # the environment also turn the publish into a human-gated step.
+    environment: marketplace
     steps:
       - uses: actions/checkout@v4
         with:
@@ -66,19 +72,29 @@ jobs:
       - name: Publish to Open VSX
         run: pnpm dlx --allow-build=@vscode/vsce-sign --allow-build=keytar ovsx publish gangway.vsix -p ${{ secrets.OVSX_PAT }} --skip-duplicate
 
-      # Kept next to its sibling publish. A failure here (a trusted publishing
-      # policy that does not match this repository and workflow, for example)
-      # stops the run before the GitHub Release step, so a release is not
-      # announced while the Marketplace is still missing. Both publish steps
-      # pass --skip-duplicate, so re-running the same tag after fixing the
-      # policy is idempotent.
+      # Gated on a repository variable so a tag cannot fail the release while
+      # the Marketplace identity is still being set up. Flip
+      # MARKETPLACE_PUBLISH to true once the checklist in docs/publishing.md is
+      # done. A failure here stops the run before the GitHub Release step, so a
+      # release is not announced while the Marketplace is still missing.
       #
-      # No stored secret: vsce requests a GitHub Actions OIDC token for the
-      # marketplace.visualstudio.com audience and exchanges it for a
-      # short-lived credential, which is why this job needs `id-token: write`.
-      # --oidc is intentionally hidden from `vsce publish --help`.
+      # Authentication is Microsoft Entra ID, not a PAT and not the Marketplace
+      # trusted publishing flow: azure/login@v3 signs the Azure CLI in with the
+      # federated credential on the `marketplace` environment, and vsce's
+      # --azure-credential picks that session up (src/auth.ts chains
+      # EnvironmentCredential, AzureCliCredential, ManagedIdentityCredential).
+      # No client secret and no `vsce publish --oidc`.
+      - name: Sign in for Marketplace publishing
+        if: vars.MARKETPLACE_PUBLISH == 'true'
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
       - name: Publish to VS Code Marketplace
-        run: pnpm dlx --allow-build=@vscode/vsce-sign @vscode/vsce publish --packagePath gangway.vsix --oidc --skip-duplicate
+        if: vars.MARKETPLACE_PUBLISH == 'true'
+        run: pnpm dlx --allow-build=@vscode/vsce-sign @vscode/vsce publish --packagePath gangway.vsix --azure-credential --skip-duplicate
 
       # Same pattern as ddtcorex/dsh-maestro-ci node-release.yml: take the
       # matching `## [X.Y.Z]` section from CHANGELOG.md as the release body
