@@ -26,8 +26,8 @@ artifact is `dist/extension.js` (esbuild) via `vsce`.
 - `src/transfer/` — `connectionPool.ts` (one pooled client per connection,
   60s idle evict, 3x backoff), `sftpClientAdapter.ts` (raw-listing mapping,
   plus `rmdir`/`chmod`), `downloadFile.ts` (stage + atomic rename + sidecar
-  write), `uploadFile.ts` (backup-before-overwrite + temp + rename +
-  baseline refresh).
+  write), `uploadFile.ts` (temp + `posix-rename` overwrite + sidecar
+  baseline refresh; there is no server-side backup, by design since 0.3.0).
 - `src/` transfer plumbing — `remoteListing.ts`, `folderQueue.ts` (recursive
   walk, abortable), `tmpPath.ts` (slug + containment), `tmpStore.ts`
   (sidecar), `tmpRetention.ts` (7-day auto-purge), `connectionManager.ts`
@@ -46,10 +46,11 @@ artifact is `dist/extension.js` (esbuild) via `vsce`.
   `errorMapper.ts` (human messages + actions), `auditLog.ts` (append-only
   op log, versioned entries), `withTimeout.ts` (bounds on secret-store calls).
 - `src/` safe remote ops — `remoteOps.ts` (the choke point for every
-  mutating op: freeze gate, trash/backup movers with sibling-first +
-  in-root fallback, create/rename/duplicate/chmod, clipboard paste,
-  trash inventory/restore/empty, 30-day sweep, typed-confirm +
-  uri-list/drop helpers), `pathMapping.ts` (longest-prefix
+  mutating op: freeze gate, in-root containment, sidecar upload guard,
+  create/rename/duplicate/chmod, clipboard paste, typed-confirm +
+  uri-list/drop helpers; server-side trash and backup were removed in
+  0.3.0, so deletes and overwrites have no remote undo), `pathMapping.ts`
+  (longest-prefix
   workspace↔remote resolution, overlap notes), `syncPreview.ts`
   (tree compare + sidecar-aware classify + bounded-parallel walk),
   `excludes.ts` (exclude-pattern matcher),

@@ -2,6 +2,9 @@
 
 All notable changes to the Gangway extension are documented in this file.
 
+Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and
+breaking changes are marked `BREAKING:`.
+
 ## [0.4.0] - 2026-09-21
 
 - `Ctrl+Alt+Shift+X` (`Cmd+Alt+Shift+X` on macOS) uploads the mapped

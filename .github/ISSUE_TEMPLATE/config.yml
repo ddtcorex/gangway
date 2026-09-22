@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security policy
+    url: https://github.com/ddtcorex/gangway/blob/master/SECURITY.md
+    about: Read this before reporting anything involving credentials or live servers.
+  - name: Usage and development docs
+    url: https://github.com/ddtcorex/gangway/blob/master/README.md
+    about: Install steps, keybindings, configuration fields, and the dev commands.

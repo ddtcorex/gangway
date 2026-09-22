@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest a capability or a workflow improvement for Gangway.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gangway is deliberately a manual, one-file hotfix tool. Proposals that
+        add auto-upload, folder watching, or background sync are out of scope
+        by design, but workflow improvements around the manual flow are welcome.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: The workflow you have today, and where it costs you time or causes risk.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like to happen
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have considered
+      description: Including other extensions or tools, and why they do not fit.
+    validations:
+      required: false

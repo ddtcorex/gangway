@@ -18,7 +18,12 @@
     "ssh",
     "remote",
     "hotfix",
-    "deployment"
+    "deployment",
+    "vscode-extension",
+    "vscode",
+    "remote-edit",
+    "sftp-client",
+    "devops"
   ],
   "engines": {
     "vscode": "^1.90.0"
