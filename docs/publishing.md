@@ -77,21 +77,34 @@ Fill in:
 | Field | Value |
 |---|---|
 | Organization | `ddtcorex` |
+| Organization ID | `103315997` |
 | Repository | `gangway` |
+| Repository ID | `1372827989` |
 | Entity type | **Environment** |
 | Environment name | `marketplace` |
 | Name | `github-gangway-marketplace` |
 
-Leave the optional GitHub owner ID and repository ID fields **empty**. If they
-are filled, the subject becomes
-`repo:ddtcorex@<org-id>/gangway@<repo-id>:environment:marketplace`, a form the
-GitHub token never contains, and every token exchange fails.
+The two ID fields are **required here, not optional**. This repository was
+created on 2026-09-16, after GitHub's 2026-07-15 rollout, so its OIDC subject
+uses the immutable format that carries the owner and repository IDs. Confirm it
+for this repository at any time:
+
+```sh
+gh api repos/ddtcorex/gangway/actions/oidc/customization/sub
+# {"use_default":true,"use_immutable_subject":true,
+#  "sub_claim_prefix":"repo:ddtcorex@103315997/gangway@1372827989"}
+```
+
+A repository created before 2026-07-15 keeps the old format unless it opts in,
+and then those fields must be left empty instead. The `az login`/`azure/login`
+troubleshooting notes that tell you to leave them empty predate the rollout and
+do not apply to this repository.
 
 The three fields that matter must end up as:
 
 ```text
 issuer    https://token.actions.githubusercontent.com
-subject   repo:ddtcorex/gangway:environment:marketplace
+subject   repo:ddtcorex@103315997/gangway@1372827989:environment:marketplace
 audience  api://AzureADTokenExchange
 ```
 
@@ -102,7 +115,7 @@ cat > credential.json <<'JSON'
 {
   "name": "github-gangway-marketplace",
   "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:ddtcorex/gangway:environment:marketplace",
+  "subject": "repo:ddtcorex@103315997/gangway@1372827989:environment:marketplace",
   "description": "Gangway release workflow Marketplace publish",
   "audiences": ["api://AzureADTokenExchange"]
 }
@@ -169,10 +182,13 @@ Notes:
 
 - The subject is matched **case sensitively** and wildcards are not supported.
   An app can hold at most 20 federated credentials.
+- The subject format follows the repository's OIDC setting, not a global
+  constant. This repository carries owner and repository IDs because it was
+  created after 2026-07-15, and a repository rename or transfer would change
+  those IDs and require editing the credential.
 - The `marketplace` environment can require reviewers, which turns the publish
   into a human-gated step.
-- Nothing needs rotating. Renaming the repository or the environment means
-  editing the federated credential.
+- Nothing needs rotating.
 
 ## Open VSX
 
@@ -242,7 +258,7 @@ The listing page is
 
 | Symptom | Cause and fix |
 |---|---|
-| `AADSTS700213` or `AADSTS7002138`: no matching federated identity record | The credential subject does not match the token. Compare with the `subject claim` printed in the run log under "Federated token details". Usual causes: wrong case, a Branch or Tag entity instead of Environment, or the optional owner/repository ID fields were filled when the credential was created. |
+| `AADSTS700213` or `AADSTS7002138`: no matching federated identity record | The credential subject does not match the token. Compare with the `subject claim` printed in the run log under "Federated token details". Usual causes: wrong case, a Branch or Tag entity instead of Environment, or an ID mismatch, meaning the owner/repository ID fields are missing or do not equal the `sub_claim_prefix` from `gh api repos/ddtcorex/gangway/actions/oidc/customization/sub`. |
 | `Can not acquire a Microsoft Entra ID access token` | `azure/login@v3` did not run before the publish step, or `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` are unset. |
 | Marketplace rejects the publish with 401 or a permission error | The identity behind the token is not a member of the publisher, or not as Contributor. Re-run **Marketplace identity** and compare its profile id with the member entry. |
 | Marketplace step is skipped | `MARKETPLACE_PUBLISH` is not `true`. |

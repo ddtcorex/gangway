@@ -15,10 +15,12 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # The federated credential's subject is
-    # repo:ddtcorex/gangway:environment:marketplace, so this job must be bound to
-    # that environment for the token exchange to match. Required reviewers on
-    # the environment also turn the publish into a human-gated step.
+    # The federated credential's subject carries this repository's immutable
+    # OIDC IDs (see docs/publishing.md):
+    # repo:ddtcorex@103315997/gangway@1372827989:environment:marketplace, so
+    # this job must be bound to that environment for the token exchange to
+    # match. Required reviewers on the environment also turn the publish into a
+    # human-gated step.
     environment: marketplace
     steps:
       - uses: actions/checkout@v4
