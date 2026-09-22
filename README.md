@@ -157,8 +157,8 @@ pnpm run build:e2e && pnpm run test:e2e   # real extension host, needs the docke
   docker-integration and e2e gates, and the incidents behind each rule.
 - [CHANGELOG.md](./CHANGELOG.md) records every release.
 - [docs/publishing.md](./docs/publishing.md) covers both release registries:
-  Open VSX with a repository secret, the VS Code Marketplace with OIDC trusted
-  publishing and no stored token.
+  Open VSX with a repository secret, the VS Code Marketplace with a Microsoft
+  Entra ID identity federated to a GitHub environment, and no stored secret.
 - [AGENTS.md](./AGENTS.md) is the architecture map and coding standard.
 - Branches are `feat/<topic>` or `fix/<topic>` plus a PR into `master`; CI must
   be green before merge.
