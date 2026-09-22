@@ -156,6 +156,9 @@ pnpm run build:e2e && pnpm run test:e2e   # real extension host, needs the docke
 - [docs/testing.md](./docs/testing.md) is the QA standard: test layers, the
   docker-integration and e2e gates, and the incidents behind each rule.
 - [CHANGELOG.md](./CHANGELOG.md) records every release.
+- [docs/publishing.md](./docs/publishing.md) covers both release registries:
+  Open VSX with a repository secret, the VS Code Marketplace with OIDC trusted
+  publishing and no stored token.
 - [AGENTS.md](./AGENTS.md) is the architecture map and coding standard.
 - Branches are `feat/<topic>` or `fix/<topic>` plus a PR into `master`; CI must
   be green before merge.
@@ -167,9 +170,6 @@ pnpm run build:e2e && pnpm run test:e2e   # real extension host, needs the docke
   watched.
 - No support for OS keychain-backed key passphrases beyond what
   `ssh2-sftp-client` itself provides.
-- Distributed on Open VSX only for now. Publishing to the VS Code Marketplace
-  needs an Azure DevOps publisher account with a card on file; the release
-  workflow is ready to add it as a second target.
 
 ## License
 
