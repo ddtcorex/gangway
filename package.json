@@ -2,7 +2,7 @@
   "name": "gangway",
   "displayName": "Gangway",
   "description": "Single-file SFTP hotfix editing for VS Code.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "publisher": "ddtcorex",
   "license": "MIT",
   "icon": "media/icon.png",
