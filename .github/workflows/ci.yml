@@ -69,6 +69,14 @@ jobs:
       - name: Take back fixture ownership
         run: sudo chown -R $(id -u):$(id -g) test/fixtures/sftp-data
 
+      # The docker-backed suites (test/*.integration.test.ts) skip unless
+      # GANGWAY_SFTP=1 is set, so without this step the fixture above only
+      # serves the e2e run and docs/testing.md's "required for transfer
+      # changes" gate stays unenforced. They run here, on the same fixture,
+      # before the e2e run hands it to the extension host.
+      - name: Run docker-integration suites
+        run: GANGWAY_SFTP=1 pnpm test
+
       - name: Run e2e (headless)
         run: xvfb-run -a node ./out/test/runE2e.js
 
