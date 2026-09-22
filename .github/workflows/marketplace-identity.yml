@@ -18,7 +18,8 @@ jobs:
   profile:
     runs-on: ubuntu-latest
     # Must match the federated credential's subject
-    # (repo:ddtcorex/gangway:environment:marketplace), exactly like the release job.
+    # (repo:ddtcorex@103315997/gangway@1372827989:environment:marketplace),
+    # exactly like the release job.
     environment: marketplace
     steps:
       - name: Sign in with the federated identity
