@@ -1,0 +1,78 @@
+name: Bug report
+description: Something in Gangway did not behave as documented.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste credentials, private keys, real hostnames, or customer
+        data. Redact them before submitting.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What Gangway did, including the exact message or confirmation you saw.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps, starting from a fresh VS Code window if the bug allows it.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Connection form and authentication
+        - Remote explorer and listing
+        - Download or upload
+        - Compare with server
+        - Sync preview, excludes, or path mappings
+        - Mapped remote commands
+        - Freeze, delete, rename, or chmod
+        - Govard import
+        - Something else
+    validations:
+      required: true
+  - type: input
+    id: gangway-version
+    attributes:
+      label: Gangway version
+      description: From the Extensions view, or from the Open VSX listing.
+      placeholder: "0.4.0"
+    validations:
+      required: true
+  - type: input
+    id: client-version
+    attributes:
+      label: VS Code client and version
+      description: For example VS Code 1.94 on macOS, or VSCodium 1.93 on Linux.
+      placeholder: "VS Code 1.94.0, Ubuntu 24.04"
+    validations:
+      required: true
+  - type: input
+    id: server
+    attributes:
+      label: Server type
+      description: Only the server software and version, never the real hostname.
+      placeholder: "OpenSSH 9.6, SFTP subsystem"
+    validations:
+      required: false
+  - type: textarea
+    id: output
+    attributes:
+      label: Gangway output
+      description: "Output panel, channel: Gangway. Redact paths and hosts."
+      render: shell
+    validations:
+      required: false
