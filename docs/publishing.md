@@ -12,20 +12,22 @@ GitHub Release. Nothing repackages in between, so both registries get identical
 bytes.
 
 The Marketplace steps are gated on the repository variable
-`MARKETPLACE_PUBLISH`. While that variable is unset, a tag still publishes to
-Open VSX and creates the GitHub Release, and the Marketplace steps are skipped.
-Set it to `true` once the checklist below is done.
+`MARKETPLACE_PUBLISH`, which is `true` since 2026-09-23. While that variable is
+unset, a tag still publishes to Open VSX and creates the GitHub Release, and
+the Marketplace steps are skipped.
 
 ## What the repository already satisfies
 
 - Publisher `ddtcorex` exists on the Marketplace and matches the `publisher`
   field in `package.json`. The ID cannot be changed after creation.
-- The extension name `ddtcorex.gangway` is still unused.
+- The extension ID `ddtcorex.gangway` is registered on both registries.
 - `README.md`, `LICENSE`, and `CHANGELOG.md` sit at the repository root, and
-  `repository` is an HTTPS URL, so `vsce` rewrites relative links against
-  GitHub `main`.
-- `media/icon.png` is a 128x128 PNG (the minimum) and `media/icon@2x.png` is
-  256x256.
+  `repository` is an HTTPS URL, so `vsce` rewrites relative links to
+  `https://github.com/ddtcorex/gangway/blob/HEAD/...`, which follows the
+  default branch (`master`).
+- `media/icon.png` is a 128x128 PNG (the minimum) and is the only icon
+  shipped; `media/icon@2x.png` (256x256) and `media/icon.svg` are sources kept
+  out of the package.
 - `.vscodeignore` keeps `src/`, `test/`, `docs/`, `out/`, `AGENTS.md`,
   `SECURITY.md`, and the CI files out of the package.
 - The README badges are remote SVGs from GitHub Actions and shields.io.
@@ -34,10 +36,32 @@ Set it to `true` once the checklist below is done.
 
 ## Marketplace authentication with Microsoft Entra ID
 
+Microsoft's guide,
+[Secure automated publishing to Visual Studio Marketplace](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#secure-automated-publishing-to-visual-studio-marketplace),
+uses the same mechanism with Azure DevOps as the OIDC issuer: a user-assigned
+managed identity federated to a service connection, its profile id added as a
+publisher member, then `vsce publish --azure-credential`. This repository runs
+the GitHub Actions equivalent:
+
+| Microsoft guide (Azure DevOps) | This repository (GitHub Actions) |
+|---|---|
+| User-assigned managed identity | Entra ID app registration `gangway-marketplace-publisher` |
+| Service connection, Workload Identity Federation | Federated credential bound to the `marketplace` environment |
+| `AzureCLI@2` task with `azureSubscription` | `azure/login@v3` with `allow-no-subscriptions: true` |
+| `az rest .../profiles/me` to read the member id | The **Marketplace identity** workflow |
+| `vsce publish --azure-credential` | Same command, in `release.yml` |
+
+The app registration needs no Azure subscription and no Reader role; the guide
+needs a subscription only because a managed identity is an Azure resource.
+
+Setup was completed on 2026-09-23. The checklist below stays as the record, and
+is what to redo if the app registration, the environment, or the repository
+identity ever changes.
+
 ### Why not the Marketplace trusted publishing flow
 
-`vsce publish --oidc` exists in `@vscode/vsce` 4.0.0, but the Marketplace has
-no configuration surface for the trust policy it needs, so there is nothing to
+`vsce publish --oidc` exists since `@vscode/vsce` 4.0.0, but the Marketplace
+has no configuration surface for the trust policy it needs, so there is nothing to
 trust the token yet. It is also hidden from `vsce publish --help` and was
 merged as an unannounced option. If Microsoft exposes the policy page later,
 tracked in
@@ -174,8 +198,8 @@ Set the repository variable `MARKETPLACE_PUBLISH` to `true`.
 `azure/login@v3` signs the Azure CLI in with the federated credential, and
 `allow-no-subscriptions: true` is required because this tenant has no Azure
 subscription. `vsce --azure-credential` then reuses that CLI session: the
-credential chain in `src/auth.ts` is `EnvironmentCredential`, then
-`AzureCliCredential`, then `ManagedIdentityCredential`. There is no client
+credential chain in vsce's own `src/auth.ts` is `EnvironmentCredential`,
+then `AzureCliCredential`, then `ManagedIdentityCredential`. There is no client
 secret to store, and the environment binding is what the Marketplace trusts.
 
 Notes:
@@ -211,20 +235,26 @@ organization now requires an active Azure subscription.
 
 ## Publishing a version that is already tagged
 
-Use this when a tag predates the Marketplace steps, or to recover a failed one
-without cutting a new version. On a laptop, `--azure-credential` uses whoever
-`az login` signed in as, so that account must itself be a member of the
-publisher with publish rights.
+A tag push runs `release.yml` **as it exists at the tagged commit**, not as it
+is on `master`, and the workflow has no `workflow_dispatch` trigger. Re-running
+the release of a tag that predates the Marketplace steps (every tag up to and
+including `v0.4.1`) therefore still skips the Marketplace. Two ways out:
 
-```sh
-cd /home/kai/Work/htdocs/maestro-harness/gangway
-gh release download v0.4.1 --pattern gangway.vsix --clobber
-az login
-pnpm dlx --allow-build=@vscode/vsce-sign @vscode/vsce publish --packagePath gangway.vsix --azure-credential --skip-duplicate
-```
+- **Cut a new patch version** (preferred): bump, merge, tag. This is how
+  `0.4.2` became the first Marketplace release.
+- **Publish the existing VSIX from a laptop.** `--azure-credential` uses
+  whoever `az login` signed in as, so that account must itself be a member of
+  the publisher with publish rights:
 
-In CI, re-dispatch the release workflow after fixing the cause. Both publish
-steps pass `--skip-duplicate`, so re-running a tag is idempotent.
+  ```sh
+  gh release download v0.4.1 --repo ddtcorex/gangway --pattern gangway.vsix --clobber
+  az login
+  pnpm dlx --allow-build=@vscode/vsce-sign @vscode/vsce publish --packagePath gangway.vsix --azure-credential --skip-duplicate
+  ```
+
+For a tag that already contains the Marketplace steps, re-run its failed
+release run (`gh run rerun <run-id> --failed`) after fixing the cause. Both
+publish steps pass `--skip-duplicate`, so re-running a tag is idempotent.
 
 ## Version rules
 

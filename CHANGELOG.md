@@ -5,6 +5,19 @@ All notable changes to the Gangway extension are documented in this file.
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and
 breaking changes are marked `BREAKING:`.
 
+## [0.4.2] - 2026-09-23
+
+No runtime changes. First release published to the VS Code Marketplace:
+
+- Releases now publish to the VS Code Marketplace with a Microsoft Entra ID
+  identity federated to a GitHub environment, with no stored secret, alongside
+  Open VSX.
+- README install steps point Microsoft VS Code users at the Marketplace.
+- README intro and the manifest description now cover mapped push and pull
+  and the previewed folder sync, not only single-file hotfixes.
+- `SECURITY.md` points at private vulnerability reporting and is no longer
+  shipped in the VSIX.
+
 ## [0.4.1] - 2026-09-22
 
 No runtime changes. This release refreshes the listing and the repository

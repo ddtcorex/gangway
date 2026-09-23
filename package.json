@@ -1,8 +1,8 @@
 {
   "name": "gangway",
   "displayName": "Gangway",
-  "description": "Single-file SFTP hotfix editing for VS Code.",
-  "version": "0.4.1",
+  "description": "Explicit SFTP editing for VS Code: hotfix one remote file, or preview-sync mapped folders. Never uploads on save.",
+  "version": "0.4.2",
   "publisher": "ddtcorex",
   "license": "MIT",
   "icon": "media/icon.png",

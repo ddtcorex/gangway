@@ -1,39 +1,47 @@
 # Gangway
 
 [![CI](https://github.com/ddtcorex/gangway/actions/workflows/ci.yml/badge.svg)](https://github.com/ddtcorex/gangway/actions/workflows/ci.yml)
+[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/ddtcorex.gangway)](https://marketplace.visualstudio.com/items?itemName=ddtcorex.gangway)
 [![Open VSX](https://img.shields.io/open-vsx/v/ddtcorex/gangway)](https://open-vsx.org/extension/ddtcorex/gangway)
 [![Open VSX downloads](https://img.shields.io/open-vsx/dt/ddtcorex/gangway)](https://open-vsx.org/extension/ddtcorex/gangway)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-Single-file SFTP hotfix editing for VS Code: browse a remote server, edit one
-file locally, and push it back explicitly. No sync daemon, no folder
-mirroring, no auto-upload. You decide exactly when a change goes live.
+Explicit SFTP editing for VS Code. Browse a remote server, edit a file
+locally, and push it back when you decide to. When a workspace folder maps to
+a server path, you can also push or pull mapped files and folders, or sync a
+whole folder after reviewing a preview of what differs. Nothing uploads on
+save, and nothing runs in the background: every transfer is a command you run.
 
 ## Why
 
 Sometimes you need to fix one file on a server right now: a config value, a
-broken template, a stray typo in production. Gangway gives you that one-file
-deployment workflow inside VS Code instead of `vim` over raw `ssh`, or a full
-sync tool built for a workflow you do not need.
+broken template, a stray typo in production. Gangway gives you that hotfix
+workflow inside VS Code instead of `vim` over raw `ssh`, and refuses the
+upload if someone changed the server copy after you downloaded it. When a
+project lives both in a local workspace and on a server, path mappings add
+one-confirm push and pull for a file or folder, plus a previewed sync for a
+folder or the whole workspace. There is no sync daemon, and no tool that
+uploads the moment you save.
 
 ## Install
 
-Gangway is published on [Open VSX](https://open-vsx.org/extension/ddtcorex/gangway),
-the registry used by VSCodium, Gitpod, Theia and Eclipse Che:
+Gangway is published on the
+[VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=ddtcorex.gangway)
+and on [Open VSX](https://open-vsx.org/extension/ddtcorex/gangway), the
+registry used by VSCodium, Gitpod, Theia and Eclipse Che:
 
+- **Microsoft VS Code:** install `Gangway` from the Extensions view, or run
+  `code --install-extension ddtcorex.gangway`.
 - **VSCodium and other Open VSX clients:** install `Gangway` from the
   Extensions view, or run `codium --install-extension ddtcorex.gangway`.
-- **Microsoft VS Code:** Gangway is not on the VS Code Marketplace yet, so
-  install the VSIX from the
-  [latest GitHub release](https://github.com/ddtcorex/gangway/releases/latest):
+- **Offline or a pinned version:** download `gangway.vsix` from the
+  [GitHub releases](https://github.com/ddtcorex/gangway/releases) and run:
 
   ```sh
   code --install-extension gangway.vsix
   ```
 
-  Add `--force` to reinstall or to downgrade over an installed version. The
-  same VSIX is downloadable from
-  [Open VSX](https://open-vsx.org/extension/ddtcorex/gangway).
+  Add `--force` to reinstall or to downgrade over an installed version.
 
 ## Requirements
 
