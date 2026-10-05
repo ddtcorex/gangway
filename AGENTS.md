@@ -114,6 +114,6 @@ pnpm run build:e2e && pnpm run test:e2e   # needs docker sftp + display (xvfb in
 
 - QA standard: `docs/testing.md` (unit / docker-integration / e2e policy, E2E
   timeout rule, secret-leak tests).
-- CI: `.github/workflows/ci.yml` (reusable `ddtcorex/dsh-maestro-ci`
+- CI: `.github/workflows/ci.yml` (reusable `ddtcorex/maestro-ci`
   `node-plugin.yml` pin + dedicated e2e job). Green CI is a merge
   requirement, not a suggestion.

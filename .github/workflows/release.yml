@@ -98,7 +98,7 @@ jobs:
         if: vars.MARKETPLACE_PUBLISH == 'true'
         run: pnpm dlx --allow-build=@vscode/vsce-sign @vscode/vsce publish --packagePath gangway.vsix --azure-credential --skip-duplicate
 
-      # Same pattern as ddtcorex/dsh-maestro-ci node-release.yml: take the
+      # Same pattern as ddtcorex/maestro-ci node-release.yml: take the
       # matching `## [X.Y.Z]` section from CHANGELOG.md as the release body
       # and let GitHub append its auto-generated notes on top.
       - name: Extract changelog section

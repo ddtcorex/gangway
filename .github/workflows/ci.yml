@@ -18,7 +18,7 @@ jobs:
     # require-lib-index is off: this repo ships dist/extension.js (vsce),
     # not a Cordis lib/index.js. No packageManager pin in the manifest, so
     # the pnpm version must be passed explicitly here.
-    uses: ddtcorex/dsh-maestro-ci/.github/workflows/node-plugin.yml@7acac89da2ba99457f8b4edfc683ce621ecacc21
+    uses: ddtcorex/maestro-ci/.github/workflows/node-plugin.yml@7acac89da2ba99457f8b4edfc683ce621ecacc21
     with:
       pnpm-version: "11"
       node-version: "22"
