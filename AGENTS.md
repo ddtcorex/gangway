@@ -54,6 +54,14 @@ artifact is `dist/extension.js` (esbuild) via `vsce`.
   workspace↔remote resolution, overlap notes), `syncPreview.ts`
   (tree compare + sidecar-aware classify + bounded-parallel walk),
   `excludes.ts` (exclude-pattern matcher),
+  `linkResolver.ts` (listing-time symlink classification: file, dir,
+  broken, loop; bounded-parallel), `realTarget.ts` (`resolveTarget`:
+  realpath of the path in play and of the root, nearest-existing-ancestor
+  walk, dangling-link and loop refusal, `gateWriteTarget`
+  allow/confirm/block), `pushTarget.ts` (single-file push lands on the
+  fresh real path, retarget check, out-of-root confirmation),
+  `destinationGate.ts` (one per bulk operation: refuses a destination
+  directory that really is outside the root),
   `testConnection.ts` (one-off draft dial, 15s bound, static messages).
 - `src/ui/` — `gangwayTreeProvider.ts` (lazy explorer, double-click to
   open, drag & drop controller), `connectionFormPanel.ts` +

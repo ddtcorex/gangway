@@ -111,6 +111,16 @@ remote tree's context menu or in the Command Palette under `Gangway:`.
   in the editor. Zero-config: the first workspace folder maps to the
   connection path. A pulled file keeps its existing local mode when it already
   exists, and a fresh destination gets the default.
+- **Symlinks.** A link to a directory expands like a folder and a link to a
+  file opens like a file, with a symlink icon and the real target path in the
+  tooltip. Saving pushes to the real target, so the link itself is never
+  replaced by a regular file, and deleting a link removes only the link,
+  never the target. Every gate (freeze, root containment, conflict check,
+  edit-session lock) judges the resolved real path, and the connection root
+  is resolved too, so a `current -> releases/42` deploy layout stays inside
+  the root. A target outside the root asks for confirmation naming the real
+  path on the first push, and a frozen connection refuses it. Broken links
+  and loops are dimmed and explain themselves when clicked.
 - **Conflict detection.** Uploading is refused, not silently overwritten, if
   the server copy has changed since you downloaded it.
 - **Edit-session awareness.** If the same file is already open for editing in
@@ -176,6 +186,14 @@ pnpm run build:e2e && pnpm run test:e2e   # real extension host, needs the docke
 - Manual workflow by design: no auto-upload, no folder watching, no background
   sync. Every transfer is an explicit action, and remote changes are never
   watched.
+- Bulk operations (folder download and upload, sync, mapped push) do not
+  follow symlinks: links are skipped and reported, and a bulk upload into a
+  directory link that points outside the connection root is refused. Links
+  cannot be created or retargeted from Gangway.
+- On OpenSSH servers a pair of links pointing at each other reports as "no
+  such file", so it is shown as a broken link rather than a loop. Either way
+  nothing is written through it. A link to one of its own ancestors is shown
+  as a loop.
 - No support for OS keychain-backed key passphrases beyond what
   `ssh2-sftp-client` itself provides.
 
