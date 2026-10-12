@@ -166,7 +166,7 @@ export class GangwayTreeProvider implements vscode.TreeDataProvider<GangwayTreeN
     }
     item.contextValue = unusable ? 'gangway.brokenLink' : node.entry.isDirectory ? 'gangway.folder' : 'gangway.file';
     if (unusable) {
-      item.command = { command: 'gangway.internalFileClick', title: 'Broken Link', arguments: [node] };
+      item.command = { command: 'gangway.internalFileClick', title: link?.kind === 'unresolved' ? 'Unresolved Link' : 'Broken Link', arguments: [node] };
     } else if (!node.entry.isDirectory) {
       // TreeItem.command fires on every click, including a click that
       // reselects the already-selected item -- unlike

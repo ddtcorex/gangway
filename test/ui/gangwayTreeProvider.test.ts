@@ -233,11 +233,12 @@ describe('GangwayTreeProvider', () => {
       const item = provider().getTreeItem(linkNode({ realPath: '/var/www/ln', kind: 'broken' }, false));
       expect(item.contextValue).toBe('gangway.brokenLink');
       expect(item.description).toBe('broken link');
-      expect(item.command?.title).not.toBe('Open File');
+      expect(item.command?.title).toBe('Broken Link');
       expect((item.iconPath as vscode.ThemeIcon).id).toBe('file-symlink-file');
       const loop = provider().getTreeItem(linkNode({ realPath: '/var/www/ln', kind: 'loop' }, false));
       expect(loop.contextValue).toBe('gangway.brokenLink');
       expect(loop.description).toBe('link loop');
+      expect(loop.command?.title).toBe('Broken Link');
     });
 
     it('unresolved link is dimmed, labelled, and still deletable', () => {
@@ -245,6 +246,7 @@ describe('GangwayTreeProvider', () => {
       expect(item.contextValue).toBe('gangway.brokenLink');
       expect(item.description).toBe('unresolved link');
       expect(item.command?.command).toBe('gangway.internalFileClick');
+      expect(item.command?.title).toBe('Unresolved Link');
       expect(item.collapsibleState).toBe(vscode.TreeItemCollapsibleState.None);
       expect((item.iconPath as vscode.ThemeIcon).id).toBe('file-symlink-file');
     });
