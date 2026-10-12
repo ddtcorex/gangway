@@ -374,6 +374,9 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
 
   /** The one place the tree is refreshed: stale link kinds go with it. */
   function refreshTree(): void {
+    // Abort first: a batch still in flight must not write pre-mutation
+    // results back into the cache after it is cleared.
+    abortLinkResolutions();
     linkCache.clear();
     treeProvider.refresh();
   }

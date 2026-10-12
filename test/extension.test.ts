@@ -2024,6 +2024,23 @@ describe('activate - realistic command invocation', () => {
         expect(fakeRawClient.realPath.mock.calls.length).toBe(8 + 20);
       });
 
+      it('Refresh aborts an in-flight batch so its pre-refresh results are never cached', async () => {
+        const provider = capturedProvider as { getChildren: (n?: unknown) => Promise<unknown[]> };
+        fakeRawClient.list.mockResolvedValue(manyLinks(4));
+        const release = gatedRealPath();
+        const dir = nodeFor('/var/www/app', true);
+
+        const pending = provider.getChildren(dir);
+        await settle();
+        await handlers.get('gangway.refreshExplorer')!();
+        release();
+        await pending;
+
+        fakeRawClient.realPath.mockClear().mockImplementation(async (p: string) => p);
+        await provider.getChildren(dir);
+        expect(fakeRawClient.realPath.mock.calls.length).toBe(4);
+      });
+
       it('disposing the extension aborts in-flight resolution and caches nothing', async () => {
         const ctx = fakeContext();
         const second = activate(ctx);
