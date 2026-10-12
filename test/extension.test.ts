@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,11 +16,17 @@ import { env as mockEnv } from './mocks/vscode';
 // posixRename/delete/mkdir/list. Real SFTP `stat()` returns `modifyTime`, never `mtime` --
 // `SftpClientAdapter` translates it, so this fake returns `modifyTime` too,
 // exercising the same translation path a real connection would.
-const fakeRawClient = vi.hoisted(() => ({
+const fakeRawClient = vi.hoisted(() => {
+  const client = {
   connect: vi.fn().mockResolvedValue(undefined),
   end: vi.fn().mockResolvedValue(undefined),
   list: vi.fn().mockResolvedValue([] as Array<{ name: string; type: string }>),
   stat: vi.fn().mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: false }),
+  // Identity realPath and a not-a-link lstat by default, so every plain-file
+  // test resolves exactly as before; link tests override both. lstat answers
+  // like the stat fake (missing for stat is missing for lstat).
+  lstat: vi.fn().mockImplementation(async (p: string) => ({ ...(await client.stat(p)), isSymbolicLink: false })),
+  realPath: vi.fn().mockImplementation(async (p: string) => p),
   fastGet: vi.fn().mockImplementation(async (_remotePath: string, localPath: string) => {
     await fs.mkdir(path.dirname(localPath), { recursive: true });
     await fs.writeFile(localPath, 'server content');
@@ -31,13 +37,19 @@ const fakeRawClient = vi.hoisted(() => ({
   mkdir: vi.fn().mockResolvedValue(undefined),
   rmdir: vi.fn().mockResolvedValue(undefined),
   chmod: vi.fn().mockResolvedValue(undefined),
-}));
+  };
+  return client;
+});
 
 function resetFakeClient(): void {
   fakeRawClient.connect.mockClear();
   fakeRawClient.end.mockClear();
   fakeRawClient.list.mockReset().mockResolvedValue([]);
   fakeRawClient.stat.mockReset().mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: false });
+  fakeRawClient.lstat
+    .mockReset()
+    .mockImplementation(async (p: string) => ({ ...(await fakeRawClient.stat(p)), isSymbolicLink: false }));
+  fakeRawClient.realPath.mockReset().mockImplementation(async (p: string) => p);
   fakeRawClient.fastGet.mockClear();
   fakeRawClient.fastPut.mockClear();
   fakeRawClient.posixRename.mockClear();
@@ -70,9 +82,9 @@ import { activate } from '../src/extension';
 import { AuditLog } from '../src/auditLog';
 import { ConnectionPool } from '../src/transfer/connectionPool';
 import type { ConnectionManager } from '../src/connectionManager';
-import { writeSidecar } from '../src/tmpStore';
+import { readSidecar, writeSidecar } from '../src/tmpStore';
 import { tmpFilePathFor } from '../src/tmpPath';
-import type { ConnectionConfig } from '../src/types';
+import type { ConnectionConfig, SidecarMeta } from '../src/types';
 
 /**
  * `globalStorageUri` is the real, always-writable per-extension directory VS
@@ -175,6 +187,7 @@ describe('activate - realistic command invocation', () => {
   let connection: ConnectionConfig;
   let connectionManager: ConnectionManager;
   let osTmpdirSpy: ReturnType<typeof vi.spyOn>;
+  let capturedProvider: { getChildren: (n?: unknown) => Promise<unknown[]> };
   let capturedTreeView: { __test_fireDidChangeSelection: (node: unknown) => void } | undefined;
 
   beforeEach(async () => {
@@ -200,6 +213,7 @@ describe('activate - realistic command invocation', () => {
     const originalCreateTreeView = vscode.window.createTreeView;
     vscode.window.createTreeView = ((id: string, options: never) => {
       const view = originalCreateTreeView(id, options);
+      capturedProvider = (options as unknown as { treeDataProvider: typeof capturedProvider }).treeDataProvider;
       capturedTreeView = view as unknown as { __test_fireDidChangeSelection: (node: unknown) => void };
       return view;
     }) as typeof originalCreateTreeView;
@@ -357,6 +371,92 @@ describe('activate - realistic command invocation', () => {
     }
   });
 
+  describe('gangway.downloadFolder through a directory link', () => {
+    const linkFolder = (p: string) => ({
+      connectionId: connection.id,
+      entry: { path: p, isDirectory: true, isSymbolicLink: true, size: 0 },
+    });
+    const outside = () =>
+      fakeRawClient.realPath.mockImplementation(async (p: string) =>
+        p === '/var/www/app/shared' ? '/srv/other' : p,
+      );
+
+    it('asks with the real path for a link that leaves the root and downloads after Download', async () => {
+      outside();
+      fakeRawClient.list.mockImplementation(async (d: string) =>
+        d === '/var/www/app/shared' ? [{ name: 'a.php', type: '-' }] : [],
+      );
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      mockWindow.__test_queueWarning('Download');
+
+      await handlers.get('gangway.downloadFolder')!(linkFolder('/var/www/app/shared'));
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        'This folder is a link to /srv/other, outside the connection root. Download its contents anyway?',
+        { modal: true },
+        'Download',
+      );
+      expect(fakeRawClient.fastGet).toHaveBeenCalledWith('/var/www/app/shared/a.php', expect.any(String));
+      warnSpy.mockRestore();
+    });
+
+    it('cancel downloads nothing and shows no error dialog', async () => {
+      outside();
+      const errSpy = vi.spyOn(vscode.window, 'showErrorMessage');
+      mockWindow.__test_queueWarning(undefined);
+
+      await handlers.get('gangway.downloadFolder')!(linkFolder('/var/www/app/shared'));
+
+      expect(fakeRawClient.list).not.toHaveBeenCalled();
+      expect(fakeRawClient.fastGet).not.toHaveBeenCalled();
+      expect(errSpy).not.toHaveBeenCalled();
+      errSpy.mockRestore();
+    });
+
+    it('an in-root link and a plain folder get no prompt; only the link costs a resolve', async () => {
+      fakeRawClient.list.mockResolvedValue([]);
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+
+      await handlers.get('gangway.downloadFolder')!(linkFolder('/var/www/app/shared'));
+      expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('outside the connection root'), expect.anything(), expect.anything());
+      expect(fakeRawClient.list).toHaveBeenCalledWith('/var/www/app/shared');
+
+      fakeRawClient.realPath.mockClear();
+      await handlers.get('gangway.downloadFolder')!({
+        connectionId: connection.id,
+        entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 },
+      });
+      expect(fakeRawClient.realPath).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it('a broken or looping link shows a plain warning without Retry or the clicked path', async () => {
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      const errSpy = vi.spyOn(vscode.window, 'showErrorMessage');
+      fakeRawClient.realPath.mockImplementation(async () => undefined);
+      fakeRawClient.lstat.mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: true });
+
+      await handlers.get('gangway.downloadFolder')!(linkFolder('/var/www/app/shared'));
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0]).toHaveLength(1);
+      expect(String(warnSpy.mock.calls[0][0])).toContain('shared');
+      expect(String(warnSpy.mock.calls[0][0])).not.toContain('/var/www/app/shared');
+
+      warnSpy.mockClear();
+      fakeRawClient.realPath.mockImplementation(async () => {
+        throw Object.assign(new Error('loop'), { code: 'ELOOP' });
+      });
+      await handlers.get('gangway.downloadFolder')!(linkFolder('/var/www/app/shared'));
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0]).toHaveLength(1);
+      expect(String(warnSpy.mock.calls[0][0])).not.toContain('/var/www/app/shared');
+      expect(errSpy).not.toHaveBeenCalled();
+      expect(fakeRawClient.list).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+      errSpy.mockRestore();
+    });
+  });
+
   it('gangway.downloadFolder warns and never touches the network when invoked with no node', async () => {
     const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
     const handler = handlers.get('gangway.downloadFolder')!;
@@ -437,6 +537,86 @@ describe('activate - realistic command invocation', () => {
     expect(fakeRawClient.stat).toHaveBeenCalledWith('/var/www/app/config.php');
     expect(fakeRawClient.fastPut).toHaveBeenCalledWith(localPath, '/var/www/app/config.php.tmp');
     expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/app/config.php.tmp', '/var/www/app/config.php');
+  });
+
+  describe('push through a link', () => {
+    async function seedLinkFile(extra: Partial<SidecarMeta> = {}): Promise<string> {
+      const localPath = path.join(tmpHome, 'linked-config.php');
+      await fs.writeFile(localPath, 'edited content');
+      await writeSidecar(localPath, {
+        connectionId: connection.id,
+        remotePath: '/var/www/app/config.php',
+        realPath: '/var/www/shared/config.php',
+        mtime: 1700000000000,
+        size: 5,
+        downloadedAt: Date.now(),
+        ...extra,
+      });
+      fakeRawClient.stat.mockResolvedValue({ size: 5, modifyTime: 1700000000000, isDirectory: false, isSymbolicLink: false });
+      vscode.window.activeTextEditor = { document: { uri: { fsPath: localPath } } } as unknown as vscode.TextEditor;
+      return localPath;
+    }
+
+    it('writes the tmp file and renames at the real target, never at the clicked link path', async () => {
+      const localPath = await seedLinkFile();
+      fakeRawClient.realPath.mockImplementation(async (p: string) =>
+        p === '/var/www/app/config.php' ? '/var/www/shared/config.php' : p,
+      );
+
+      await handlers.get('gangway.uploadFile')!();
+
+      expect(fakeRawClient.stat).toHaveBeenCalledWith('/var/www/shared/config.php');
+      expect(fakeRawClient.lstat).toHaveBeenCalledWith('/var/www/shared/config.php');
+      expect(fakeRawClient.fastPut).toHaveBeenCalledWith(localPath, '/var/www/shared/config.php.tmp');
+      expect(fakeRawClient.posixRename).toHaveBeenCalledWith(
+        '/var/www/shared/config.php.tmp',
+        '/var/www/shared/config.php',
+      );
+      const written = [...fakeRawClient.fastPut.mock.calls, ...fakeRawClient.posixRename.mock.calls].flat();
+      expect(written.some((p) => String(p).startsWith('/var/www/app/config.php'))).toBe(false);
+      const sidecar = await readSidecar(localPath);
+      expect(sidecar!.remotePath).toBe('/var/www/app/config.php');
+      expect(sidecar!.realPath).toBe('/var/www/shared/config.php');
+    });
+
+    it('warns and pushes nothing when the link now points somewhere else', async () => {
+      await seedLinkFile();
+      fakeRawClient.realPath.mockImplementation(async (p: string) =>
+        p === '/var/www/app/config.php' ? '/var/www/shared/other.php' : p,
+      );
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+
+      await handlers.get('gangway.uploadFile')!();
+
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('now points elsewhere'));
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+      expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+    });
+
+    it('asks before pushing outside the root and pushes nothing when declined', async () => {
+      await seedLinkFile({ realPath: '/srv/shared/config.php' });
+      fakeRawClient.realPath.mockImplementation(async (p: string) =>
+        p === '/var/www/app/config.php' ? '/srv/shared/config.php' : p,
+      );
+      mockWindow.__test_queueWarning(undefined);
+
+      await handlers.get('gangway.uploadFile')!();
+
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+    });
+
+    it('pushes outside the root after a yes and remembers it in the sidecar', async () => {
+      const localPath = await seedLinkFile({ realPath: '/srv/shared/config.php' });
+      fakeRawClient.realPath.mockImplementation(async (p: string) =>
+        p === '/var/www/app/config.php' ? '/srv/shared/config.php' : p,
+      );
+      mockWindow.__test_queueWarning('Push');
+
+      await handlers.get('gangway.uploadFile')!();
+
+      expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/srv/shared/config.php.tmp', '/srv/shared/config.php');
+      expect((await readSidecar(localPath))!.outsideRootConfirmedFor).toBe('/srv/shared/config.php');
+    });
   });
 
   it('gangway.uploadFile warns and never attempts an upload when there is no active editor', async () => {
@@ -637,6 +817,237 @@ describe('activate - realistic command invocation', () => {
       expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
     });
 
+    it('delete of a link never calls rmdir: a dir link is unlinked without counting or recursing', async () => {
+      mockWindow.__test_queueWarning('Delete');
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      const inputSpy = vi.spyOn(vscode.window, 'showInputBox');
+
+      await handlers.get('gangway.deleteRemote')!({
+        connectionId: connection.id,
+        entry: { path: '/var/www/app/shared', isDirectory: true, isSymbolicLink: true, size: 0 },
+      });
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        'Delete the link shared? The target is not touched.',
+        { modal: true },
+        'Delete',
+      );
+      expect(inputSpy).not.toHaveBeenCalled();
+      expect(fakeRawClient.list).not.toHaveBeenCalled();
+      expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
+      expect(fakeRawClient.delete).toHaveBeenCalledTimes(1);
+      expect(fakeRawClient.delete).toHaveBeenCalledWith('/var/www/app/shared');
+      warnSpy.mockRestore();
+      inputSpy.mockRestore();
+    });
+
+    it('deletes a dangling link by unlinking it: only the parent is resolved, never the link, never rmdir', async () => {
+      const linkPath = '/var/www/app/dangling';
+      fakeRawClient.lstat.mockImplementation(async (p: string) => {
+        if (p === linkPath) return { size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: true };
+        return { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false };
+      });
+      fakeRawClient.stat.mockImplementation(async (p: string) => {
+        if (p === linkPath) throw Object.assign(new Error('No such file'), { code: 2 });
+        return { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false };
+      });
+      fakeRawClient.realPath.mockImplementation(async (p: string) => {
+        if (p === linkPath) throw Object.assign(new Error('No such file'), { code: 2 });
+        return p;
+      });
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      mockWindow.__test_queueWarning('Delete');
+
+      await handlers.get('gangway.deleteRemote')!({
+        connectionId: connection.id,
+        entry: { path: linkPath, isDirectory: false, isSymbolicLink: true, size: 0, link: { realPath: linkPath, kind: 'broken' } },
+      });
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        'Delete the link dangling? The target is not touched.',
+        { modal: true },
+        'Delete',
+      );
+      expect(fakeRawClient.delete).toHaveBeenCalledTimes(1);
+      expect(fakeRawClient.delete).toHaveBeenCalledWith(linkPath);
+      expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
+      expect(fakeRawClient.stat).not.toHaveBeenCalledWith(linkPath);
+      expect(fakeRawClient.realPath).not.toHaveBeenCalledWith(linkPath);
+      warnSpy.mockRestore();
+    });
+
+    it('delete re-checks with lstat: a folder row that is now a link is unlinked, not recursed', async () => {
+      mockWindow.__test_queueWarning('Delete');
+      fakeRawClient.lstat.mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: true });
+
+      await handlers.get('gangway.deleteRemote')!(folderNode('/var/www/app/dir'));
+
+      expect(fakeRawClient.list).not.toHaveBeenCalled();
+      expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
+      expect(fakeRawClient.delete).toHaveBeenCalledWith('/var/www/app/dir');
+    });
+
+    it('a link inside an out-of-root dir link asks with the real path and unlinks the resolved path only after a yes', async () => {
+      fakeRawClient.realPath.mockImplementation(async (p: string) =>
+        p === '/var/www/app/shared' || p.startsWith('/var/www/app/shared/')
+          ? `/srv/other${p.slice('/var/www/app/shared'.length)}`
+          : p,
+      );
+      fakeRawClient.stat.mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false });
+      const linkNode = {
+        connectionId: connection.id,
+        entry: { path: '/var/www/app/shared/foo', isDirectory: false, isSymbolicLink: true, size: 0 },
+      };
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+
+      // Declined at the out-of-root gate: no link prompt, nothing unlinked.
+      mockWindow.__test_queueWarning(undefined);
+      await handlers.get('gangway.deleteRemote')!(linkNode);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        'This location is really /srv/other, outside the connection root. Continue?',
+        { modal: true },
+        'Continue',
+      );
+      expect(fakeRawClient.delete).not.toHaveBeenCalled();
+
+      // Accepted at the gate but declined at the link prompt: nothing unlinked.
+      warnSpy.mockClear();
+      mockWindow.__test_queueWarning('Continue');
+      mockWindow.__test_queueWarning(undefined);
+      await handlers.get('gangway.deleteRemote')!(linkNode);
+      expect(warnSpy).toHaveBeenCalledTimes(2);
+      expect(warnSpy.mock.calls[1][0]).toBe(
+        'Delete the link foo (really /srv/other/foo)? The target is not touched.',
+      );
+      expect(fakeRawClient.delete).not.toHaveBeenCalled();
+
+      // Accepted twice: the resolved path is unlinked, never the link text.
+      mockWindow.__test_queueWarning('Continue');
+      mockWindow.__test_queueWarning('Delete');
+      await handlers.get('gangway.deleteRemote')!(linkNode);
+      expect(fakeRawClient.delete).toHaveBeenCalledTimes(1);
+      expect(fakeRawClient.delete).toHaveBeenCalledWith('/srv/other/foo');
+      expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it('a link delete on a frozen connection stops before any prompt or network call', async () => {
+      const frozen = await activateFrozenConnection();
+      resetFakeClient();
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.deleteRemote')!({
+        connectionId: frozen.id,
+        entry: { path: '/var/www/app/shared/foo', isDirectory: false, isSymbolicLink: true, size: 0 },
+      });
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('frozen'));
+      expect(warnSpy).not.toHaveBeenCalled();
+      expect(fakeRawClient.lstat).not.toHaveBeenCalled();
+      expect(fakeRawClient.delete).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+      infoSpy.mockRestore();
+    });
+
+    it('a folder under an out-of-root dir link asks with the real path and rmdirs the resolved path only after a yes', async () => {
+      fakeRawClient.realPath.mockImplementation(async (p: string) =>
+        p === '/var/www/app/ext' || p.startsWith('/var/www/app/ext/') ? `/etc/ext${p.slice('/var/www/app/ext'.length)}` : p,
+      );
+      fakeRawClient.stat.mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false });
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      const inputSpy = vi.spyOn(vscode.window, 'showInputBox');
+
+      // Declined: nothing listed, nothing deleted, no typed-name prompt.
+      mockWindow.__test_queueWarning(undefined);
+      await handlers.get('gangway.deleteRemote')!(folderNode('/var/www/app/ext/sub'));
+      expect(warnSpy).toHaveBeenCalledWith(
+        'This location is really /etc/ext, outside the connection root. Continue?',
+        { modal: true },
+        'Continue',
+      );
+      expect(inputSpy).not.toHaveBeenCalled();
+      expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
+      expect(fakeRawClient.delete).not.toHaveBeenCalled();
+
+      // Accepted: the typed-name prompt names the real path, rmdir hits it.
+      mockWindow.__test_queueWarning('Continue');
+      mockWindow.__test_queueInput('sub');
+      await handlers.get('gangway.deleteRemote')!(folderNode('/var/www/app/ext/sub'));
+      expect(inputSpy).toHaveBeenCalledWith({ prompt: expect.stringContaining('/etc/ext/sub') });
+      expect(fakeRawClient.rmdir).toHaveBeenCalledTimes(1);
+      expect(fakeRawClient.rmdir).toHaveBeenCalledWith('/etc/ext/sub', true);
+      warnSpy.mockRestore();
+      inputSpy.mockRestore();
+    });
+
+    it('a file under an in-root linked parent is deleted at its real path, and the prompt names it', async () => {
+      fakeRawClient.realPath.mockImplementation(async (p: string) =>
+        p === '/var/www/app/link' ? '/var/www/real' : p,
+      );
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      mockWindow.__test_queueWarning('Delete');
+
+      await handlers.get('gangway.deleteRemote')!(fileNode('/var/www/app/link/a.php'));
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0][0]).toContain('/var/www/real/a.php');
+      expect(fakeRawClient.delete).toHaveBeenCalledWith('/var/www/real/a.php');
+      warnSpy.mockRestore();
+    });
+
+    it('a cancelled link delete touches nothing', async () => {
+      mockWindow.__test_queueWarning(undefined);
+
+      await handlers.get('gangway.deleteRemote')!({
+        connectionId: connection.id,
+        entry: { path: '/var/www/app/shared', isDirectory: true, isSymbolicLink: true, size: 0 },
+      });
+
+      expect(fakeRawClient.delete).not.toHaveBeenCalled();
+      expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
+    });
+
+    it('gangway.newFolder under an out-of-root dir link asks with the real path, per operation', async () => {
+      fakeRawClient.realPath.mockImplementation(async (p: string) =>
+        p === '/var/www/app/ext' ? '/etc/ext' : p,
+      );
+      fakeRawClient.stat.mockImplementation(async (p: string) => {
+        if (p.endsWith('/new')) {
+          const err = new Error('ENOENT') as NodeJS.ErrnoException;
+          err.code = 'ENOENT';
+          throw err;
+        }
+        return { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false };
+      });
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+
+      mockWindow.__test_queueInput('new');
+      mockWindow.__test_queueWarning('Continue');
+      await handlers.get('gangway.newFolder')!(folderNode('/var/www/app/ext'));
+      expect(warnSpy).toHaveBeenCalledWith(
+        'This location is really /etc/ext, outside the connection root. Continue?',
+        { modal: true },
+        'Continue',
+      );
+      expect(fakeRawClient.mkdir).toHaveBeenCalledWith('/etc/ext/new', false);
+
+      // Never remembered: the next operation asks again, and a dismissal writes nothing.
+      fakeRawClient.mkdir.mockClear();
+      warnSpy.mockClear();
+      mockWindow.__test_queueInput('new');
+      mockWindow.__test_queueWarning(undefined);
+      await handlers.get('gangway.newFolder')!(folderNode('/var/www/app/ext'));
+      expect(warnSpy).toHaveBeenCalledWith(
+        'This location is really /etc/ext, outside the connection root. Continue?',
+        { modal: true },
+        'Continue',
+      );
+      expect(fakeRawClient.mkdir).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
     it('gangway.deleteRemote retries the whole flow on Retry: recount, reconfirm, then delete and audit', async () => {
       mockWindow.__test_queueInput('dir');
       mockWindow.__test_queueInput('dir');
@@ -731,6 +1142,34 @@ describe('activate - realistic command invocation', () => {
 
     it.each([['gangway.restoreFromTrash'], ['gangway.emptyTrash']])('%s is not registered', (id) => {
       expect(handlers.has(id)).toBe(false);
+    });
+
+    it.each([
+      [1, 'This location is really /srv/1/a.php, outside the connection root. Continue?'],
+      [2, 'These locations are really /srv/1/a.php and /srv/2/a.php, outside the connection root. Continue?'],
+      [3, 'These locations are really /srv/1/a.php, /srv/2/a.php and /srv/3/a.php, outside the connection root. Continue?'],
+      [5, 'These locations are really /srv/1/a.php, /srv/2/a.php, /srv/3/a.php and 2 more, outside the connection root. Continue?'],
+    ])('names %i out-of-root path(s) in one modal', async (count, message) => {
+      fakeRawClient.realPath.mockImplementation(async (p: string) => p.replace(/^\/var\/www\/app\/l(\d)/, '/srv/$1'));
+      fakeRawClient.stat.mockImplementation(async (p: string) =>
+        p === '/var/www/dest'
+          ? { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false }
+          : { size: 1, modifyTime: 1, isDirectory: false, isSymbolicLink: false },
+      );
+      const nodes = Array.from({ length: count }, (_, i) => ({
+        connectionId: connection.id,
+        entry: { path: `/var/www/app/l${i + 1}/a.php`, isDirectory: false, isSymbolicLink: false, size: 1 },
+      }));
+      const destNode = { connectionId: connection.id, entry: { path: '/var/www/dest', isDirectory: true, isSymbolicLink: false, size: 0 } };
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      mockWindow.__test_queueWarning(undefined);
+
+      await handlers.get('gangway.copyEntries')!(nodes);
+      await handlers.get('gangway.pasteEntries')!(destNode);
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(message, { modal: true }, 'Continue');
+      warnSpy.mockRestore();
     });
 
     it('cut then paste moves server-side with no re-upload', async () => {
@@ -1538,6 +1977,100 @@ describe('activate - realistic command invocation', () => {
       expect(refreshSpy).toHaveBeenCalledTimes(1);
     });
 
+    it('caches link resolution across listings until the Refresh command clears it', async () => {
+      const provider = capturedProvider;
+      fakeRawClient.list.mockResolvedValue([{ name: 'ln', type: 'l' }]);
+      const dir = nodeFor('/var/www/app', true);
+
+      await provider.getChildren(dir);
+      const first = fakeRawClient.realPath.mock.calls.length;
+      expect(first).toBeGreaterThan(0);
+      await provider.getChildren(dir);
+      expect(fakeRawClient.realPath.mock.calls.length).toBe(first);
+
+      await handlers.get('gangway.refreshExplorer')!();
+      await provider.getChildren(dir);
+      expect(fakeRawClient.realPath.mock.calls.length).toBeGreaterThan(first);
+    });
+
+    describe('link resolution cancellation', () => {
+      const manyLinks = (n: number) => Array.from({ length: n }, (_, i) => ({ name: `ln${i}`, type: 'l' }));
+      function gatedRealPath() {
+        let release!: () => void;
+        const gate = new Promise<void>((r) => (release = r));
+        fakeRawClient.realPath.mockImplementation(async (p: string) => {
+          await gate;
+          return p;
+        });
+        return release;
+      }
+      const settle = () => new Promise((r) => setTimeout(r, 0));
+
+      it('a second listing of the same directory aborts the first, whose result carries no link info', async () => {
+        const provider = capturedProvider as { getChildren: (n?: unknown) => Promise<Array<{ entry: { link?: unknown } }>> };
+        fakeRawClient.list.mockResolvedValue(manyLinks(20));
+        const release = gatedRealPath();
+        const dir = nodeFor('/var/www/app', true);
+
+        const first = provider.getChildren(dir);
+        await settle();
+        const second = provider.getChildren(dir);
+        await settle();
+        release();
+        const [a, b] = await Promise.all([first, second]);
+
+        expect(a.every((n) => n.entry.link === undefined)).toBe(true);
+        expect(b.every((n) => n.entry.link !== undefined)).toBe(true);
+        // 8 in flight for the superseded batch, then all 20 for the winner.
+        expect(fakeRawClient.realPath.mock.calls.length).toBe(8 + 20);
+      });
+
+      it('Refresh aborts an in-flight batch so its pre-refresh results are never cached', async () => {
+        const provider = capturedProvider as { getChildren: (n?: unknown) => Promise<unknown[]> };
+        fakeRawClient.list.mockResolvedValue(manyLinks(4));
+        const release = gatedRealPath();
+        const dir = nodeFor('/var/www/app', true);
+
+        const pending = provider.getChildren(dir);
+        await settle();
+        await handlers.get('gangway.refreshExplorer')!();
+        release();
+        await pending;
+
+        fakeRawClient.realPath.mockClear().mockImplementation(async (p: string) => p);
+        await provider.getChildren(dir);
+        expect(fakeRawClient.realPath.mock.calls.length).toBe(4);
+      });
+
+      it('disposing the extension aborts in-flight resolution and caches nothing', async () => {
+        const ctx = fakeContext();
+        const second = activate(ctx);
+        const conn = await second.connectionManager.add({
+          name: 'other',
+          host: 'example.org',
+          port: 22,
+          username: 'deploy',
+          remotePath: '/var/www',
+          authMethod: 'password',
+        });
+        const provider = capturedProvider as { getChildren: (n?: unknown) => Promise<unknown[]> };
+        fakeRawClient.list.mockResolvedValue(manyLinks(20));
+        const release = gatedRealPath();
+        const dir = { connectionId: conn.id, entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 } };
+
+        const pending = provider.getChildren(dir);
+        await settle();
+        for (const d of ctx.subscriptions) d.dispose();
+        release();
+        await pending;
+        expect(fakeRawClient.realPath.mock.calls.length).toBe(8);
+
+        fakeRawClient.realPath.mockClear().mockImplementation(async (p: string) => p);
+        await provider.getChildren(dir);
+        expect(fakeRawClient.realPath.mock.calls.length).toBe(20);
+      });
+    });
+
     it('gangway.uploadFile accepts a tree file node, resolving paths through the tmp mirror', async () => {
       const localFile = tmpFilePathFor(connection, '/var/www/app/config.php');
       await fs.mkdir(path.dirname(localFile), { recursive: true });
@@ -1763,6 +2296,27 @@ describe('activate - realistic command invocation', () => {
       handlers.get('gangway.internalFileClick')!(node);
     }
 
+    it('clicking an unresolved link warns without Retry or any path and never downloads', async () => {
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      const node = {
+        connectionId: connection.id,
+        entry: {
+          path: '/var/www/app/shared/ln',
+          isDirectory: false,
+          isSymbolicLink: true,
+          size: 0,
+          link: { realPath: '/var/www/app/shared/ln', kind: 'unresolved' as const },
+        },
+      };
+      click(node);
+      click(node);
+      expect(warnSpy).toHaveBeenCalledTimes(2);
+      expect(warnSpy.mock.calls[0]).toEqual(['ln could not be resolved right now. Refresh to try again.']);
+      expect(fakeRawClient.stat).not.toHaveBeenCalled();
+      expect(fakeRawClient.fastGet).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
     it('a single click does not download or open the file', () => {
       click(nodeFor('/var/www/app/config.php'));
 
@@ -1862,6 +2416,235 @@ describe('activate - realistic command invocation', () => {
         showDocSpy.mockRestore();
         warnSpy.mockRestore();
       }
+    });
+  });
+
+  describe('bulk destinations and open through links', () => {
+    let lines: string[];
+    let dnd: { handleDrop: (target: unknown, dataTransfer: unknown, token: unknown) => Promise<void> };
+    let conn: ConnectionConfig;
+    let workRoot: string;
+    let previousFolders: unknown;
+    let errorSpy: MockInstance<typeof vscode.window.showErrorMessage>;
+    let warnSpy: MockInstance<typeof vscode.window.showWarningMessage>;
+    let infoSpy: MockInstance<typeof vscode.window.showInformationMessage>;
+
+    /** Every path at or below `link` really lives below `real`; the rest resolves to itself. */
+    function linkDir(link: string, real: string): void {
+      fakeRawClient.realPath.mockImplementation(async (p: string) =>
+        p === link || p.startsWith(`${link}/`) ? `${real}${p.slice(link.length)}` : p,
+      );
+    }
+
+    function uriListOf(...fsPaths: string[]) {
+      const value = fsPaths.map((p) => `file://${p}`).join('\n');
+      return { get: (mime: string) => (mime === 'text/uri-list' ? { asString: async () => value } : undefined) };
+    }
+
+    beforeEach(async () => {
+      lines = [];
+      const outputSpy = vi.spyOn(vscode.window, 'createOutputChannel').mockReturnValue({
+        appendLine: (line: string) => {
+          lines.push(line);
+        },
+        show: () => {},
+        dispose: () => {},
+      } as never);
+      const originalCreateTreeView = vscode.window.createTreeView;
+      const treeSpy = vi.spyOn(vscode.window, 'createTreeView').mockImplementation(((id: string, options: never) => {
+        dnd = (options as { dragAndDropController: typeof dnd }).dragAndDropController;
+        return originalCreateTreeView(id, options);
+      }) as never);
+      const fresh = activate(fakeContext());
+      outputSpy.mockRestore();
+      treeSpy.mockRestore();
+      conn = await fresh.connectionManager.add({
+        name: 'linked',
+        host: 'example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'password',
+      });
+      await fresh.connectionManager.setWorkspaceBinding(conn.id);
+      workRoot = path.join(tmpHome, 'work');
+      await fs.mkdir(path.join(workRoot, 'sub'), { recursive: true });
+      await fs.writeFile(path.join(workRoot, 'ok.php'), '<?php // ok');
+      await fs.writeFile(path.join(workRoot, 'sub', 'x.php'), '<?php // x');
+      previousFolders = vscode.workspace.workspaceFolders;
+      (vscode.workspace as unknown as { workspaceFolders: { uri: { fsPath: string }; name: string }[] }).workspaceFolders = [
+        { uri: { fsPath: workRoot }, name: 'work' },
+      ];
+      errorSpy = vi.spyOn(vscode.window, 'showErrorMessage');
+      warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+    });
+
+    afterEach(() => {
+      (vscode.workspace as unknown as { workspaceFolders: unknown }).workspaceFolders = previousFolders;
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+      infoSpy.mockRestore();
+      mockWindow.__test_resetAnswers();
+    });
+
+    const putTargets = (): string[] => (fakeRawClient.fastPut.mock.calls as Array<[string, string]>).map(([, remote]) => remote);
+
+    it('a drag-drop into an out-of-root link directory writes nothing and reports the failure', async () => {
+      linkDir('/var/www/shared', '/etc/ext');
+      const dropped = path.join(tmpHome, 'drop.php');
+      await fs.writeFile(dropped, '<?php');
+
+      await dnd.handleDrop(
+        { connectionId: conn.id, entry: { path: '/var/www/shared', isDirectory: true, isSymbolicLink: true, size: 0 } },
+        uriListOf(dropped),
+        {},
+      );
+
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+      expect(fakeRawClient.mkdir).not.toHaveBeenCalled();
+      expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+      const message = String(errorSpy.mock.calls[0]?.[0]);
+      expect(message).toContain('"/var/www/shared"');
+      expect(message).toMatch(/outside/);
+    });
+
+    it('a drag-drop into a link directory inside the root still uploads', async () => {
+      linkDir('/var/www/current', '/var/www/releases/42');
+      const dropped = path.join(tmpHome, 'drop.php');
+      await fs.writeFile(dropped, '<?php');
+
+      await dnd.handleDrop(
+        { connectionId: conn.id, entry: { path: '/var/www/current', isDirectory: true, isSymbolicLink: true, size: 0 } },
+        uriListOf(dropped),
+        {},
+      );
+
+      expect(fakeRawClient.fastPut).toHaveBeenCalledWith(dropped, '/var/www/current/drop.php.tmp');
+      expect(errorSpy).not.toHaveBeenCalled();
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Uploaded 1 file(s)'));
+    });
+
+    it('a folder upload whose destination is an out-of-root link writes nothing and reports the failure', async () => {
+      linkDir('/var/www/app', '/etc/ext');
+      fakeRawClient.list.mockImplementation(async (dirPath: string) =>
+        dirPath === '/var/www/app' ? [{ name: 'clean.php', type: '-' }] : [],
+      );
+      const localFile = tmpFilePathFor(conn, '/var/www/app/clean.php');
+      await fs.mkdir(path.dirname(localFile), { recursive: true });
+      await fs.writeFile(localFile, 'clean content');
+      await writeSidecar(localFile, {
+        connectionId: conn.id,
+        remotePath: '/var/www/app/clean.php',
+        mtime: 0,
+        size: 0,
+        downloadedAt: Date.now(),
+      });
+
+      await handlers.get('gangway.uploadFolder')!({
+        connectionId: conn.id,
+        entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 },
+      });
+
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+      expect(fakeRawClient.mkdir).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('1 file(s) failed'), 'Retry failed', 'Dismiss');
+      expect(lines.some((l) => l.includes('/var/www/app/clean.php') && /outside/.test(l))).toBe(true);
+    });
+
+    it('a sync upload refuses only the files under an out-of-root link and uploads the rest', async () => {
+      linkDir('/var/www/sub', '/etc/ext');
+      mockWindow.__test_queuePick((items: unknown[]) => items);
+
+      await handlers.get('gangway.syncWorkspaceUp')!();
+
+      expect(putTargets()).toContain('/var/www/ok.php.tmp');
+      expect(putTargets().some((p) => p.startsWith('/var/www/sub/'))).toBe(false);
+      expect(fakeRawClient.mkdir).not.toHaveBeenCalledWith('/var/www/sub', true);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('1 file(s) failed'), 'Retry failed', 'Dismiss');
+      expect(lines.some((l) => l.includes('/var/www/sub/x.php') && /outside/.test(l))).toBe(true);
+    });
+
+    it('a sync upload of a new nested folder under an out-of-root link writes nothing there', async () => {
+      fakeRawClient.realPath.mockImplementation(async (p: string) => {
+        if (p === '/var/www/shared') return '/etc/ext';
+        // The new folders do not exist yet on the server: realpath reports missing.
+        if (p.startsWith('/var/www/shared/')) return undefined;
+        return p;
+      });
+      fakeRawClient.lstat.mockImplementation(async (p: string) => {
+        if (p.startsWith('/var/www/shared/')) throw Object.assign(new Error('No such file'), { code: 2 });
+        return { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: p === '/var/www/shared' };
+      });
+      await fs.mkdir(path.join(workRoot, 'shared', 'new', 'sub'), { recursive: true });
+      await fs.writeFile(path.join(workRoot, 'shared', 'new', 'sub', 'x.php'), '<?php // nested');
+      mockWindow.__test_queuePick((items: unknown[]) => items);
+
+      await handlers.get('gangway.syncWorkspaceUp')!();
+
+      expect(putTargets().some((p) => p.startsWith('/var/www/shared/'))).toBe(false);
+      expect((fakeRawClient.mkdir.mock.calls as Array<[string]>).some(([p]) => p.startsWith('/var/www/shared'))).toBe(false);
+      expect(lines.some((l) => l.includes('/var/www/shared/new/sub/x.php') && /outside/.test(l))).toBe(true);
+    });
+
+    it('a mapped single-file push into an out-of-root link directory writes nothing', async () => {
+      linkDir('/var/www/sub', '/etc/ext');
+      mockWindow.__test_queueWarning('Upload');
+
+      await handlers.get('gangway.uploadMappedFile')!({ fsPath: path.join(workRoot, 'sub', 'x.php') });
+
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+      expect(fakeRawClient.mkdir).not.toHaveBeenCalled();
+      expect(String(errorSpy.mock.calls[0]?.[0])).toContain('"/var/www/sub"');
+    });
+
+    it('a mapped folder push refuses the out-of-root link directory per file and pushes the rest', async () => {
+      linkDir('/var/www/sub', '/etc/ext');
+      mockWindow.__test_queueWarning('Upload 2 files');
+
+      await handlers.get('gangway.uploadMappedFolder')!({ fsPath: workRoot });
+
+      expect(putTargets()).toEqual(['/var/www/ok.php.tmp']);
+      expect(lines.some((l) => l.includes('/var/www/sub/x.php') && /outside/.test(l))).toBe(true);
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('1 failed'));
+    });
+
+    it('opening a broken link shows the broken-link message, offers no Retry, and writes nothing to disk', async () => {
+      const gone = '/var/www/app/gone.php';
+      fakeRawClient.realPath.mockImplementation(async (p: string) => (p === gone ? undefined : p));
+      fakeRawClient.lstat.mockImplementation(async (p: string) => ({
+        size: 0,
+        modifyTime: 0,
+        isDirectory: false,
+        isSymbolicLink: p === gone,
+      }));
+
+      await handlers.get('gangway.downloadFile')!({
+        connectionId: conn.id,
+        entry: { path: gone, isDirectory: false, isSymbolicLink: true, size: 0 },
+      });
+
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy.mock.calls[0]).toEqual(['gone.php is a broken link']);
+      expect(fakeRawClient.fastGet).not.toHaveBeenCalled();
+      await expect(fs.stat(tmpFilePathFor(conn, gone))).rejects.toThrow();
+      await expect(fs.stat(path.dirname(tmpFilePathFor(conn, gone)))).rejects.toThrow();
+    });
+
+    it('opening a link loop shows the loop message and offers no Retry', async () => {
+      const loop = '/var/www/app/loop.php';
+      fakeRawClient.realPath.mockImplementation(async (p: string) => {
+        if (p === loop) throw Object.assign(new Error('Too many levels of symbolic links'), { code: 'ELOOP' });
+        return p;
+      });
+
+      await handlers.get('gangway.downloadFile')!({
+        connectionId: conn.id,
+        entry: { path: loop, isDirectory: false, isSymbolicLink: true, size: 0 },
+      });
+
+      expect(errorSpy.mock.calls).toEqual([['loop.php is a symbolic link loop']]);
+      expect(fakeRawClient.fastGet).not.toHaveBeenCalled();
     });
   });
 });

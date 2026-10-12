@@ -10,10 +10,28 @@ function fakePutClient() {
     posixRename: vi.fn().mockResolvedValue(undefined),
     mkdir: vi.fn().mockResolvedValue(undefined),
     delete: vi.fn().mockResolvedValue(undefined),
+    lstat: vi.fn().mockResolvedValue({ mtime: 1, size: 1, isDirectory: false, isSymbolicLink: false }),
   };
 }
 
 describe('pushMappedFile', () => {
+  it('refuses a destination that is itself a symlink and writes nothing', async () => {
+    const client = fakePutClient();
+    client.lstat.mockResolvedValue({ mtime: 1, size: 1, isDirectory: false, isSymbolicLink: true });
+    await expect(pushMappedFile(client, '/ws/app.php', '/var/www/app.php')).rejects.toThrow(
+      '"/var/www/app.php" is a symlink, and Gangway did not resolve it to its target for this upload, so the link was left untouched and nothing was written.',
+    );
+    expect(client.fastPut).not.toHaveBeenCalled();
+    expect(client.posixRename).not.toHaveBeenCalled();
+  });
+
+  it('pushes a new file when the destination does not exist yet', async () => {
+    const client = fakePutClient();
+    client.lstat.mockRejectedValue(Object.assign(new Error('No such file'), { code: 2 }));
+    await pushMappedFile(client, '/ws/app.php', '/var/www/app.php');
+    expect(client.posixRename).toHaveBeenCalledWith('/var/www/app.php.tmp', '/var/www/app.php');
+  });
+
   it('puts to .tmp then posix-renames over the target', async () => {
     const client = fakePutClient();
     await pushMappedFile(client, '/ws/app.php', '/var/www/app.php');
@@ -36,6 +54,28 @@ describe('pushMappedFile', () => {
     for (const call of [...client.fastPut.mock.calls, ...client.posixRename.mock.calls, ...client.mkdir.mock.calls]) {
       expect(String(call[1] ?? call[0])).not.toContain('.gangway-backup-');
     }
+  });
+});
+
+describe('pushMappedFile destinationGate', () => {
+  it('pushMappedFile with a refusing destinationGate makes no mkdir, no fastPut, no posixRename', async () => {
+    const client = fakePutClient();
+    const destinationGate = vi.fn().mockRejectedValue(new Error('outside the connection root'));
+    await expect(pushMappedFile(client, '/ws/app.php', '/var/www/shared/app.php', { destinationGate })).rejects.toThrow(
+      'outside the connection root',
+    );
+    expect(client.mkdir).not.toHaveBeenCalled();
+    expect(client.fastPut).not.toHaveBeenCalled();
+    expect(client.posixRename).not.toHaveBeenCalled();
+  });
+
+  it('awaits the gate with the posix dirname of the remote path', async () => {
+    const client = fakePutClient();
+    const destinationGate = vi.fn().mockResolvedValue(undefined);
+    await pushMappedFile(client, '/ws/app.php', '/var/www/shared/app.php', { destinationGate });
+    expect(destinationGate).toHaveBeenCalledWith('/var/www/shared');
+    expect(destinationGate.mock.invocationCallOrder[0]).toBeLessThan(client.mkdir.mock.invocationCallOrder[0]);
+    expect(client.posixRename).toHaveBeenCalledWith('/var/www/shared/app.php.tmp', '/var/www/shared/app.php');
   });
 });
 

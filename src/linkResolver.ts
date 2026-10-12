@@ -1,0 +1,162 @@
+import type { RemoteEntry } from './folderQueue';
+import type { RemoteStat } from './types';
+import { isNotFoundError } from './remotePathUtils';
+
+export type LinkKind = 'file' | 'dir' | 'broken' | 'loop' | 'unresolved';
+
+export interface LinkInfo {
+  realPath: string;
+  kind: LinkKind;
+}
+
+/** Structural subset of the SFTP adapter used to resolve symlinks. */
+export interface LinkResolveClient {
+  stat(p: string): Promise<RemoteStat>;
+  realPath(p: string): Promise<string | undefined>;
+}
+
+const DEFAULT_CONCURRENCY = 8;
+const DEFAULT_CACHE_TTL_MS = 60_000;
+
+/**
+ * Short-lived memo of successful link resolutions, so re-expanding or
+ * refreshing a directory full of links does not repeat two round trips per
+ * entry. Failures (`unresolved`) are never stored: a retry must hit the wire.
+ */
+export class LinkCache {
+  private readonly entries = new Map<string, { info: LinkInfo; expires: number }>();
+
+  constructor(
+    private readonly ttlMs: number = DEFAULT_CACHE_TTL_MS,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  get(key: string): LinkInfo | undefined {
+    const hit = this.entries.get(key);
+    if (!hit) return undefined;
+    if (this.now() >= hit.expires) {
+      this.entries.delete(key);
+      return undefined;
+    }
+    return hit.info;
+  }
+
+  set(key: string, info: LinkInfo): void {
+    if (info.kind === 'unresolved') return;
+    this.entries.set(key, { info, expires: this.now() + this.ttlMs });
+  }
+
+  clear(): void {
+    this.entries.clear();
+  }
+
+  clearPrefix(prefix: string): void {
+    for (const key of [...this.entries.keys()]) {
+      if (key.startsWith(prefix)) this.entries.delete(key);
+    }
+  }
+}
+/**
+ * Loop wording only, never a bare "loop": ssh2-sftp-client appends the path
+ * to every error message, so a missing `loop-a` (seen from atmoz/sftp as
+ * "_xstat: No such file: /var/www/nested/loop-a") must not read as a loop.
+ */
+const LOOP_RE = /\bELOOP\b|too many levels|(?:symlink|symbolic link) loop/i;
+
+export function isLoopError(err: unknown): boolean {
+  if ((err as { code?: unknown } | null)?.code === 'ELOOP') return true;
+  const message = err instanceof Error ? err.message : String(err);
+  return LOOP_RE.test(message);
+}
+
+function isStrictAncestor(ancestor: string, path: string): boolean {
+  if (ancestor === path) return false;
+  const prefix = ancestor.endsWith('/') ? ancestor : `${ancestor}/`;
+  return path.startsWith(prefix);
+}
+
+async function kindFromStat(
+  client: LinkResolveClient,
+  path: string,
+): Promise<'file' | 'dir' | 'broken' | 'loop' | 'unresolved'> {
+  try {
+    return (await client.stat(path)).isDirectory ? 'dir' : 'file';
+  } catch (err) {
+    if (isLoopError(err)) return 'loop';
+    // Only a definite not-found is a broken link; a dropped connection, a
+    // permission error or a timeout says nothing about the target.
+    return isNotFoundError(err) ? 'broken' : 'unresolved';
+  }
+}
+
+/** LinkInfo plus whether the result is trustworthy enough to memoize. */
+async function resolveLinkDetailed(
+  client: LinkResolveClient,
+  linkPath: string,
+): Promise<{ info: LinkInfo; cacheable: boolean }> {
+  let resolved: string | undefined;
+  try {
+    resolved = await client.realPath(linkPath);
+  } catch (err) {
+    if (isLoopError(err)) return { info: { realPath: linkPath, kind: 'loop' }, cacheable: true };
+    // Server without realpath support, or a transient failure: treat the
+    // path as its own real path, but never memoize that guess.
+    return { info: { realPath: linkPath, kind: await kindFromStat(client, linkPath) }, cacheable: false };
+  }
+  if (resolved === undefined) return { info: { realPath: linkPath, kind: 'broken' }, cacheable: true };
+  if (isStrictAncestor(resolved, linkPath)) return { info: { realPath: resolved, kind: 'loop' }, cacheable: true };
+  return { info: { realPath: resolved, kind: await kindFromStat(client, linkPath) }, cacheable: true };
+}
+
+export async function resolveLink(client: LinkResolveClient, linkPath: string): Promise<LinkInfo> {
+  return (await resolveLinkDetailed(client, linkPath)).info;
+}
+
+export async function resolveLinkEntries(
+  client: LinkResolveClient,
+  entries: RemoteEntry[],
+  options: {
+    concurrency?: number;
+    signal?: AbortSignal;
+    cache?: LinkCache;
+    cacheKey?: (entry: RemoteEntry) => string;
+  } = {},
+): Promise<RemoteEntry[]> {
+  const out = entries.slice();
+  const pending: number[] = [];
+  entries.forEach((e, i) => {
+    if (e.isSymbolicLink) pending.push(i);
+  });
+  const limit = Math.max(1, options.concurrency ?? DEFAULT_CONCURRENCY);
+  const signal = options.signal;
+  let next = 0;
+
+  const worker = async (): Promise<void> => {
+    while (!signal?.aborted && next < pending.length) {
+      const idx = pending[next++];
+      const entry = entries[idx];
+      const key = options.cacheKey ? options.cacheKey(entry) : entry.path;
+      let link = options.cache?.get(key);
+      if (!link) {
+        let cacheable = true;
+        try {
+          ({ info: link, cacheable } = await resolveLinkDetailed(client, entry.path));
+        } catch {
+          link = { realPath: entry.path, kind: 'unresolved' };
+        }
+        // A superseded or cancelled batch is discarded whole: nothing it
+        // resolved after the abort is cached or written back.
+        if (signal?.aborted) return;
+        if (cacheable) options.cache?.set(key, link);
+      }
+      // Only an ancestor loop is expandable; a loop reported by the server is not.
+      const expandable =
+        link.kind === 'dir' || (link.kind === 'loop' && isStrictAncestor(link.realPath, entry.path));
+      const isDirectory = expandable ? true : entry.isDirectory;
+      out[idx] = { ...entry, isDirectory, link };
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(limit, pending.length) }, worker));
+  return out;
+}

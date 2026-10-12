@@ -7,6 +7,8 @@ function fakeRawClient(overrides: Partial<RawSftpClient> = {}): RawSftpClient {
     connect: async () => {},
     end: async () => {},
     stat: async () => ({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: false }),
+    lstat: async () => ({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: false }),
+    realPath: async (p: string) => p,
     fastGet: async () => undefined,
     fastPut: async () => undefined,
     posixRename: async () => undefined,
@@ -113,5 +115,47 @@ describe('SftpClientAdapter', () => {
       'mkdir:/var/www/app:true',
       'list:/dir',
     ]);
+  });
+
+  it('lstat maps modifyTime to mtime and keeps isSymbolicLink', async () => {
+    const rawStat: RawSftpStat = { size: 11, modifyTime: 1726500000000, isDirectory: false, isSymbolicLink: true };
+    const seen: string[] = [];
+    const adapter = new SftpClientAdapter(
+      fakeRawClient({
+        lstat: async (p) => {
+          seen.push(p);
+          return rawStat;
+        },
+      }),
+    );
+
+    const stat = await adapter.lstat('/var/www/current');
+
+    expect(seen).toEqual(['/var/www/current']);
+    expect(stat).toEqual({ mtime: 1726500000000, size: 11, isDirectory: false, isSymbolicLink: true });
+  });
+
+  it('realPath returns the absolute path', async () => {
+    const adapter = new SftpClientAdapter(fakeRawClient({ realPath: async () => '/var/www/releases/42' }));
+
+    expect(await adapter.realPath('/var/www/current')).toBe('/var/www/releases/42');
+  });
+
+  it('realPath returns undefined when the lib resolves an empty string', async () => {
+    const adapter = new SftpClientAdapter(fakeRawClient({ realPath: async () => '' }));
+
+    expect(await adapter.realPath('/missing')).toBeUndefined();
+  });
+
+  it('realPath rethrows other errors', async () => {
+    const adapter = new SftpClientAdapter(
+      fakeRawClient({
+        realPath: async () => {
+          throw new Error('Permission denied');
+        },
+      }),
+    );
+
+    await expect(adapter.realPath('/root/x')).rejects.toThrow('Permission denied');
   });
 });

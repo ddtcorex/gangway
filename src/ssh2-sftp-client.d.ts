@@ -32,6 +32,8 @@ declare module 'ssh2-sftp-client' {
     connect(options: Record<string, unknown>): Promise<void>;
     end(): Promise<void>;
     stat(remotePath: string): Promise<{ size: number; modifyTime: number; isDirectory: boolean; isSymbolicLink: boolean }>;
+    lstat(remotePath: string): Promise<{ size: number; modifyTime: number; isDirectory: boolean; isSymbolicLink: boolean }>;
+    realPath(remotePath: string): Promise<string>;
     fastGet(remotePath: string, localPath: string): Promise<string>;
     fastPut(localPath: string, remotePath: string): Promise<string>;
     posixRename(fromPath: string, toPath: string): Promise<string>;

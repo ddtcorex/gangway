@@ -5,6 +5,31 @@ All notable changes to the Gangway extension are documented in this file.
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and
 breaking changes are marked `BREAKING:`.
 
+## [Unreleased]
+
+- Remote symlinks are supported in the tree: a directory link expands, a file
+  link opens and edits like a file, and the tooltip shows the real target.
+  Broken links and loops are dimmed and explain themselves on click (on
+  OpenSSH a pair of links pointing at each other reports as "no such file",
+  so it is shown as a broken link rather than a loop).
+- On a restricted server that refuses `realpath` while `stat` works, a path
+  is judged by its text, so a directory link leading outside the connection
+  root cannot be detected there. The freeze check runs first and still
+  blocks every write the freeze check normally covers on a frozen
+  connection.
+- Edits through a link are pushed to the real target with the usual temp and
+  rename overwrite, so the link is never replaced by a regular file. A push
+  is stopped if the link now points somewhere else than when it was opened,
+  and an upload whose destination is itself a link is refused.
+- Every mutating operation is gated on the resolved real path, and the
+  connection root is resolved too. A target outside the root needs a
+  confirmation naming the real path (remembered per file), and a frozen
+  connection blocks it. Bulk uploads into a directory link outside the root
+  are refused.
+- Deleting a link removes only the link, never the target tree.
+- The edit-session lock is keyed on the real path, so two links to one file,
+  or a link and its target, warn each other.
+
 ## [0.4.2] - 2026-09-23
 
 No runtime changes. First release published to the VS Code Marketplace:

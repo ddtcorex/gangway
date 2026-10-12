@@ -17,6 +17,8 @@ const connection: ConnectionConfig = {
   authMethod: 'password',
 };
 
+const plainStat = { mtime: 1700000000, size: 42, isDirectory: false, isSymbolicLink: false };
+
 let tmpHome: string;
 
 beforeEach(async () => {
@@ -38,7 +40,9 @@ describe('downloadFile', () => {
     // window entirely rather than narrowing it.
     let modeDuringTransfer: number | undefined;
     const client = {
-      stat: vi.fn().mockResolvedValue({ mtime: 1700000000, size: 42, isDirectory: false, isSymbolicLink: false }),
+      stat: vi.fn().mockResolvedValue(plainStat),
+      realPath: vi.fn().mockImplementation(async (p: string) => p),
+      lstat: vi.fn().mockResolvedValue(plainStat),
       fastGet: vi.fn().mockImplementation(async (_remote: string, local: string) => {
         modeDuringTransfer = (await fs.stat(local)).mode & 0o777;
         await fs.writeFile(local, 'server content');
@@ -52,7 +56,9 @@ describe('downloadFile', () => {
 
   it('streams the remote file to tmp and writes a sidecar with the fresh stat', async () => {
     const client = {
-      stat: vi.fn().mockResolvedValue({ mtime: 1700000000, size: 42, isDirectory: false, isSymbolicLink: false }),
+      stat: vi.fn().mockResolvedValue(plainStat),
+      realPath: vi.fn().mockImplementation(async (p: string) => p),
+      lstat: vi.fn().mockResolvedValue(plainStat),
       fastGet: vi.fn().mockImplementation(async (_remote: string, local: string) => {
         await fs.mkdir(path.dirname(local), { recursive: true });
         await fs.writeFile(local, 'server content');
@@ -92,7 +98,9 @@ describe('downloadFile', () => {
     await fs.writeFile(localPath, 'previous good copy');
 
     const client = {
-      stat: vi.fn().mockResolvedValue({ mtime: 1700000000, size: 42, isDirectory: false, isSymbolicLink: false }),
+      stat: vi.fn().mockResolvedValue(plainStat),
+      realPath: vi.fn().mockImplementation(async (p: string) => p),
+      lstat: vi.fn().mockResolvedValue(plainStat),
       fastGet: vi.fn().mockImplementation(async (_remote: string, local: string) => {
         await fs.writeFile(local, 'partial garbage from a dropped connection');
         throw new Error('ECONNRESET');
@@ -104,5 +112,44 @@ describe('downloadFile', () => {
     expect(await fs.readFile(localPath, 'utf8')).toBe('previous good copy');
     // The failed attempt's staging file must not linger either.
     await expect(fs.access(`${localPath}.gangway-downloading`)).rejects.toThrow();
+  });
+
+  function fakeClient(realPath: (p: string) => Promise<string | undefined>) {
+    return {
+      stat: vi.fn().mockResolvedValue(plainStat),
+      realPath: vi.fn().mockImplementation(realPath),
+      lstat: vi.fn().mockResolvedValue(plainStat),
+      fastGet: vi.fn().mockImplementation(async (_remote: string, local: string) => {
+        await fs.writeFile(local, 'server content');
+      }),
+    };
+  }
+
+  it('download through a link stores realPath in the sidecar', async () => {
+    const client = fakeClient(async (p) => (p === '/var/www' ? '/var/www' : '/var/www/releases/7/config.php'));
+    const result = await downloadFile(client, connection, '/var/www/current/config.php');
+
+    const sidecar = await readSidecar(result.localPath);
+    expect(sidecar?.remotePath).toBe('/var/www/current/config.php');
+    expect(sidecar?.realPath).toBe('/var/www/releases/7/config.php');
+    expect(result.localPath).toBe(tmpFilePathFor(connection, '/var/www/current/config.php'));
+  });
+
+  it('download of a plain file stores no realPath', async () => {
+    const client = fakeClient(async (p) => p);
+    const result = await downloadFile(client, connection, '/var/www/app/config.php');
+
+    const sidecar = await readSidecar(result.localPath);
+    expect(sidecar).toBeDefined();
+    expect(sidecar).not.toHaveProperty('realPath');
+  });
+
+  it('resolveLinks false makes no realPath call', async () => {
+    const client = fakeClient(async () => '/elsewhere/config.php');
+    const result = await downloadFile(client, connection, '/var/www/current/config.php', { resolveLinks: false });
+
+    expect(client.realPath).not.toHaveBeenCalled();
+    expect(client.lstat).not.toHaveBeenCalled();
+    expect(await readSidecar(result.localPath)).not.toHaveProperty('realPath');
   });
 });

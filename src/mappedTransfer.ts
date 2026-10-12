@@ -1,11 +1,15 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { refuseSymlinkDestination } from './transfer/uploadFile';
+import type { RemoteStat } from './types';
 
 export interface MappedPutClient {
   fastPut(localPath: string, remotePath: string): Promise<unknown>;
   posixRename(fromPath: string, toPath: string): Promise<unknown>;
   mkdir(remotePath: string, recursive: boolean): Promise<unknown>;
   delete(remotePath: string): Promise<unknown>;
+  /** Destination check: a symlink is never replaced by a regular file. */
+  lstat(remotePath: string): Promise<RemoteStat>;
 }
 
 export interface MappedGetClient {
@@ -16,13 +20,18 @@ export interface MappedGetClient {
  * Pure-B single-file push: best-effort parent mkdir, put-to-.tmp then
  * posix-rename over the target (plain SFTP rename fails when the
  * destination exists — same reason uploadFile.ts uses posixRename).
- * No backup, no audit, no sidecar by design (spec §4).
+ * No backup, no audit, no sidecar by design (spec §4). A destination that
+ * is a symlink is refused before anything is written (same rule as uploadFile).
  */
 export async function pushMappedFile(
   client: MappedPutClient,
   localPath: string,
   remotePath: string,
+  /** destinationGate: see uploadFile's option of the same name. */
+  options?: { destinationGate?: (remoteDir: string) => Promise<void> },
 ): Promise<void> {
+  if (options?.destinationGate) await options.destinationGate(path.posix.dirname(remotePath));
+  await refuseSymlinkDestination(client, remotePath);
   await client.mkdir(path.posix.dirname(remotePath), true).catch(() => {});
   const tmpRemotePath = `${remotePath}.tmp`;
   await client.fastPut(localPath, tmpRemotePath);

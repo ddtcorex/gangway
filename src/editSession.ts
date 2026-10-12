@@ -1,4 +1,9 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import path from 'node:path';
+import { readSidecar } from './tmpStore';
+import { tmpRootFor } from './tmpPath';
+import type { ConnectionConfig } from './types';
 
 /**
  * One VS Code window's extension host is a distinct OS process, so its pid
@@ -13,6 +18,17 @@ export interface EditSessionOwner {
 }
 
 export type SessionCheck = { status: 'ok' } | { status: 'ownedByAnotherLiveSession'; owner: EditSessionOwner };
+
+/**
+ * Lock base keyed on the resolved remote file, so a link and its target
+ * (opened through different local tmp paths) contend for the same claim.
+ * The connection id is part of the key: equal remote paths on two servers
+ * are different files.
+ */
+export function remoteLockBase(tmpRoot: string, connectionId: string, realPath: string): string {
+  const key = crypto.createHash('sha1').update(`${connectionId}\0${realPath}`).digest('hex').slice(0, 16);
+  return path.join(tmpRoot, '.remote-locks', key);
+}
 
 function lockPathFor(localPath: string): string {
   return `${localPath}.gangway-session.json`;
@@ -71,13 +87,82 @@ export async function checkEditSession(localPath: string, isAlive: (pid: number)
 
 export async function acquireEditSession(localPath: string): Promise<void> {
   const owner: EditSessionOwner = { pid: process.pid, startedAt: Date.now() };
+  await fs.mkdir(path.dirname(lockPathFor(localPath)), { recursive: true });
   await fs.writeFile(lockPathFor(localPath), JSON.stringify(owner), 'utf8');
 }
 
-export async function releaseEditSession(localPath: string): Promise<void> {
+/**
+ * Removes the lock only when it is ours to remove: missing, torn, owned by
+ * this process, or owned by a process that is gone. A live lock owned by
+ * another window is left alone, otherwise a close event in a window that
+ * never claimed the file would disable that window's cross-window warning.
+ */
+export async function releaseEditSession(localPath: string, isAlive: (pid: number) => boolean = defaultIsAlive): Promise<void> {
+  const owner = await readLock(localPath);
+  if (owner && owner.pid !== process.pid && isAlive(owner.pid)) return;
   try {
     await fs.rm(lockPathFor(localPath));
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+}
+
+/**
+ * Remote lock base for a tmp file, from its sidecar. Locking must never
+ * block opening, so any sidecar read problem (EACCES, EISDIR) or an unknown
+ * connection yields undefined and only the local-path lock applies.
+ */
+export async function remoteBaseForSidecar(
+  localPath: string,
+  connections: readonly ConnectionConfig[],
+): Promise<string | undefined> {
+  try {
+    const sidecar = await readSidecar(localPath);
+    if (!sidecar) return undefined;
+    const connection = connections.find((c) => c.id === sidecar.connectionId);
+    if (!connection) return undefined;
+    return remoteLockBase(tmpRootFor(connection), sidecar.connectionId, sidecar.realPath ?? sidecar.remotePath);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Per-window record of which open documents hold which remote lock, kept in
+ * memory so the base is fixed at open time. A link tab and its target tab
+ * share one remote lock; it is dropped only when the last of them closes.
+ * A set (not a counter) because reopening an already-open document does not
+ * fire a second close.
+ */
+export class EditLockRegistry {
+  private readonly bases = new Map<string, string>();
+  private readonly holders = new Map<string, Set<string>>();
+  private readonly isAlive: (pid: number) => boolean;
+
+  constructor(options: { isAlive?: (pid: number) => boolean } = {}) {
+    this.isAlive = options.isAlive ?? defaultIsAlive;
+  }
+
+  async claim(localPath: string, remoteBase: string | undefined): Promise<void> {
+    await acquireEditSession(localPath);
+    if (!remoteBase) return;
+    await acquireEditSession(remoteBase);
+    this.bases.set(localPath, remoteBase);
+    let set = this.holders.get(remoteBase);
+    if (!set) this.holders.set(remoteBase, (set = new Set()));
+    set.add(localPath);
+  }
+
+  async release(localPath: string): Promise<void> {
+    await releaseEditSession(localPath, this.isAlive);
+    const remoteBase = this.bases.get(localPath);
+    if (!remoteBase) return;
+    this.bases.delete(localPath);
+    const set = this.holders.get(remoteBase);
+    set?.delete(localPath);
+    if (set && set.size === 0) {
+      this.holders.delete(remoteBase);
+      await releaseEditSession(remoteBase, this.isAlive);
+    }
   }
 }

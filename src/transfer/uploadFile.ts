@@ -1,7 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AuditLog } from '../auditLog';
-import { writeSidecar } from '../tmpStore';
+import { isNotFoundError } from '../remoteOps';
+import { readSidecar, writeSidecar } from '../tmpStore';
 import type { RemoteStat } from '../types';
 
 export interface UploadClient {
@@ -24,6 +25,12 @@ export interface UploadClient {
    * sidecar refresh below.
    */
   stat(remotePath: string): Promise<RemoteStat>;
+  /**
+   * Checked on the destination before anything is written: replacing a
+   * symlink with a regular file is never allowed, whatever the caller (single
+   * file, folder, or mapped workspace upload). Not found means a new file.
+   */
+  lstat(remotePath: string): Promise<RemoteStat>;
   /**
    * Recursive remote mkdir. Called best-effort on the target's parent before
    * every put: a locally-created directory that never existed on the server
@@ -59,9 +66,26 @@ export async function uploadFile(
    *   user's own project files would litter their repo (and could even get
    *   committed).
    */
-  options?: { writeSidecar?: boolean },
+  options?: {
+    writeSidecar?: boolean;
+    /**
+     * The path the user opened (a link) when `remotePath` is its resolved
+     * real target. The bytes go to `remotePath`; the refreshed sidecar keeps
+     * this clicked path as its identity and records `remotePath` as realPath.
+     */
+    sidecarRemotePath?: string;
+    /**
+     * Bulk callers pass one createDestinationGate per operation. Awaited with
+     * the destination directory before anything is written, so a directory
+     * that is a link out of the connection root never receives the file.
+     */
+    destinationGate?: (remoteDir: string) => Promise<void>;
+  },
 ): Promise<void> {
   const writeSidecarBaseline = options?.writeSidecar ?? true;
+  const viaLink = options?.sidecarRemotePath !== undefined && options.sidecarRemotePath !== remotePath;
+  if (options?.destinationGate) await options.destinationGate(path.posix.dirname(remotePath));
+  await refuseSymlinkDestination(client, remotePath);
   // The parent may never have existed remotely (a locally-created folder
   // pushed for the first time). Recursive mkdir is idempotent on the lib
   // ("already exists" is not an error), and anything it cannot fix surfaces
@@ -92,7 +116,14 @@ export async function uploadFile(
   // of the push, not part of it: a failure to write it is reported on its own
   // channel and never rewrites the outcome of the upload itself.
   try {
-    await auditLog.append({ connectionId, remotePath, timestamp: Date.now(), byteSize, op: 'upload' });
+    await auditLog.append({
+      connectionId,
+      remotePath,
+      timestamp: Date.now(),
+      byteSize,
+      op: 'upload',
+      ...(viaLink ? { note: `via ${options?.sidecarRemotePath}` } : {}),
+    });
   } catch (err) {
     logWarning(
       `Uploaded ${remotePath}, but could not write the audit log entry: ${err instanceof Error ? err.message : String(err)}`,
@@ -110,12 +141,46 @@ export async function uploadFile(
   if (!writeSidecarBaseline) return;
   const freshStat = await client.stat(remotePath);
   const localStat = await fs.stat(localPath);
+  // An out-of-root confirmation is only valid for the real path it named;
+  // carry it over so the next push to the same target does not ask again.
+  const previous = await readSidecar(localPath);
+  const sidecarRemotePath = options?.sidecarRemotePath ?? remotePath;
   await writeSidecar(localPath, {
     connectionId,
-    remotePath,
+    remotePath: sidecarRemotePath,
     mtime: freshStat.mtime,
     size: freshStat.size,
     downloadedAt: Date.now(),
     localMtimeMs: localStat.mtimeMs,
+    ...(viaLink ? { realPath: remotePath } : {}),
+    ...(previous?.outsideRootConfirmedFor !== undefined && previous.outsideRootConfirmedFor === remotePath
+      ? { outsideRootConfirmedFor: previous.outsideRootConfirmedFor }
+      : {}),
   });
+}
+
+/**
+ * Throws when the destination is itself a symlink: posix-rename over it would
+ * replace the link with a regular file. A missing destination is a new file;
+ * any other lstat failure propagates so nothing is written on a guess.
+ */
+export async function refuseSymlinkDestination(
+  client: Pick<UploadClient, 'lstat'>,
+  remotePath: string,
+): Promise<void> {
+  let isLink: boolean;
+  try {
+    isLink = (await client.lstat(remotePath)).isSymbolicLink;
+  } catch (err) {
+    if (isNotFoundError(err)) return;
+    throw err;
+  }
+  // True for every caller: a bulk or mapped upload never resolves links, and a
+  // single-file push only meets a link here when the server refused realpath
+  // or the path became a link after it was resolved.
+  if (isLink) {
+    throw new Error(
+      `"${remotePath}" is a symlink, and Gangway did not resolve it to its target for this upload, so the link was left untouched and nothing was written.`,
+    );
+  }
 }

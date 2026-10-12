@@ -1,11 +1,16 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { resolveTarget } from '../realTarget';
 import { tmpFilePathFor } from '../tmpPath';
 import { ensureOwnerOnlyPermissions, writeSidecar } from '../tmpStore';
 import type { ConnectionConfig, RemoteStat, SidecarMeta } from '../types';
 
 export interface DownloadClient {
   stat(remotePath: string): Promise<RemoteStat>;
+  /** Only called when resolveLinks is not false. */
+  realPath(remotePath: string): Promise<string | undefined>;
+  /** Only called when resolveLinks is not false. */
+  lstat(remotePath: string): Promise<RemoteStat>;
   fastGet(remotePath: string, localPath: string): Promise<unknown>;
 }
 
@@ -14,11 +19,19 @@ export interface DownloadResult {
   meta: SidecarMeta;
 }
 
+export interface DownloadOptions {
+  /** Default true. Bulk callers pass false: no resolution call, no realPath stored. */
+  resolveLinks?: boolean;
+}
+
 export async function downloadFile(
   client: DownloadClient,
   connection: ConnectionConfig,
   remotePath: string,
+  options: DownloadOptions = {},
 ): Promise<DownloadResult> {
+  // Fails closed (broken link, loop, transport error) before anything is written.
+  const target = options.resolveLinks === false ? undefined : await resolveTarget(client, connection, remotePath);
   const remoteStat = await client.stat(remotePath);
   const localPath = tmpFilePathFor(connection, remotePath);
   await fs.mkdir(path.dirname(localPath), { recursive: true });
@@ -62,6 +75,7 @@ export async function downloadFile(
     size: remoteStat.size,
     downloadedAt: Date.now(),
     localMtimeMs: localStat.mtimeMs,
+    ...(target?.viaLink ? { realPath: target.realPath } : {}),
   };
   await writeSidecar(localPath, meta);
 

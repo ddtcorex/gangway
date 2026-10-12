@@ -56,6 +56,22 @@ describe('tmpStore', () => {
     await expect(readSidecar(tmpFile)).resolves.toEqual(meta);
   });
 
+  it('sidecar without the new fields still parses, and the new fields round-trip', async () => {
+    const tmpFile = path.join(tmpDir, 'app/linked.php');
+    await fs.mkdir(path.dirname(tmpFile), { recursive: true });
+    await fs.writeFile(tmpFile, 'x');
+    const old: SidecarMeta = { connectionId: 'c1', remotePath: '/a/b.php', mtime: 1, size: 1, downloadedAt: 2 };
+    await writeSidecar(tmpFile, old);
+    const read = await readSidecar(tmpFile);
+    expect(read).toEqual(old);
+    expect(read?.realPath).toBeUndefined();
+    expect(read?.outsideRootConfirmedFor).toBeUndefined();
+
+    const linked: SidecarMeta = { ...old, realPath: '/r/b.php', outsideRootConfirmedFor: '/r/b.php' };
+    await writeSidecar(tmpFile, linked);
+    await expect(readSidecar(tmpFile)).resolves.toEqual(linked);
+  });
+
   it('returns undefined when no sidecar exists', async () => {
     await expect(readSidecar(path.join(tmpDir, 'never-downloaded.php'))).resolves.toBeUndefined();
   });

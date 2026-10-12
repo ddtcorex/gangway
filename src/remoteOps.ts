@@ -1,10 +1,14 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { isLexicallyInside, isNotFoundError } from './remotePathUtils';
+
+export { isLexicallyInside, isNotFoundError };
 import { sidecarPathFor, tmpFilePathFor } from './tmpPath';
 import { readSidecar, writeSidecar } from './tmpStore';
 import { isSafeListingName } from './remoteListing';
 import { isProbablyBinary, TransferCancelledError } from './folderQueue';
+import { gateWriteTarget, resolveTarget, type ResolvedTarget } from './realTarget';
 import type { AuditLog } from './auditLog';
 import type { FileConflictDecision } from './conflictGuard';
 import type { ConnectionConfig, RemoteStat, SidecarMeta } from './types';
@@ -12,21 +16,6 @@ import type { RawSftpListEntry } from './transfer/sftpClientAdapter';
 
 /** Default recursive-walk excludes (spec §2.3), tuned for Magento/PHP hosting. */
 export const DEFAULT_EXCLUDES: readonly string[] = ['.git/**', 'node_modules/**', 'var/**', 'pub/media/**'];
-
-/**
- * Not-found detection across both error dialects: node:fs uses ENOENT while
- * ssh2-sftp-client reports numeric SFTP status codes ('2' = NO_SUCH_FILE,
- * verified against the lib — see errorMapper.ts). Found live 2026-09-19:
- * every trash/inventory/sweep path that checked ENOENT-only broke against
- * the real docker server on the first missing directory.
- */
-export function isNotFoundError(err: unknown): boolean {
-  const code =
-    typeof err === 'object' && err !== null && 'code' in err ? String((err as { code: unknown }).code) : undefined;
-  if (code === 'ENOENT' || code === '2') return true;
-  const message = err instanceof Error ? err.message : String(err);
-  return /no such file/i.test(message);
-}
 
 const noop = (): void => {};
 
@@ -65,7 +54,12 @@ export interface RemoteOpsClient {
   rmdir(remotePath: string, recursive: boolean): Promise<unknown>;
   fastGet(remotePath: string, localPath: string): Promise<unknown>;
   fastPut(localPath: string, remotePath: string): Promise<unknown>;
+  /** Follows links, like the library's stat. */
   stat(remotePath: string): Promise<RemoteStat>;
+  /** Does not follow the last path component: the only way to see a link itself. */
+  lstat(remotePath: string): Promise<RemoteStat>;
+  /** Canonical path; undefined when the path does not exist. */
+  realPath(remotePath: string): Promise<string | undefined>;
   chmod(remotePath: string, mode: string): Promise<unknown>;
   list(remotePath: string): Promise<RawSftpListEntry[]>;
 }
@@ -77,8 +71,7 @@ export function assertMutatingAllowed(connection: ConnectionConfig): void {
 
 /** Throws when remotePath escapes the connection root. Message matches /outside/. */
 export function assertInsideRoot(connection: ConnectionConfig, remotePath: string): void {
-  const relative = path.posix.relative(connection.remotePath, remotePath);
-  if (relative === '..' || relative.startsWith(`..${path.posix.sep}`) || path.posix.isAbsolute(relative)) {
+  if (!isLexicallyInside(connection.remotePath, remotePath)) {
     throw new Error(
       `Refusing to operate on "${remotePath}": it resolves outside the connection root "${connection.remotePath}".`,
     );
@@ -97,13 +90,13 @@ export function guardUploadTarget(connection: ConnectionConfig, sidecar: Sidecar
   assertMutatingAllowed(connection);
 }
 
-function parentDir(remotePath: string): string {
+export function parentDir(remotePath: string): string {
   const normalized = remotePath.endsWith('/') && remotePath.length > 1 ? remotePath.slice(0, -1) : remotePath;
   const idx = normalized.lastIndexOf('/');
   return idx <= 0 ? '/' : normalized.slice(0, idx);
 }
 
-function joinRoot(parent: string, leaf: string): string {
+export function joinRoot(parent: string, leaf: string): string {
   return parent === '/' ? `/${leaf}` : `${parent}/${leaf}`;
 }
 
@@ -112,6 +105,92 @@ export interface OpOptions {
   now?: number;
   onAuditError?: (message: string) => void;
   signal?: AbortSignal;
+  /**
+   * Asked once per operation when the real target lives outside the
+   * connection root. Absent means no UI is available: the op is refused.
+   * realPath is the first out-of-root real path; allRealPaths lists every
+   * distinct one in the operation (first element equals realPath), so a
+   * prompt can name them all. Callers may ignore the second argument.
+   */
+  confirmOutsideRoot?: (realPath: string, allRealPaths: readonly string[]) => Promise<boolean>;
+}
+
+/** The user declined writing outside the root. A cancellation, not a failure. */
+export class OutsideRootDeclinedError extends TransferCancelledError {
+  constructor(remotePath: string, realPath: string) {
+    super();
+    this.message = `Cancelled: "${remotePath}" is really "${realPath}", outside the connection root.`;
+    this.name = 'OutsideRootDeclinedError';
+  }
+}
+
+/**
+ * The shared write gate for every mutating op on a remote path: freeze
+ * first, then resolve the real target (fails closed on broken links, loops
+ * and transport errors), then the out-of-root decision. A frozen connection
+ * never reaches the server; an out-of-root target needs an explicit yes from
+ * options.confirmOutsideRoot, and no callback means no.
+ */
+export async function assertWritableTarget(
+  client: RemoteOpsClient,
+  connection: ConnectionConfig,
+  remotePath: string,
+  options: OpOptions,
+): Promise<ResolvedTarget> {
+  const [target] = await assertWritableTargets(client, connection, [remotePath], options);
+  return target;
+}
+
+/**
+ * assertWritableTarget for every path an operation touches, asking at most
+ * once: all paths are resolved first (nothing is read or written yet), then
+ * the first out-of-root one is blocked on a frozen connection or confirmed
+ * by the user, and that one answer covers the whole operation.
+ */
+export async function assertWritableTargets(
+  client: RemoteOpsClient,
+  connection: ConnectionConfig,
+  remotePaths: string[],
+  options: OpOptions,
+): Promise<ResolvedTarget[]> {
+  assertMutatingAllowed(connection);
+  const targets: ResolvedTarget[] = [];
+  for (const remotePath of remotePaths) targets.push(await resolveTarget(client, connection, remotePath));
+  const outside = targets.find((t) => gateWriteTarget(connection, t) !== 'allow');
+  if (outside === undefined) return targets;
+  if (gateWriteTarget(connection, outside) === 'block') {
+    throw new Error(
+      `Refusing to use "${outside.clickedPath}": it is really "${outside.realPath}", outside the root of frozen connection "${connection.name}".`,
+    );
+  }
+  if (!options.confirmOutsideRoot) {
+    throw new Error(
+      `Refusing to use "${outside.clickedPath}": it is really "${outside.realPath}", outside the connection root "${connection.remotePath}".`,
+    );
+  }
+  const allRealPaths = [
+    ...new Set(targets.filter((t) => gateWriteTarget(connection, t) !== 'allow').map((t) => t.realPath)),
+  ];
+  if (!(await options.confirmOutsideRoot(outside.realPath, allRealPaths))) {
+    throw new OutsideRootDeclinedError(outside.clickedPath, outside.realPath);
+  }
+  return targets;
+}
+
+/** How a delete must act on an entry. Any symlink is unlinked, never recursed through. */
+export function chooseDeleteMode(entry: { isDirectory: boolean; isSymbolicLink: boolean }): 'file' | 'folder' | 'link' {
+  if (entry.isSymbolicLink) return 'link';
+  return entry.isDirectory ? 'folder' : 'file';
+}
+
+/** True when remotePath exists and is itself a symlink. Missing means false; other errors reject. */
+async function isLinkItself(client: RemoteOpsClient, remotePath: string): Promise<boolean> {
+  try {
+    return (await client.lstat(remotePath)).isSymbolicLink;
+  } catch (err) {
+    if (isNotFoundError(err)) return false;
+    throw err;
+  }
 }
 
 async function appendAudit(
@@ -136,9 +215,14 @@ export function typedConfirmMatches(expected: string, input: string | undefined)
   return input !== undefined && input === expected;
 }
 
+/**
+ * Whether any entry holds this name. lstat, not stat: stat follows links, so
+ * a dangling link would read as a free name and a later put would write
+ * through it (create/truncate follows the link) or a rename would replace it.
+ */
 async function existsOnServer(client: RemoteOpsClient, remotePath: string): Promise<boolean> {
   try {
-    await client.stat(remotePath);
+    await client.lstat(remotePath);
     return true;
   } catch (err) {
     if (isNotFoundError(err)) return false;
@@ -162,31 +246,40 @@ export async function createRemote(
   assertMutatingAllowed(connection);
   assertInsideRoot(connection, dirPath);
   if (!isSafeListingName(name)) throw new Error(`Refusing to create "${name}": illegal file name.`);
-  const target = dirPath === '/' ? `/${name}` : `${dirPath}/${name}`;
+  const dir = await assertWritableTarget(client, connection, dirPath, options);
+  const created = joinRoot(dirPath, name);
+  // Written into the resolved directory, so the gate decision and the write agree.
+  const target = joinRoot(dir.realPath, name);
   if (await existsOnServer(client, target)) {
-    throw new Error(`"${target}" already exists on the server.`);
+    throw new Error(`"${created}" already exists on the server.`);
   }
   if (kind === 'dir') {
     await client.mkdir(target, false);
   } else {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'gangway-newfile-'));
-    const tmp = path.join(dir, 'empty');
+    const stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gangway-newfile-'));
+    const tmp = path.join(stagingDir, 'empty');
     try {
       await fs.writeFile(tmp, '');
       await fs.chmod(tmp, 0o600);
       await client.fastPut(tmp, target);
     } finally {
-      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+      await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
     }
   }
   const now = options.now ?? Date.now();
   await appendAudit(
     auditLog,
-    { connectionId: connection.id, remotePath: target, timestamp: now, op: 'create' },
-    `Created ${target}`,
+    {
+      connectionId: connection.id,
+      remotePath: created,
+      timestamp: now,
+      op: 'create',
+      ...(dir.viaLink ? { note: `really ${target}` } : {}),
+    },
+    `Created ${created}`,
     options.onAuditError ?? noop,
   );
-  return { path: target };
+  return { path: created };
 }
 
 async function collectLocalFiles(root: string): Promise<string[]> {
@@ -250,9 +343,11 @@ async function remapSidecarsForRename(
 }
 
 /**
- * Renames a file or folder server-side. Name clashes never overwrite,
- * symlink destination parents are refused, and local tmp sidecars follow
- * the rename (whole subtree for folders).
+ * Renames a file or folder server-side. The entry itself is renamed (a link
+ * stays a link); its parent is resolved and gated, and both paths are built
+ * on the resolved parent so the rename lands where the gate decided. Name
+ * clashes never overwrite, and local tmp sidecars follow the rename (whole
+ * subtree for folders), keyed on the clicked paths.
  */
 export async function renameRemote(
   client: RemoteOpsClient,
@@ -270,24 +365,34 @@ export async function renameRemote(
   if (!isSafeListingName(newName)) throw new Error(`Refusing to rename to "${newName}": illegal file name.`);
   const parent = parentDir(oldPath);
   const newPath = joinRoot(parent, newName);
-  let oldStat: RemoteStat;
+  // lstat: rename acts on the entry itself, so a dangling link can be renamed.
+  let oldEntry: RemoteStat;
   try {
-    oldStat = await client.stat(oldPath);
+    oldEntry = await client.lstat(oldPath);
   } catch (err) {
     if (isNotFoundError(err)) {
       throw new Error(`"${oldPath}" does not exist on the server.`);
     }
     throw err;
   }
-  const parentStat = await client.stat(parent);
-  if (parentStat.isSymbolicLink) {
-    throw new Error(`Refusing to rename into "${parent}": it is a symlink.`);
+  // The local tmp mirror of a link to a folder is a folder (the tree
+  // expands it), so sidecars move as a subtree; a dangling link has none.
+  let wasDirectory = oldEntry.isDirectory;
+  if (oldEntry.isSymbolicLink) {
+    try {
+      wasDirectory = (await client.stat(oldPath)).isDirectory;
+    } catch (err) {
+      if (!isNotFoundError(err)) throw err;
+    }
   }
-  if (await existsOnServer(client, newPath)) {
+  const realParent = (await assertWritableTarget(client, connection, parent, options)).realPath;
+  const realOld = joinRoot(realParent, path.posix.basename(oldPath));
+  const realNew = joinRoot(realParent, newName);
+  if (await existsOnServer(client, realNew)) {
     throw new Error(`"${newPath}" already exists on the server.`);
   }
-  await client.posixRename(oldPath, newPath);
-  await remapSidecarsForRename(connection, oldPath, newPath, oldStat.isDirectory);
+  await client.posixRename(realOld, realNew);
+  await remapSidecarsForRename(connection, oldPath, newPath, wasDirectory);
   const now = options.now ?? Date.now();
   await appendAudit(
     auditLog,
@@ -306,8 +411,11 @@ function splitCopyStem(base: string): { stem: string; ext: string } {
 
 /**
  * Duplicates one file via local staging (SFTP has no server-side copy).
- * Files only: folders get a clear error pointing at download-then-upload.
- * Clashes get numeric suffixes, never overwrites.
+ * Files only: folders get a clear error pointing at download-then-upload,
+ * and a link to a folder is refused (no recursion). A file link is read
+ * through, so the copy is a regular file holding the target content. The
+ * destination directory goes through the write gate. Clashes get numeric
+ * suffixes, never overwrites.
  */
 export async function duplicateRemote(
   client: RemoteOpsClient,
@@ -319,35 +427,43 @@ export async function duplicateRemote(
   assertMutatingAllowed(connection);
   assertInsideRoot(connection, sourcePath);
   let sourceStat: RemoteStat;
+  let sourceIsLink: boolean;
   try {
     sourceStat = await client.stat(sourcePath);
+    sourceIsLink = (await client.lstat(sourcePath)).isSymbolicLink;
   } catch (err) {
     if (isNotFoundError(err)) {
       throw new Error(`"${sourcePath}" does not exist on the server.`);
     }
     throw err;
   }
+  if (sourceIsLink && sourceStat.isDirectory) {
+    throw new Error(`Refusing to duplicate "${sourcePath}": it is a link to a folder, and folders are never copied through a link.`);
+  }
   if (sourceStat.isDirectory) {
     throw new Error('Duplicating folders is not supported yet — download the folder, then upload it where needed.');
   }
-  if (sourceStat.isSymbolicLink) {
-    throw new Error(`Refusing to duplicate "${sourcePath}": it is a symlink.`);
-  }
   const parent = parentDir(sourcePath);
+  // The source is gated too: reading an out-of-root target into the root is
+  // an exfiltration path. One answer covers source and destination.
+  const [sourceTarget, parentTarget] = await assertWritableTargets(client, connection, [sourcePath, parent], options);
+  const realParent = parentTarget.realPath;
   const { stem, ext } = splitCopyStem(path.posix.basename(sourcePath));
-  let candidate = joinRoot(parent, `${stem} copy${ext}`);
+  let leaf = `${stem} copy${ext}`;
   let n = 2;
-  while (await existsOnServer(client, candidate)) {
+  while (await existsOnServer(client, joinRoot(realParent, leaf))) {
     if (n > 100) throw new Error(`Too many copies of "${sourcePath}" already exist.`);
-    candidate = joinRoot(parent, `${stem} copy-${n}${ext}`);
+    leaf = `${stem} copy-${n}${ext}`;
     n += 1;
   }
+  const candidate = joinRoot(parent, leaf);
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'gangway-duplicate-'));
   const tmp = path.join(dir, 'copy');
   try {
-    await client.fastGet(sourcePath, tmp);
+    // fastGet follows a file link, so the staged bytes are the target content.
+    await client.fastGet(sourceTarget.realPath, tmp);
     await fs.chmod(tmp, 0o600);
-    await client.fastPut(tmp, candidate);
+    await client.fastPut(tmp, joinRoot(realParent, leaf));
   } finally {
     await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
   }
@@ -370,7 +486,9 @@ export async function duplicateRemote(
 
 /**
  * Changes the remote mode. The mode must be 3-4 octal digits; the raw
- * string goes straight to ssh2 (verified: passed through verbatim).
+ * string goes straight to ssh2 (verified: passed through verbatim). SFTP
+ * setstat follows links, so the mode lands on the real target, which goes
+ * through the write gate first.
  */
 export async function chmodRemote(
   client: RemoteOpsClient,
@@ -393,7 +511,8 @@ export async function chmodRemote(
     }
     throw err;
   }
-  await client.chmod(remotePath, mode);
+  const target = await assertWritableTarget(client, connection, remotePath, options);
+  await client.chmod(target.realPath, mode);
   const now = options.now ?? Date.now();
   await appendAudit(
     auditLog,
@@ -485,10 +604,16 @@ export interface PasteResult {
 }
 
 /**
- * Pastes clipboard entries into destDir (same connection only). New
- * destinations land directly (cut: server-side posixRename, copy: staged
- * fastGet/fastPut); existing destinations go through the overwrite
- * confirmation first. Cut audits op 'move', copy audits op 'duplicate'.
+ * Pastes clipboard entries into destDir (same connection only). destDir and
+ * every source that is not itself a link go through the write gate before
+ * anything is read or written, asking at most once per operation: a cut
+ * removes the source from its real directory and a copy reads the source's
+ * real target, so either can reach outside the root. Entries are read and
+ * moved at their real paths and land in the resolved destDir. New destinations land directly (cut: server-side
+ * posixRename, copy: staged fastGet/fastPut); existing destinations go
+ * through the overwrite confirmation first. A source or destination that
+ * is itself a link is skipped: a rename onto a link replaces it and a put
+ * writes through it. Cut audits op 'move', copy audits op 'duplicate'.
  */
 export async function pasteEntries(
   client: RemoteOpsClient,
@@ -501,17 +626,27 @@ export async function pasteEntries(
   if (clipboard.connectionId !== connection.id) throw new WrongConnectionError();
   assertMutatingAllowed(connection);
   assertInsideRoot(connection, destDir);
-  let destDirStat: RemoteStat;
+  // Link sources are skipped below, so they are not gated (no prompt for an
+  // entry that will never be touched).
+  const gatedSources: string[] = [];
+  for (const sourcePath of clipboard.paths) {
+    if (!(await isLinkItself(client, sourcePath))) gatedSources.push(sourcePath);
+  }
+  const [destTarget, ...sourceTargets] = await assertWritableTargets(
+    client,
+    connection,
+    [destDir, ...gatedSources],
+    options,
+  );
+  const realDestDir = destTarget.realPath;
+  const realSourceOf = new Map(gatedSources.map((p, i) => [p, sourceTargets[i].realPath]));
   try {
-    destDirStat = await client.stat(destDir);
+    await client.stat(realDestDir);
   } catch (err) {
     if (isNotFoundError(err)) {
       throw new Error(`"${destDir}" does not exist on the server.`);
     }
     throw err;
-  }
-  if (destDirStat.isSymbolicLink) {
-    throw new Error(`Refusing to paste into "${destDir}": it is a symlink.`);
   }
   const now = options.now ?? Date.now();
   const pasted: string[] = [];
@@ -520,7 +655,7 @@ export async function pasteEntries(
   try {
     for (const [index, sourcePath] of clipboard.paths.entries()) {
       if (options.signal?.aborted) throw new TransferCancelledError();
-      const dest = joinRoot(destDir, path.posix.basename(sourcePath));
+      const dest = joinRoot(realDestDir, path.posix.basename(sourcePath));
       let sourceStat: RemoteStat;
       try {
         sourceStat = await client.stat(sourcePath);
@@ -535,8 +670,13 @@ export async function pasteEntries(
         skipped.push({ path: sourcePath, reason: 'copying folders is not supported yet' });
         continue;
       }
-      if (sourceStat.isSymbolicLink) {
+      const realSource = realSourceOf.get(sourcePath);
+      if (realSource === undefined || (await isLinkItself(client, sourcePath))) {
         skipped.push({ path: sourcePath, reason: 'is a symlink' });
+        continue;
+      }
+      if (await isLinkItself(client, dest)) {
+        skipped.push({ path: sourcePath, reason: `destination ${dest} is a symlink and is never replaced or written through` });
         continue;
       }
       const destExists = await existsOnServer(client, dest);
@@ -547,7 +687,7 @@ export async function pasteEntries(
       let stagingPath: string | undefined;
       if (!clipboard.cut || destExists) {
         stagingPath = path.join(stagingDir, `${index}-${path.posix.basename(sourcePath)}`);
-        await client.fastGet(sourcePath, stagingPath);
+        await client.fastGet(realSource, stagingPath);
         await fs.chmod(stagingPath, 0o600);
       }
       if (destExists) {
@@ -557,7 +697,7 @@ export async function pasteEntries(
           continue;
         }
       }
-      if (clipboard.cut) await client.posixRename(sourcePath, dest);
+      if (clipboard.cut) await client.posixRename(realSource, dest);
       else await client.fastPut(stagingPath as string, dest);
       pasted.push(dest);
       await appendAudit(

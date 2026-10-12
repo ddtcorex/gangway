@@ -61,4 +61,10 @@ describe('mapListingToEntries', () => {
     expect(entries.find((e) => e.path === '/var/www/big.bin')?.size).toBe(6 * 1024 * 1024);
     expect(entries.find((e) => e.path === '/var/www/legacy.php')?.size).toBe(0);
   });
+
+  it('mapListingToEntries never sets isDirectory for type l', () => {
+    const entries = mapListingToEntries('/var/www', [{ name: 'lnk', type: 'l' }]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ isSymbolicLink: true, isDirectory: false });
+  });
 });

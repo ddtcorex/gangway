@@ -65,4 +65,11 @@ describe('mapping-sync contributions', () => {
     const menus = [...pkg.contributes.menus['view/item/context'], ...(pkg.contributes.menus['view/title'] ?? [])];
     expect(menus.filter((m: { command: string }) => m.command === 'gangway.restoreFromTrash' || m.command === 'gangway.emptyTrash')).toHaveLength(0);
   });
+
+  it('offers only delete on broken and loop link rows', async () => {
+    const pkg = JSON.parse(await fs.readFile(path.join(__dirname, '..', 'package.json'), 'utf8'));
+    const tree = pkg.contributes.menus['view/item/context'] as { command: string; when: string }[];
+    const forBroken = tree.filter((m) => m.when.includes('viewItem == gangway.brokenLink'));
+    expect(forBroken.map((m) => m.command)).toEqual(['gangway.deleteRemote']);
+  });
 });

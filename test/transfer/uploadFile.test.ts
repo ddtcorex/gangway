@@ -3,8 +3,10 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { uploadFile } from '../../src/transfer/uploadFile';
-import { readSidecar } from '../../src/tmpStore';
+import { readSidecar, writeSidecar } from '../../src/tmpStore';
 import { AuditLog } from '../../src/auditLog';
+
+const regularFile = { mtime: 1, size: 1, isDirectory: false, isSymbolicLink: false };
 
 let tmpHome: string;
 let localPath: string;
@@ -37,6 +39,7 @@ describe('uploadFile', () => {
       }),
       delete: vi.fn().mockResolvedValue(undefined),
       mkdir: vi.fn().mockResolvedValue(undefined),
+      lstat: vi.fn().mockResolvedValue(regularFile),
       stat: vi.fn().mockResolvedValue({ mtime: 1700000999, size: 14, isDirectory: false, isSymbolicLink: false }),
     };
     const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
@@ -74,6 +77,7 @@ describe('uploadFile', () => {
       posixRename: vi.fn().mockResolvedValue(undefined),
       delete: vi.fn().mockResolvedValue(undefined),
       mkdir: vi.fn().mockResolvedValue(undefined),
+      lstat: vi.fn().mockResolvedValue(regularFile),
       stat: vi.fn().mockResolvedValue({ mtime: 1700000999, size: 14, isDirectory: false, isSymbolicLink: false }),
     };
     const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
@@ -102,6 +106,7 @@ describe('uploadFile', () => {
       posixRename: vi.fn().mockRejectedValue(renameFailure),
       delete: vi.fn().mockResolvedValue(undefined),
       mkdir: vi.fn().mockResolvedValue(undefined),
+      lstat: vi.fn().mockResolvedValue(regularFile),
       stat: vi.fn().mockResolvedValue({ mtime: 1700000999, size: 14, isDirectory: false, isSymbolicLink: false }),
     };
     const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
@@ -120,6 +125,7 @@ describe('uploadFile', () => {
       posixRename: vi.fn().mockRejectedValue(renameFailure),
       delete: vi.fn().mockRejectedValue(new Error('cleanup also failed')),
       mkdir: vi.fn().mockResolvedValue(undefined),
+      lstat: vi.fn().mockResolvedValue(regularFile),
       stat: vi.fn().mockResolvedValue({ mtime: 1700000999, size: 14, isDirectory: false, isSymbolicLink: false }),
     };
     const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
@@ -138,6 +144,7 @@ describe('uploadFile', () => {
       posixRename: vi.fn().mockResolvedValue(undefined),
       delete: vi.fn().mockResolvedValue(undefined),
       mkdir: vi.fn().mockResolvedValue(undefined),
+      lstat: vi.fn().mockResolvedValue(regularFile),
       stat: vi.fn().mockResolvedValue({ mtime: 1700000999, size: 14, isDirectory: false, isSymbolicLink: false }),
     };
     const auditLog = {
@@ -161,6 +168,7 @@ describe('uploadFile', () => {
       posixRename: vi.fn().mockResolvedValue(undefined),
       delete: vi.fn().mockResolvedValue(undefined),
       mkdir: vi.fn().mockRejectedValue(new Error('mkdir: Permission denied')),
+      lstat: vi.fn().mockResolvedValue(regularFile),
       stat: vi.fn().mockResolvedValue({ mtime: 1700000999, size: 14, isDirectory: false, isSymbolicLink: false }),
     };
     const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
@@ -172,6 +180,7 @@ describe('uploadFile', () => {
   it('has no backup option: overwrites directly without staging a server copy', async () => {
     const client = {
       mkdir: vi.fn().mockResolvedValue(undefined),
+      lstat: vi.fn().mockResolvedValue(regularFile),
       stat: vi.fn().mockResolvedValue({ mtime: 5, size: 3, isDirectory: false, isSymbolicLink: false }),
       fastPut: vi.fn().mockResolvedValue(undefined),
       posixRename: vi.fn().mockResolvedValue(undefined),
@@ -189,6 +198,7 @@ describe('uploadFile', () => {
   it('skips the sidecar refresh for workspace uploads, leaving no meta.json behind', async () => {
     const client = {
       mkdir: vi.fn().mockResolvedValue(undefined),
+      lstat: vi.fn().mockResolvedValue(regularFile),
       stat: vi.fn(),
       fastPut: vi.fn().mockResolvedValue(undefined),
       posixRename: vi.fn().mockResolvedValue(undefined),
@@ -200,5 +210,170 @@ describe('uploadFile', () => {
 
     expect(await readSidecar(localPath)).toBeUndefined();
     expect(client.stat).not.toHaveBeenCalled();
+  });
+
+  describe('links', () => {
+    const notFound = (): Error => Object.assign(new Error('No such file'), { code: 2 });
+
+    function linkClient() {
+      return {
+        mkdir: vi.fn().mockResolvedValue(undefined),
+        lstat: vi.fn().mockResolvedValue(regularFile),
+        stat: vi.fn().mockResolvedValue({ mtime: 1700000999, size: 14, isDirectory: false, isSymbolicLink: false }),
+        fastPut: vi.fn().mockResolvedValue(undefined),
+        posixRename: vi.fn().mockResolvedValue(undefined),
+        delete: vi.fn().mockResolvedValue(undefined),
+      };
+    }
+
+    it('writes tmp and renames at the real path, link untouched', async () => {
+      const client = linkClient();
+      const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
+
+      await uploadFile(client, 'c1', localPath, '/srv/shared/real.php', 14, auditLog, () => {}, {
+        sidecarRemotePath: '/srv/app/link.php',
+      });
+
+      expect(client.fastPut).toHaveBeenCalledWith(localPath, '/srv/shared/real.php.tmp');
+      expect(client.posixRename).toHaveBeenCalledWith('/srv/shared/real.php.tmp', '/srv/shared/real.php');
+      const touched = [...client.fastPut.mock.calls, ...client.posixRename.mock.calls].flat();
+      expect(touched.some((p) => String(p).startsWith('/srv/app/link.php'))).toBe(false);
+      expect(client.delete).not.toHaveBeenCalled();
+      expect(auditLog.append).toHaveBeenCalledWith({
+        connectionId: 'c1',
+        remotePath: '/srv/shared/real.php',
+        timestamp: expect.any(Number),
+        byteSize: 14,
+        op: 'upload',
+        note: 'via /srv/app/link.php',
+      });
+    });
+
+    it('sidecar keeps the clicked path and records realPath', async () => {
+      const client = linkClient();
+      const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
+
+      await uploadFile(client, 'c1', localPath, '/srv/shared/real.php', 14, auditLog, () => {}, {
+        sidecarRemotePath: '/srv/app/link.php',
+      });
+
+      expect(client.stat).toHaveBeenCalledWith('/srv/shared/real.php');
+      expect(await readSidecar(localPath)).toEqual({
+        connectionId: 'c1',
+        remotePath: '/srv/app/link.php',
+        realPath: '/srv/shared/real.php',
+        mtime: 1700000999,
+        size: 14,
+        downloadedAt: expect.any(Number),
+        localMtimeMs: expect.any(Number),
+      });
+    });
+
+    it('keeps a remembered out-of-root confirmation across the sidecar refresh', async () => {
+      await writeSidecar(localPath, {
+        connectionId: 'c1',
+        remotePath: '/srv/app/link.php',
+        realPath: '/srv/shared/real.php',
+        outsideRootConfirmedFor: '/srv/shared/real.php',
+        mtime: 1,
+        size: 1,
+        downloadedAt: 1,
+      });
+      const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
+
+      await uploadFile(linkClient(), 'c1', localPath, '/srv/shared/real.php', 14, auditLog, () => {}, {
+        sidecarRemotePath: '/srv/app/link.php',
+      });
+
+      expect((await readSidecar(localPath))!.outsideRootConfirmedFor).toBe('/srv/shared/real.php');
+    });
+
+    it('refuses a destination that is itself a symlink', async () => {
+      const client = linkClient();
+      client.lstat.mockResolvedValue({ ...regularFile, isSymbolicLink: true });
+      const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
+
+      await expect(uploadFile(client, 'c1', localPath, '/srv/app/link.php', 14, auditLog)).rejects.toThrow(
+        '"/srv/app/link.php" is a symlink, and Gangway did not resolve it to its target for this upload, so the link was left untouched and nothing was written.',
+      );
+      expect(client.mkdir).not.toHaveBeenCalled();
+      expect(client.fastPut).not.toHaveBeenCalled();
+      expect(client.posixRename).not.toHaveBeenCalled();
+      expect(auditLog.append).not.toHaveBeenCalled();
+    });
+
+    it('refuses a symlink destination for workspace uploads too', async () => {
+      const client = linkClient();
+      client.lstat.mockResolvedValue({ ...regularFile, isSymbolicLink: true });
+      const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
+
+      await expect(
+        uploadFile(client, 'c1', localPath, '/srv/app/link.php', 14, auditLog, () => {}, { writeSidecar: false }),
+      ).rejects.toThrow('is a symlink');
+      expect(client.fastPut).not.toHaveBeenCalled();
+    });
+
+    it('new file (lstat not found) uploads normally', async () => {
+      const client = linkClient();
+      client.lstat.mockRejectedValue(notFound());
+      const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
+
+      await uploadFile(client, 'c1', localPath, '/srv/app/new.php', 14, auditLog);
+
+      expect(client.fastPut).toHaveBeenCalledWith(localPath, '/srv/app/new.php.tmp');
+      expect(client.posixRename).toHaveBeenCalledWith('/srv/app/new.php.tmp', '/srv/app/new.php');
+      const sidecar = await readSidecar(localPath);
+      expect(sidecar!.remotePath).toBe('/srv/app/new.php');
+      expect(sidecar!.realPath).toBeUndefined();
+    });
+
+    it('propagates any other lstat error without writing', async () => {
+      const client = linkClient();
+      const denied = Object.assign(new Error('Permission denied'), { code: 3 });
+      client.lstat.mockRejectedValue(denied);
+      const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
+
+      await expect(uploadFile(client, 'c1', localPath, '/srv/app/a.php', 14, auditLog)).rejects.toBe(denied);
+      expect(client.fastPut).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('destinationGate', () => {
+    function gateClient() {
+      return {
+        fastPut: vi.fn().mockResolvedValue(undefined),
+        posixRename: vi.fn().mockResolvedValue(undefined),
+        delete: vi.fn().mockResolvedValue(undefined),
+        mkdir: vi.fn().mockResolvedValue(undefined),
+        lstat: vi.fn().mockResolvedValue(regularFile),
+        stat: vi.fn().mockResolvedValue(regularFile),
+      };
+    }
+
+    it('uploadFile with a refusing destinationGate makes no mkdir, no fastPut, no posixRename', async () => {
+      const client = gateClient();
+      const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
+      const destinationGate = vi.fn().mockRejectedValue(new Error('outside the connection root'));
+
+      await expect(
+        uploadFile(client, 'c1', localPath, '/srv/app/shared/a.php', 14, auditLog, () => {}, { destinationGate }),
+      ).rejects.toThrow('outside the connection root');
+      expect(client.mkdir).not.toHaveBeenCalled();
+      expect(client.fastPut).not.toHaveBeenCalled();
+      expect(client.posixRename).not.toHaveBeenCalled();
+      expect(auditLog.append).not.toHaveBeenCalled();
+    });
+
+    it('awaits the gate with the posix dirname of the remote path', async () => {
+      const client = gateClient();
+      const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
+      const destinationGate = vi.fn().mockResolvedValue(undefined);
+
+      await uploadFile(client, 'c1', localPath, '/srv/app/shared/a.php', 14, auditLog, () => {}, { destinationGate });
+
+      expect(destinationGate).toHaveBeenCalledWith('/srv/app/shared');
+      expect(destinationGate.mock.invocationCallOrder[0]).toBeLessThan(client.mkdir.mock.invocationCallOrder[0]);
+      expect(client.posixRename).toHaveBeenCalledWith('/srv/app/shared/a.php.tmp', '/srv/app/shared/a.php');
+    });
   });
 });

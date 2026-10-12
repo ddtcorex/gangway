@@ -9,11 +9,15 @@ import { downloadFile } from './transfer/downloadFile';
 import { uploadFile } from './transfer/uploadFile';
 import { AuditLog } from './auditLog';
 import { checkConflict } from './conflictGuard';
-import { readSidecar } from './tmpStore';
+import { readSidecar, writeSidecar } from './tmpStore';
+import { preparePush } from './pushTarget';
+import { BrokenLinkError, LinkLoopError, LinkRetargetedError, resolveTarget } from './realTarget';
+import { createDestinationGate } from './destinationGate';
 import { purgeExpiredTmp, sweepUnknownTmpRoots } from './tmpRetention';
 import { tmpFilePathFor, tmpRootFor, connectionSlug, sidecarPathFor } from './tmpPath';
 import { mapSftpError, actionLabel, isConnectionError } from './errorMapper';
 import { mapListingToEntries } from './remoteListing';
+import { LinkCache, resolveLinkEntries } from './linkResolver';
 import { GangwayTreeProvider, isSelectorNode, type RemoteTreeNode, type GangwayTreeNode } from './ui/gangwayTreeProvider';
 import { TmpStatusBar } from './ui/statusBar';
 import { AUTO_OPEN_PROMPT_THRESHOLD_BYTES, isProbablyBinary, buildDownloadPlan, type RemoteEntry } from './folderQueue';
@@ -26,17 +30,21 @@ import { parseGovardYaml, mapGovardRemote, filterNewRemotes, type MappedRemote, 
 import { raceWithCancellation } from './ui/cancellable';
 import { TransferCancelledError } from './folderQueue';
 import { resolveFileConflict, type ConflictResolutionUi } from './ui/conflictResolution';
-import { checkEditSession, acquireEditSession, releaseEditSession } from './editSession';
+import { checkEditSession, EditLockRegistry, remoteBaseForSidecar } from './editSession';
 import {
   FrozenError,
   assertInsideRoot,
   assertMutatingAllowed,
+  assertWritableTarget,
   chmodRemote,
+  chooseDeleteMode,
   collectDropUploads,
   createRemote,
   duplicateRemote,
   guardUploadTarget,
   isNotFoundError,
+  joinRoot,
+  parentDir,
   parseUriList,
   pasteEntries,
   renameRemote,
@@ -160,7 +168,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         cancellable: true,
       },
       (_progress, token) =>
-        raceWithCancellation(pool.getClient(connection), token, () => pool.invalidate(connection.id)),
+        raceWithCancellation(pool.getClient(connection), token, () => invalidateConnection(connection.id)),
     );
     const adapter = new SftpClientAdapter(client as unknown as RawSftpClient);
     return adapter;
@@ -230,7 +238,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       await vscode.window.showInformationMessage('Cancelled.');
       return;
     }
-    if (connection && isConnectionError(err)) pool.invalidate(connection.id);
+    if (connection && isConnectionError(err)) invalidateConnection(connection.id);
     const mapped = mapSftpError(err);
     const available = mapped.actions.filter((action) =>
       action === 'retry' ? retry !== undefined : action === 'disconnect' ? connection !== undefined : true,
@@ -242,9 +250,11 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     const choice = await vscode.window.showErrorMessage(mapped.message, ...available.map(actionLabel));
     const picked = mapped.actions.find((action) => actionLabel(action) === choice);
     if (picked === 'openOutput') output.show();
-    else if (picked === 'disconnect' && connection) pool.invalidate(connection.id);
+    else if (picked === 'disconnect' && connection) invalidateConnection(connection.id);
     else if (picked === 'retry' && retry) await retry();
   }
+
+  const editLocks = new EditLockRegistry();
 
   /**
    * Opens a downloaded tmp file for editing, unless another still-running
@@ -255,8 +265,10 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
    * file was already downloaded/refreshed by the caller before this runs.
    */
   async function openForEditing(localPath: string): Promise<void> {
-    const check = await checkEditSession(localPath);
-    if (check.status === 'ownedByAnotherLiveSession') {
+    const remoteBase = await remoteBaseForSidecar(localPath, connectionManager.list());
+    for (const base of remoteBase ? [localPath, remoteBase] : [localPath]) {
+      const check = await checkEditSession(base);
+      if (check.status !== 'ownedByAnotherLiveSession') continue;
       const startedAt = new Date(check.owner.startedAt).toLocaleTimeString();
       const choice = await vscode.window.showWarningMessage(
         `This file is already open for editing in another Gangway session (started at ${startedAt}). ` +
@@ -266,8 +278,9 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         'Open here anyway',
       );
       if (choice !== 'Open here anyway') return;
+      break;
     }
-    await acquireEditSession(localPath);
+    await editLocks.claim(localPath, remoteBase);
     await vscode.window.showTextDocument(vscode.Uri.file(localPath) as never);
   }
 
@@ -328,6 +341,47 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   }
 
   /**
+   * One link-resolution memo per activation (never a module global, so
+   * activations and tests stay isolated). Mutations and Refresh clear all of
+   * it: a mutation can change a link anywhere (rename/delete/paste move
+   * targets across directories), and a full clear costs at most one
+   * re-resolve of what is currently expanded, versus the risk of a stale
+   * kind after a prefix-scoped clear misses a cross-directory change.
+   */
+  const linkCache = new LinkCache();
+
+  /**
+   * In-flight link resolution per listed directory. A newer listing of the
+   * same directory supersedes (aborts) the older one; deactivation and
+   * connection invalidation abort what is left.
+   */
+  const linkResolutions = new Map<string, AbortController>();
+
+  function abortLinkResolutions(prefix = ''): void {
+    for (const [key, controller] of [...linkResolutions]) {
+      if (!key.startsWith(prefix)) continue;
+      controller.abort();
+      linkResolutions.delete(key);
+    }
+  }
+
+  /** Drops the pooled client and every link resolved through it. */
+  function invalidateConnection(connectionId: string): void {
+    pool.invalidate(connectionId);
+    abortLinkResolutions(`${connectionId}\0`);
+    linkCache.clearPrefix(`${connectionId}\0`);
+  }
+
+  /** The one place the tree is refreshed: stale link kinds go with it. */
+  function refreshTree(): void {
+    // Abort first: a batch still in flight must not write pre-mutation
+    // results back into the cache after it is cleared.
+    abortLinkResolutions();
+    linkCache.clear();
+    treeProvider.refresh();
+  }
+
+  /**
    * Created unconditionally: every saved connection is always listed as a
    * root node (a brand-new user with zero connections just sees an empty
    * tree, no special-casing needed), and expanding one connects it.
@@ -342,7 +396,20 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     },
     async (connection, dirPath) => {
       const adapter = await getAdapter(connection);
-      return mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName);
+      const entries = mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName);
+      const resolutionKey = `${connection.id}\0${dirPath}`;
+      linkResolutions.get(resolutionKey)?.abort();
+      const controller = new AbortController();
+      linkResolutions.set(resolutionKey, controller);
+      try {
+        return await resolveLinkEntries(adapter, entries, {
+          cache: linkCache,
+          cacheKey: (entry) => `${connection.id}\0${entry.path}`,
+          signal: controller.signal,
+        });
+      } finally {
+        if (linkResolutions.get(resolutionKey) === controller) linkResolutions.delete(resolutionKey);
+      }
     },
     (connectionId, remotePath) => {
       const connection = connectionManager.list().find((c) => c.id === connectionId);
@@ -352,7 +419,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       // A listing failure has no single connection to invalidate (the tree
       // lists many), but re-listing is a meaningful retry: refresh the whole
       // tree instead of leaving the node failed.
-      void showCommandError(err, { retry: () => Promise.resolve(treeProvider.refresh()) });
+      void showCommandError(err, { retry: () => Promise.resolve(refreshTree()) });
     },
     // Local-Explorer/OS drops land here with the tree node they were dropped
     // on (or undefined for empty tree space). The closure runs long after
@@ -391,6 +458,20 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       }
       const key = `${node.connectionId}:${node.entry.path}`;
       const now = Date.now();
+      const linkKind = node.entry.link?.kind;
+      if (node.entry.isSymbolicLink && linkKind === 'unresolved') {
+        lastClickedKey = undefined;
+        const name = node.entry.path.split('/').pop() ?? node.entry.path;
+        void vscode.window.showWarningMessage(`${name} could not be resolved right now. Refresh to try again.`);
+        return;
+      }
+      if (node.entry.isSymbolicLink && (linkKind === 'broken' || linkKind === 'loop')) {
+        lastClickedKey = undefined;
+        const name = node.entry.path.split('/').pop() ?? node.entry.path;
+        const reason = linkKind === 'loop' ? 'it points into a link loop' : 'its target does not exist';
+        void vscode.window.showWarningMessage(`Cannot open "${name}": ${reason}.`);
+        return;
+      }
       if (lastClickedKey === key && now - lastClickedAt < DOUBLE_CLICK_THRESHOLD_MS) {
         lastClickedKey = undefined;
         void runDownloadFileCommand(node);
@@ -429,11 +510,11 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
    * Releases this window's edit-session claim (see openForEditing above)
    * the moment its tab closes, so a genuinely finished edit never keeps
    * blocking a different window from opening the same file. Fires for
-   * every closed document, Gangway-managed or not; releaseEditSession is a
+   * every closed document, Gangway-managed or not; EditLockRegistry.release is a
    * no-op (ENOENT, swallowed) for anything that was never claimed.
    */
   const sessionReleaseListener = vscode.workspace.onDidCloseTextDocument((document) => {
-    void releaseEditSession(document.uri.fsPath).catch(() => {});
+    void editLocks.release(document.uri.fsPath).catch(() => {});
   });
 
   /**
@@ -493,7 +574,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         // Any add/edit/delete can change what the tree's selector row and
         // file listing should show (a renamed bound connection, one that
         // just lost its binding because it was deleted, ...).
-        treeProvider.refresh();
+        refreshTree();
         const bound = connections.find((c) => c.id === connectionManager.getWorkspaceBinding());
         if (bound) purgeTmpFor(bound);
       },
@@ -614,6 +695,16 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         await openForEditing(localPath);
       }
     } catch (err) {
+      // A broken link or a loop is a fact about the server, not a transient
+      // failure: say what it is in opening terms and offer no Retry. The
+      // error's own clickedPath may be a parent, so name the opened row.
+      if (err instanceof BrokenLinkError || err instanceof LinkLoopError) {
+        const name = path.posix.basename(remotePath);
+        await vscode.window.showErrorMessage(
+          err instanceof BrokenLinkError ? `${name} is a broken link` : `${name} is a symbolic link loop`,
+        );
+        return;
+      }
       await showCommandError(err, { retry: () => runDownloadFileCommand(node), connection });
     }
   }
@@ -729,7 +820,41 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         );
         return;
       }
-      const freshStat = await adapter.stat(remotePath);
+      // Resolve where the bytes really go. A link is pushed through to its
+      // real target (never replaced by a regular file); a link that now
+      // points elsewhere than at download time is a hard stop; a target
+      // outside the root needs a confirmation (or is blocked when frozen).
+      let prepared: Awaited<ReturnType<typeof preparePush>>;
+      try {
+        prepared = await preparePush(adapter, connection, sidecar, remotePath, async (realPath) => {
+          const choice = await vscode.window.showWarningMessage(
+            `${remotePath} is a link to ${realPath}, which is outside the connection root (${connection.name}). Push to that file?`,
+            { modal: true },
+            'Push',
+          );
+          return choice === 'Push';
+        });
+      } catch (err) {
+        if (err instanceof LinkRetargetedError) {
+          await vscode.window.showWarningMessage(err.message);
+          return;
+        }
+        throw err;
+      }
+      if (prepared.status !== 'ready') {
+        if (prepared.status === 'blocked') {
+          await vscode.window.showInformationMessage(
+            `Connection "${connection.name}" is frozen and ${remotePath} resolves outside its root. Nothing was pushed.`,
+          );
+        }
+        return;
+      }
+      const target = prepared.target;
+      const confirmedFor = prepared.sidecarUpdate?.outsideRootConfirmedFor ?? sidecar?.outsideRootConfirmedFor;
+      if (sidecar && prepared.sidecarUpdate) {
+        await writeSidecar(localPath, { ...sidecar, ...prepared.sidecarUpdate });
+      }
+      const freshStat = await adapter.stat(target.realPath);
       // The local file was proven to exist by the byteSize stat above (a
       // never-downloaded file already returned "no local copy yet" before
       // this point), yet its sidecar is missing or unreadable (a torn write,
@@ -739,8 +864,20 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       // gets -- rather than silently falling through to an unconditional
       // overwrite.
       if (!sidecar || checkConflict(sidecar, freshStat) === 'conflict') {
-        const decision = await resolveFileConflict(adapter, connection.id, localPath, remotePath, conflictUi);
+        const decision = await resolveFileConflict(adapter, connection.id, localPath, target.realPath, conflictUi);
         if (decision === 'keepServer') {
+          // resolveFileConflict refreshed the sidecar keyed on the path it
+          // read (the real target); restore the link identity so the next
+          // push still resolves the clicked path and the retarget check holds.
+          const refreshed = target.viaLink ? await readSidecar(localPath) : undefined;
+          if (refreshed) {
+            await writeSidecar(localPath, {
+              ...refreshed,
+              remotePath,
+              realPath: target.realPath,
+              ...(confirmedFor === target.realPath ? { outsideRootConfirmedFor: target.realPath } : {}),
+            });
+          }
           dirtyDecorations.refresh(vscode.Uri.file(localPath));
           await vscode.window.showInformationMessage(
             `Local edits discarded: ${localPath} now matches the server copy of ${remotePath}.`,
@@ -751,10 +888,20 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       }
       await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, title: `Gangway: uploading ${remotePath}` },
-        () => uploadFile(adapter, connection.id, localPath as string, remotePath as string, byteSize, auditLog, (message) => output.appendLine(message)),
+        () =>
+          uploadFile(
+            adapter,
+            connection.id,
+            localPath as string,
+            target.realPath,
+            byteSize,
+            auditLog,
+            (message) => output.appendLine(message),
+            target.viaLink ? { sidecarRemotePath: remotePath } : undefined,
+          ),
       );
       dirtyDecorations.refresh(vscode.Uri.file(localPath));
-      treeProvider.refresh();
+      refreshTree();
     } catch (err) {
       await showCommandError(err, { retry: () => runUploadFileCommand(nodeOrLocalPath, remotePathArg), connection });
     }
@@ -775,12 +922,37 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     const fs = (await import('node:fs/promises')).default;
     try {
       const adapter = await getAdapter(connection);
+      if (node.entry.isSymbolicLink && node.entry.isDirectory) {
+        // A directory link can lead anywhere on the server: name the real
+        // folder before pulling its contents. One resolve, link nodes only.
+        const name = path.posix.basename(remotePath);
+        let resolved;
+        try {
+          resolved = await resolveTarget(adapter, connection, remotePath);
+        } catch (err) {
+          if (err instanceof BrokenLinkError || err instanceof LinkLoopError) {
+            await vscode.window.showWarningMessage(
+              err instanceof BrokenLinkError ? `${name} is a broken link` : `${name} is a symbolic link loop`,
+            );
+            return;
+          }
+          throw err;
+        }
+        if (!resolved.insideRoot) {
+          const choice = await vscode.window.showWarningMessage(
+            `This folder is a link to ${resolved.realPath}, outside the connection root. Download its contents anyway?`,
+            { modal: true },
+            'Download',
+          );
+          if (choice !== 'Download') return;
+        }
+      }
       const result = await withCancellableProgress(`Downloading ${remotePath}`, (signal, reportProgress) =>
         runFolderDownload(
           { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 },
           async (dirPath) => mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName),
           async (file) => {
-            const { localPath } = await downloadFile(adapter, connection, file);
+            const { localPath } = await downloadFile(adapter, connection, file, { resolveLinks: false });
             dirtyDecorations.refresh(vscode.Uri.file(localPath));
             tmpStatusBar.showFor(connection.name, file, localPath);
           },
@@ -794,7 +966,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
           },
         ),
       );
-      treeProvider.refresh();
+      refreshTree();
       if (result.symlinked.length > 0) {
         // Spec §2.3: symlinks download as plain files *with a warning* --
         // the listing flag existed, but no warning was ever shown.
@@ -865,6 +1037,9 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         return resolved;
       };
       const adapter = await getAdapter(connection);
+      // One gate per operation: a destination directory that is a link out of
+      // the root fails its files instead of receiving them.
+      const destinationGate = createDestinationGate(adapter, connection);
       const result = await withCancellableProgress(`Uploading ${remotePath}`, (signal, reportProgress) =>
         runFolderUpload(
           { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 },
@@ -877,8 +1052,15 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
             } catch {
               throw new Error(`No local copy of ${file} -- download the folder before uploading it.`);
             }
-            await uploadFile(adapter, connection.id, localPath, file, byteSize, auditLog, (message) =>
-              output.appendLine(message),
+            await uploadFile(
+              adapter,
+              connection.id,
+              localPath,
+              file,
+              byteSize,
+              auditLog,
+              (message) => output.appendLine(message),
+              { destinationGate },
             );
             dirtyDecorations.refresh(vscode.Uri.file(localPath));
           },
@@ -923,12 +1105,13 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
             reportProgress,
             onlyPaths,
             ensureDir: async (dir) => {
+              await destinationGate(dir);
               await adapter.mkdir(dir, true);
             },
           },
         ),
       );
-      treeProvider.refresh();
+      refreshTree();
       await vscode.window.showInformationMessage(
         `${result.cancelled ? 'Cancelled. ' : ''}Uploaded ${result.uploaded.length} file(s). ` +
           `${result.skippedConflicted.length} skipped (conflicted), ${result.skippedSymlinks.length} skipped (symlinks), ${result.failed.length} failed.`,
@@ -1017,6 +1200,26 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     return connection;
   }
 
+  /** "A and B", "A, B and C", "A, B, C and N more". */
+  function joinPaths(paths: readonly string[]): string {
+    if (paths.length > 3) return `${paths.slice(0, 3).join(', ')} and ${paths.length - 3} more`;
+    return paths.length === 3 ? `${paths[0]}, ${paths[1]} and ${paths[2]}` : paths.join(' and ');
+  }
+
+  /**
+   * The out-of-root confirmation for single-target user gestures. Modal,
+   * names the real path, asked per operation and never remembered.
+   */
+  async function confirmOutsideRoot(realPath: string, allRealPaths: readonly string[] = [realPath]): Promise<boolean> {
+    const paths = allRealPaths.length > 0 ? allRealPaths : [realPath];
+    const message =
+      paths.length === 1
+        ? `This location is really ${paths[0]}, outside the connection root. Continue?`
+        : `These locations are really ${joinPaths(paths)}, outside the connection root. Continue?`;
+    const choice = await vscode.window.showWarningMessage(message, { modal: true }, 'Continue');
+    return choice === 'Continue';
+  }
+
   async function runNewRemoteCommand(kind: 'file' | 'dir', node?: RemoteTreeNode): Promise<void> {
     const connection = await requireMutableConnection(node);
     if (!connection) return;
@@ -1032,8 +1235,9 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       const adapter = await getAdapter(connection);
       const { path: created } = await createRemote(adapter, connection, dirPath, name, kind, auditLog, {
         onAuditError: (message) => output.appendLine(message),
+        confirmOutsideRoot,
       });
-      treeProvider.refresh();
+      refreshTree();
       if (kind === 'file') {
         const choice = await vscode.window.showInformationMessage(`Created ${created}.`, 'Download for editing');
         if (choice === 'Download for editing') {
@@ -1067,8 +1271,9 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       const adapter = await getAdapter(connection);
       const { newPath } = await renameRemote(adapter, connection, oldPath, newName, auditLog, {
         onAuditError: (message) => output.appendLine(message),
+        confirmOutsideRoot,
       });
-      treeProvider.refresh();
+      refreshTree();
       await vscode.window.showInformationMessage(`Renamed to ${newPath}.`);
     } catch (err) {
       await showCommandError(err, { retry: () => runRenameRemoteCommand(node), connection });
@@ -1079,7 +1284,8 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     const entries = mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName);
     let count = 0;
     for (const entry of entries) {
-      if (entry.isDirectory) count += await countRemoteFiles(adapter, entry.path);
+      // A link is counted as one entry, never walked: it is unlinked, not recursed.
+      if (entry.isDirectory && !entry.isSymbolicLink) count += await countRemoteFiles(adapter, entry.path);
       else count += 1;
     }
     return count;
@@ -1096,34 +1302,72 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     try {
       const adapter = await getAdapter(connection);
       assertInsideRoot(connection, target);
-      if (!node.entry.isDirectory) {
+      // The tree row can be stale, and stat follows links: lstat now is the
+      // authority on whether this path is itself a link.
+      const isLinkNow = (await adapter.lstat(target)).isSymbolicLink;
+      let realTarget = target;
+      const mode = chooseDeleteMode({
+        isDirectory: node.entry.isDirectory,
+        isSymbolicLink: node.entry.isSymbolicLink || isLinkNow,
+      });
+      // Whatever the row is, it lives at its parent's real path: gate that
+      // parent (same pattern as rename), act on the resolved path, and name
+      // it in the prompt when it differs. Only the parent is resolved, never
+      // a link itself, so an unlink never follows the link to its target.
+      const realParent = (await assertWritableTarget(adapter, connection, parentDir(target), { confirmOutsideRoot }))
+        .realPath;
+      if (mode === 'link') {
+        // Unlink only: never count, never rmdir, never a trailing slash
+        // (which would resolve through the link to its target).
+        const linkPath = target.length > 1 ? target.replace(/\/+$/, '') : target;
+        const linkName = path.posix.basename(linkPath);
+        realTarget = joinRoot(realParent, linkName);
+        const really = realTarget === linkPath ? '' : ` (really ${realTarget})`;
         const choice = await vscode.window.showWarningMessage(
-          `Permanently delete ${target} on "${connection.name}"? There is no undo.`,
+          `Delete the link ${linkName}${really}? The target is not touched.`,
+          { modal: true },
           'Delete',
-          'Cancel',
         );
         if (choice !== 'Delete') return;
-        await adapter.delete(target);
+        await adapter.delete(realTarget);
       } else {
-        const fileCount = await countRemoteFiles(adapter, target);
-        const base = path.posix.basename(target);
-        const typed = await vscode.window.showInputBox({
-          prompt: `Type "${base}" to permanently delete this folder (${fileCount} file(s)). There is no undo.`,
-        });
-        if (!typedConfirmMatches(base, typed)) {
-          await vscode.window.showInformationMessage('Delete cancelled: the typed name did not match.');
-          return;
+        realTarget = joinRoot(realParent, path.posix.basename(target));
+        const really = realTarget === target ? '' : ` (really ${realTarget})`;
+        if (mode === 'file') {
+          const choice = await vscode.window.showWarningMessage(
+            `Permanently delete ${target}${really} on "${connection.name}"? There is no undo.`,
+            'Delete',
+            'Cancel',
+          );
+          if (choice !== 'Delete') return;
+          await adapter.delete(realTarget);
+        } else {
+          const fileCount = await countRemoteFiles(adapter, realTarget);
+          const base = path.posix.basename(target);
+          const typed = await vscode.window.showInputBox({
+            prompt: `Type "${base}" to permanently delete this folder${really} (${fileCount} file(s)). There is no undo.`,
+          });
+          if (!typedConfirmMatches(base, typed)) {
+            await vscode.window.showInformationMessage('Delete cancelled: the typed name did not match.');
+            return;
+          }
+          await adapter.rmdir(realTarget, true);
         }
-        await adapter.rmdir(target, true);
       }
       try {
-        await auditLog.append({ connectionId: connection.id, remotePath: target, timestamp: Date.now(), op: 'delete' });
+        await auditLog.append({
+          connectionId: connection.id,
+          remotePath: target,
+          timestamp: Date.now(),
+          op: 'delete',
+          ...(realTarget !== target ? { note: `really ${realTarget}` } : {}),
+        });
       } catch (err) {
         output.appendLine(
           `Deleted ${target}, but could not write the audit log entry: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
-      treeProvider.refresh();
+      refreshTree();
       await vscode.window.showInformationMessage(`Permanently deleted ${target}.`);
     } catch (err) {
       await showCommandError(err, { retry: () => runDeleteRemoteCommand(node), connection });
@@ -1141,8 +1385,9 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       const adapter = await getAdapter(connection);
       const { path: dupPath } = await duplicateRemote(adapter, connection, node.entry.path, auditLog, {
         onAuditError: (message) => output.appendLine(message),
+        confirmOutsideRoot,
       });
-      treeProvider.refresh();
+      refreshTree();
       await vscode.window.showInformationMessage(`Duplicated to ${dupPath}.`);
     } catch (err) {
       await showCommandError(err, { retry: () => runDuplicateRemoteCommand(node), connection });
@@ -1158,7 +1403,11 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     }
     const connection = await requireMutableConnection(node);
     if (!connection) return;
-    const picked = await vscode.window.showQuickPick(CHMOD_PRESETS, { placeHolder: 'Choose a mode' });
+    // SFTP setstat follows links: on a link row the mode lands on the target.
+    const placeHolder = node.entry.isSymbolicLink
+      ? 'Choose a mode for the link target (the link itself is not changed)'
+      : 'Choose a mode';
+    const picked = await vscode.window.showQuickPick(CHMOD_PRESETS, { placeHolder });
     if (!picked) return;
     let mode: string | undefined;
     if (picked === 'Custom…') {
@@ -1173,8 +1422,9 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       const adapter = await getAdapter(connection);
       await chmodRemote(adapter, connection, node.entry.path, mode, auditLog, {
         onAuditError: (message) => output.appendLine(message),
+        confirmOutsideRoot,
       });
-      treeProvider.refresh();
+      refreshTree();
       await vscode.window.showInformationMessage(`Changed mode of ${node.entry.path} to ${mode}.`);
     } catch (err) {
       await showCommandError(err, { retry: () => runChmodRemoteCommand(node), connection });
@@ -1232,14 +1482,14 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
               resolveFileConflict(adapter, connection.id, stagingPath as string, remotePath, conflictUi),
             auditLog,
           },
-          { signal, onAuditError: (message) => output.appendLine(message) },
+          { signal, onAuditError: (message) => output.appendLine(message), confirmOutsideRoot },
         ).then((r) => {
           reportProgress(destDir);
           return r;
         }),
       );
       if (clipboard.cut && result.pasted.length > 0 && result.skipped.length === 0) clipboard = clearClipboard();
-      treeProvider.refresh();
+      refreshTree();
       if (result.skipped.length > 0) {
         for (const skip of result.skipped) output.appendLine(`Paste skipped: ${skip.path} (${skip.reason})`);
         output.show();
@@ -1303,19 +1553,27 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
           : connection.remotePath;
     try {
       const adapter = await getAdapter(connection);
+      const destinationGate = createDestinationGate(adapter, connection);
       await withCancellableProgress(`Uploading ${collected.length} dropped file(s)`, (signal, reportProgress) =>
         (async () => {
           for (const item of collected) {
             if (signal.aborted) throw new TransferCancelledError();
             const remotePath = `${targetDir}/${path.posix.basename(item.localPath)}`;
             reportProgress(remotePath);
-            await uploadFile(adapter, connection.id, item.localPath, remotePath, item.byteSize, auditLog, (message) =>
-              output.appendLine(message),
+            await uploadFile(
+              adapter,
+              connection.id,
+              item.localPath,
+              remotePath,
+              item.byteSize,
+              auditLog,
+              (message) => output.appendLine(message),
+              { destinationGate },
             );
           }
         })(),
       );
-      treeProvider.refresh();
+      refreshTree();
       await vscode.window.showInformationMessage(`Uploaded ${collected.length} file(s).`);
     } catch (err) {
       await showCommandError(err, { retry: () => handleLocalDrop(targetNode, uriListValue), connection });
@@ -1570,6 +1828,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       let done = 0;
       const skipped: string[] = [];
       const failed: { remotePath: string; message: string }[] = [];
+      const destinationGate = createDestinationGate(adapter, connection);
       await withCancellableProgress(`Syncing ${label} ${direction}`, (signal, reportProgress) =>
         (async () => {
           for (const { row } of picked) {
@@ -1610,7 +1869,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
                   // Workspace uploads never leave sidecars behind: a
                   // `.meta.json` next to the user's own project files would
                   // litter their repo (and could even get committed).
-                  isWorkspace ? { writeSidecar: false } : undefined,
+                  isWorkspace ? { writeSidecar: false, destinationGate } : { destinationGate },
                 );
                 dirtyDecorations.refresh(vscode.Uri.file(row.localPath));
                 done += 1;
@@ -1644,14 +1903,14 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
                   // Workspace downloads land in the workspace, not the tmp
                   // mirror: download to tmp, then copy over. No tmp status
                   // bar either — that badge means "tmp-backed editor".
-                  const downloaded = await downloadFile(adapter, connection, remotePath);
+                  const downloaded = await downloadFile(adapter, connection, remotePath, { resolveLinks: false });
                   const dest = path.join(localRoot, ...row.relativePath.split('/'));
                   await fs.mkdir(path.dirname(dest), { recursive: true });
                   await fs.copyFile(downloaded.localPath, dest);
                   dirtyDecorations.refresh(vscode.Uri.file(dest));
                   done += 1;
                 } else {
-                  const { localPath } = await downloadFile(adapter, connection, remotePath);
+                  const { localPath } = await downloadFile(adapter, connection, remotePath, { resolveLinks: false });
                   dirtyDecorations.refresh(vscode.Uri.file(localPath));
                   tmpStatusBar.showFor(connection.name, remotePath, localPath);
                   done += 1;
@@ -1682,7 +1941,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       for (const skip of skipped) output.appendLine(`Sync skipped: ${skip}`);
       for (const name of skippedSymlinks) output.appendLine(`Sync skipped symlink: ${name}`);
       if (skipped.length > 0 || skippedSymlinks.length > 0) output.show();
-      treeProvider.refresh();
+      refreshTree();
       await vscode.window.showInformationMessage(
         `Synced ${done} file(s) ${direction} (${label})` +
           (skipped.length > 0 || skippedSymlinks.length > 0 ? ` (${skipped.length + skippedSymlinks.length} skipped, see Output).` : ''),
@@ -1880,7 +2139,10 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     if (choice !== 'Upload') return;
     try {
       const adapter = await getAdapter(connection);
-      await pushMappedFile(adapter, fsPath, remotePath);
+      // Pure B: no freeze gate, but a destination directory that is a link
+      // out of the root is still refused.
+      const destinationGate = createDestinationGate(adapter, connection, { freezeGate: false });
+      await pushMappedFile(adapter, fsPath, remotePath, { destinationGate });
       await vscode.window.showInformationMessage(`Uploaded ${fsPath} → ${remotePath}.`);
     } catch (err) {
       await showCommandError(err, { retry: () => runUploadMappedFileCommand({ fsPath }), connection });
@@ -2020,6 +2282,8 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       );
       if (choice !== uploadLabel) return;
       const adapter = await getAdapter(connection);
+      // Pure B: no freeze gate, out-of-root link directories still refused.
+      const destinationGate = createDestinationGate(adapter, connection, { freezeGate: false });
       const result = await withCancellableProgress(`Uploading ${label}`, (signal, reportProgress) =>
         (async () => {
           const done: string[] = [];
@@ -2034,7 +2298,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
             const remotePath = joinRemote(file.rel);
             reportProgress(remotePath);
             try {
-              await pushMappedFile(adapter, file.localPath, remotePath);
+              await pushMappedFile(adapter, file.localPath, remotePath, { destinationGate });
               done.push(remotePath);
             } catch (err) {
               failed.push({ remotePath, message: err instanceof Error ? err.message : String(err) });
@@ -2046,7 +2310,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       for (const remotePath of result.done) output.appendLine(`Uploaded ${remotePath}`);
       for (const rel of walk.skippedSymlinks) output.appendLine(`Upload skipped symlink: ${rel}`);
       if (result.failed.length > 0 || walk.skippedSymlinks.length > 0) output.show();
-      treeProvider.refresh();
+      refreshTree();
       await vscode.window.showInformationMessage(
         (result.cancelled
           ? `Cancelled after uploading ${result.done.length} file(s).`
@@ -2168,7 +2432,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       for (const remotePath of result.done) output.appendLine(`Downloaded ${remotePath}`);
       for (const skipped of skippedSymlinks) output.appendLine(`Download skipped ${skipped}`);
       if (result.failed.length > 0 || skippedSymlinks.length > 0) output.show();
-      treeProvider.refresh();
+      refreshTree();
       await vscode.window.showInformationMessage(
         (result.cancelled
           ? `Cancelled after downloading ${result.done.length} file(s).`
@@ -2335,7 +2599,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       }
       return;
     }
-    treeProvider.refresh();
+    refreshTree();
     const importedNote = `Imported ${selected.length} (${selected.map((c) => `${c.name}${c.frozen === true ? ' (frozen)' : ''}`).join(', ')}).`;
     const presentNote = alreadyPresent.length > 0 ? ` Already present: ${alreadyPresent.join(', ')}.` : '';
     const skippedNote =
@@ -2359,6 +2623,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     // Pooled sockets and idle timers are extension-host resources: dropping
     // them here keeps a window reload from orphaning live connections.
     { dispose: () => void pool.dispose() },
+    { dispose: () => abortLinkResolutions() },
     vscode.commands.registerCommand('gangway.downloadFile', runDownloadFileCommand),
     vscode.commands.registerCommand('gangway.uploadFile', (nodeOrLocalPath?: RemoteTreeNode | string, remotePathArg?: string) => runUploadFileCommand(nodeOrLocalPath, remotePathArg)),
     vscode.commands.registerCommand('gangway.manageRemotes', () => openManageRemotesPanel(getActiveConnection())),
@@ -2396,7 +2661,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       }
       if (!picked.connectionId) return;
       await connectionManager.setWorkspaceBinding(picked.connectionId);
-      treeProvider.refresh();
+      refreshTree();
     }),
     vscode.commands.registerCommand('gangway.cleanupCache', async () => {
       // Explicit user gesture, so it intentionally bypasses the default
@@ -2434,14 +2699,14 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     vscode.commands.registerCommand('gangway.uploadMappedFolder', (uri?: { fsPath: string }) => runUploadMappedFolderCommand(uri)),
     vscode.commands.registerCommand('gangway.downloadMappedFolder', (uri?: { fsPath: string }) => runDownloadMappedFolderCommand(uri)),
     vscode.commands.registerCommand('gangway.downloadToWorkspaceFolder', (node?: RemoteTreeNode) => runDownloadToWorkspaceFolderCommand(node)),
-    vscode.commands.registerCommand('gangway.refreshExplorer', () => treeProvider.refresh()),
+    vscode.commands.registerCommand('gangway.refreshExplorer', () => refreshTree()),
     vscode.commands.registerCommand('gangway.toggleFreeze', async (node?: RemoteTreeNode) => {
       const connection = node
         ? connectionManager.list().find((c) => c.id === node.connectionId)
         : requireActiveConnection();
       if (!connection) return;
       const updated = await connectionManager.update(connection.id, { frozen: !(connection.frozen === true) });
-      treeProvider.refresh();
+      refreshTree();
       await vscode.window.showInformationMessage(
         updated.frozen === true
           ? `Locked "${updated.name}": uploads, deletes, and other server mutations are now blocked.`

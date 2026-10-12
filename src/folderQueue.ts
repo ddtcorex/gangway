@@ -1,3 +1,5 @@
+import type { LinkInfo } from './linkResolver';
+
 export const AUTO_OPEN_PROMPT_THRESHOLD_BYTES = 5 * 1024 * 1024;
 
 /**
@@ -21,6 +23,7 @@ export interface RemoteEntry {
   isDirectory: boolean;
   isSymbolicLink: boolean;
   size: number;
+  link?: LinkInfo;
 }
 
 export interface TransferTask {

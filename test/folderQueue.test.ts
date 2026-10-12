@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { buildDownloadPlan, buildUploadPlan, TransferCancelledError, isProbablyBinary, AUTO_OPEN_PROMPT_THRESHOLD_BYTES } from '../src/folderQueue';
 import type { RemoteEntry } from '../src/folderQueue';
 
@@ -173,5 +173,13 @@ describe('isProbablyBinary', () => {
 
   it('exports a 5MB auto-open prompt threshold', () => {
     expect(AUTO_OPEN_PROMPT_THRESHOLD_BYTES).toBe(5 * 1024 * 1024);
+  });
+
+  it('walk does not descend into an entry with isDirectory and isSymbolicLink both true', async () => {
+    const listRemote = vi.fn(async (dirPath: string) =>
+      dirPath === '/r' ? [{ path: '/r/ln', isDirectory: true, isSymbolicLink: true, size: 0 }] : [],
+    );
+    await buildDownloadPlan({ path: '/r', isDirectory: true, isSymbolicLink: false, size: 0 }, listRemote);
+    expect(listRemote).toHaveBeenCalledTimes(1);
   });
 });
