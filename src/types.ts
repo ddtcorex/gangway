@@ -50,6 +50,13 @@ export interface SidecarMeta {
    * sidecar written before this field existed still parses; such a file is
    * simply never shown as dirty. */
   localMtimeMs?: number;
+  /** Canonical remote path the bytes came from, recorded only when remotePath
+   * goes through a link. Absent for plain files and bulk downloads. */
+  realPath?: string;
+  /** The realPath the user confirmed writing to when it lies outside the
+   * connection root. A later upload only skips the prompt while realPath
+   * still equals this value. */
+  outsideRootConfirmedFor?: string;
 }
 
 export interface RemoteStat {

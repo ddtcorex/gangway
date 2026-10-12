@@ -792,7 +792,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
           { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 },
           async (dirPath) => mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName),
           async (file) => {
-            const { localPath } = await downloadFile(adapter, connection, file);
+            const { localPath } = await downloadFile(adapter, connection, file, { resolveLinks: false });
             dirtyDecorations.refresh(vscode.Uri.file(localPath));
             tmpStatusBar.showFor(connection.name, file, localPath);
           },
@@ -1656,14 +1656,14 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
                   // Workspace downloads land in the workspace, not the tmp
                   // mirror: download to tmp, then copy over. No tmp status
                   // bar either — that badge means "tmp-backed editor".
-                  const downloaded = await downloadFile(adapter, connection, remotePath);
+                  const downloaded = await downloadFile(adapter, connection, remotePath, { resolveLinks: false });
                   const dest = path.join(localRoot, ...row.relativePath.split('/'));
                   await fs.mkdir(path.dirname(dest), { recursive: true });
                   await fs.copyFile(downloaded.localPath, dest);
                   dirtyDecorations.refresh(vscode.Uri.file(dest));
                   done += 1;
                 } else {
-                  const { localPath } = await downloadFile(adapter, connection, remotePath);
+                  const { localPath } = await downloadFile(adapter, connection, remotePath, { resolveLinks: false });
                   dirtyDecorations.refresh(vscode.Uri.file(localPath));
                   tmpStatusBar.showFor(connection.name, remotePath, localPath);
                   done += 1;
