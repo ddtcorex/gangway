@@ -198,8 +198,8 @@ pnpm run build:e2e && pnpm run test:e2e   # real extension host, needs the docke
   Gangway cannot see where a directory link in the path leads, so it judges
   the path by its text, as before link support. A write through a link that
   leads outside the connection root is then not detected as outside it. A
-  frozen connection still blocks every write, because the freeze check runs
-  first and does not depend on `realpath`.
+  frozen connection still blocks every write the freeze check normally
+  covers, because that check runs first and does not depend on `realpath`.
 - No support for OS keychain-backed key passphrases beyond what
   `ssh2-sftp-client` itself provides.
 
