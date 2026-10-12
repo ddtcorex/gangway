@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveLink, resolveLinkEntries, type LinkResolveClient } from '../src/linkResolver';
+import { isLoopError, resolveLink, resolveLinkEntries, type LinkResolveClient } from '../src/linkResolver';
 import type { RemoteEntry } from '../src/folderQueue';
 import type { RemoteStat } from '../src/types';
 
@@ -52,6 +52,21 @@ describe('resolveLink', () => {
   it('broken link (realPath undefined) is broken', async () => {
     const c = client({ realPath: async () => undefined });
     expect(await resolveLink(c, '/srv/www/x')).toEqual({ realPath: '/srv/www/x', kind: 'broken' });
+  });
+
+  it('a not-found error whose path names a loop is not a loop error', async () => {
+    // Exact shape seen from atmoz/sftp: ssh2-sftp-client appends the path to
+    // the message, and OpenSSH reports the loop pair itself as no such file.
+    const notFound = Object.assign(new Error('_xstat: No such file: /var/www/nested/loop-a'), { code: 'ENOENT' });
+    expect(isLoopError(notFound)).toBe(false);
+    expect(isLoopError(new Error('realPath: Failure /srv/loophole/x'))).toBe(false);
+    const c = client({
+      realPath: async () => '/srv/www/does-not-exist',
+      stat: async () => {
+        throw notFound;
+      },
+    });
+    expect((await resolveLink(c, '/srv/www/loop-a')).kind).toBe('broken');
   });
 
   it('ELOOP error is loop', async () => {

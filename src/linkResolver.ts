@@ -15,7 +15,12 @@ export interface LinkResolveClient {
 }
 
 const DEFAULT_CONCURRENCY = 8;
-const LOOP_RE = /loop|too many levels/i;
+/**
+ * Loop wording only, never a bare "loop": ssh2-sftp-client appends the path
+ * to every error message, so a missing `loop-a` (seen from atmoz/sftp as
+ * "_xstat: No such file: /var/www/nested/loop-a") must not read as a loop.
+ */
+const LOOP_RE = /\bELOOP\b|too many levels|(?:symlink|symbolic link) loop/i;
 
 export function isLoopError(err: unknown): boolean {
   if ((err as { code?: unknown } | null)?.code === 'ELOOP') return true;
