@@ -1,6 +1,9 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { readSidecar } from './tmpStore';
+import { tmpRootFor } from './tmpPath';
+import type { ConnectionConfig } from './types';
 
 /**
  * One VS Code window's extension host is a distinct OS process, so its pid
@@ -93,5 +96,60 @@ export async function releaseEditSession(localPath: string): Promise<void> {
     await fs.rm(lockPathFor(localPath));
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+}
+
+/**
+ * Remote lock base for a tmp file, from its sidecar. Locking must never
+ * block opening, so any sidecar read problem (EACCES, EISDIR) or an unknown
+ * connection yields undefined and only the local-path lock applies.
+ */
+export async function remoteBaseForSidecar(
+  localPath: string,
+  connections: readonly ConnectionConfig[],
+): Promise<string | undefined> {
+  try {
+    const sidecar = await readSidecar(localPath);
+    if (!sidecar) return undefined;
+    const connection = connections.find((c) => c.id === sidecar.connectionId);
+    if (!connection) return undefined;
+    return remoteLockBase(tmpRootFor(connection), sidecar.connectionId, sidecar.realPath ?? sidecar.remotePath);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Per-window record of which open documents hold which remote lock, kept in
+ * memory so the base is fixed at open time. A link tab and its target tab
+ * share one remote lock; it is dropped only when the last of them closes.
+ * A set (not a counter) because reopening an already-open document does not
+ * fire a second close.
+ */
+export class EditLockRegistry {
+  private readonly bases = new Map<string, string>();
+  private readonly holders = new Map<string, Set<string>>();
+
+  async claim(localPath: string, remoteBase: string | undefined): Promise<void> {
+    await acquireEditSession(localPath);
+    if (!remoteBase) return;
+    await acquireEditSession(remoteBase);
+    this.bases.set(localPath, remoteBase);
+    let set = this.holders.get(remoteBase);
+    if (!set) this.holders.set(remoteBase, (set = new Set()));
+    set.add(localPath);
+  }
+
+  async release(localPath: string): Promise<void> {
+    await releaseEditSession(localPath);
+    const remoteBase = this.bases.get(localPath);
+    if (!remoteBase) return;
+    this.bases.delete(localPath);
+    const set = this.holders.get(remoteBase);
+    set?.delete(localPath);
+    if (set && set.size === 0) {
+      this.holders.delete(remoteBase);
+      await releaseEditSession(remoteBase);
+    }
   }
 }

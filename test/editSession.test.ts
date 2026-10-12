@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { checkEditSession, acquireEditSession, releaseEditSession, remoteLockBase } from '../src/editSession';
+import { checkEditSession, acquireEditSession, releaseEditSession, remoteLockBase, EditLockRegistry, remoteBaseForSidecar } from '../src/editSession';
+import { tmpRootFor } from '../src/tmpPath';
 
 let tmpDir: string;
 let file: string;
@@ -91,5 +92,55 @@ describe('remote lock keys', () => {
     await fs.writeFile(`${base}.gangway-session.json`, JSON.stringify({ pid: 999999, startedAt: 1 }));
     await expect(checkEditSession(base, () => false)).resolves.toEqual({ status: 'ok' });
     await expect(checkEditSession(base, () => true)).resolves.toMatchObject({ status: 'ownedByAnotherLiveSession' });
+  });
+});
+
+describe('EditLockRegistry', () => {
+  it('keeps the remote lock until the last document sharing it closes', async () => {
+    const reg = new EditLockRegistry();
+    const remote = remoteLockBase(tmpDir, 'conn-1', '/srv/app/real.php');
+    const linkDoc = path.join(tmpDir, 'link.php');
+    const targetDoc = path.join(tmpDir, 'real.php');
+    await reg.claim(linkDoc, remote);
+    await reg.claim(targetDoc, remote);
+    const remoteLock = `${remote}.gangway-session.json`;
+
+    await reg.release(linkDoc);
+    await expect(fs.access(remoteLock)).resolves.toBeUndefined();
+    await expect(fs.access(`${linkDoc}.gangway-session.json`)).rejects.toThrow();
+
+    await reg.release(targetDoc);
+    await expect(fs.access(remoteLock)).rejects.toThrow();
+  });
+
+  it('claiming the same document twice still releases on a single close', async () => {
+    const reg = new EditLockRegistry();
+    const remote = remoteLockBase(tmpDir, 'conn-1', '/srv/app/real.php');
+    await reg.claim(file, remote);
+    await reg.claim(file, remote);
+    await reg.release(file);
+    await expect(fs.access(`${remote}.gangway-session.json`)).rejects.toThrow();
+  });
+
+  it('releases the local lock of a document that never had a remote base', async () => {
+    const reg = new EditLockRegistry();
+    await reg.claim(file, undefined);
+    await reg.release(file);
+    await expect(fs.access(`${file}.gangway-session.json`)).rejects.toThrow();
+  });
+});
+
+describe('remoteBaseForSidecar', () => {
+  const conn = { id: 'c1', host: 'h', username: 'u', port: 22, remotePath: '/srv' };
+
+  it('keys on realPath when present, else remotePath', async () => {
+    await fs.writeFile(`${file}.meta.json`, JSON.stringify({ connectionId: 'c1', remotePath: '/srv/a', realPath: '/srv/b', mtime: 1, size: 1, downloadedAt: 1 }));
+    const base = await remoteBaseForSidecar(file, [conn as never]);
+    expect(base).toBe(remoteLockBase(tmpRootFor(conn), 'c1', '/srv/b'));
+  });
+
+  it('falls back to no remote base when the sidecar read fails (EISDIR)', async () => {
+    await fs.mkdir(`${file}.meta.json`);
+    await expect(remoteBaseForSidecar(file, [conn as never])).resolves.toBeUndefined();
   });
 });

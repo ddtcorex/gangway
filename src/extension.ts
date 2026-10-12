@@ -29,7 +29,7 @@ import { parseGovardYaml, mapGovardRemote, filterNewRemotes, type MappedRemote, 
 import { raceWithCancellation } from './ui/cancellable';
 import { TransferCancelledError } from './folderQueue';
 import { resolveFileConflict, type ConflictResolutionUi } from './ui/conflictResolution';
-import { checkEditSession, acquireEditSession, releaseEditSession, remoteLockBase } from './editSession';
+import { checkEditSession, EditLockRegistry, remoteBaseForSidecar } from './editSession';
 import {
   FrozenError,
   assertInsideRoot,
@@ -249,20 +249,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     else if (picked === 'retry' && retry) await retry();
   }
 
-  /**
-   * Lock bases for one tmp file: its own path, plus (when a sidecar names
-   * the connection) a key on the resolved remote file, so a link and its
-   * target opened directly warn each other.
-   */
-  async function lockBasesFor(localPath: string): Promise<string[]> {
-    const bases = [localPath];
-    const sidecar = await readSidecar(localPath);
-    const connection = sidecar ? connectionManager.list().find((c) => c.id === sidecar.connectionId) : undefined;
-    if (sidecar && connection) {
-      bases.push(remoteLockBase(tmpRootFor(connection), sidecar.connectionId, sidecar.realPath ?? sidecar.remotePath));
-    }
-    return bases;
-  }
+  const editLocks = new EditLockRegistry();
 
   /**
    * Opens a downloaded tmp file for editing, unless another still-running
@@ -273,8 +260,8 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
    * file was already downloaded/refreshed by the caller before this runs.
    */
   async function openForEditing(localPath: string): Promise<void> {
-    const bases = await lockBasesFor(localPath);
-    for (const base of bases) {
+    const remoteBase = await remoteBaseForSidecar(localPath, connectionManager.list());
+    for (const base of remoteBase ? [localPath, remoteBase] : [localPath]) {
       const check = await checkEditSession(base);
       if (check.status !== 'ownedByAnotherLiveSession') continue;
       const startedAt = new Date(check.owner.startedAt).toLocaleTimeString();
@@ -288,7 +275,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       if (choice !== 'Open here anyway') return;
       break;
     }
-    for (const base of bases) await acquireEditSession(base);
+    await editLocks.claim(localPath, remoteBase);
     await vscode.window.showTextDocument(vscode.Uri.file(localPath) as never);
   }
 
@@ -461,13 +448,11 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
    * Releases this window's edit-session claim (see openForEditing above)
    * the moment its tab closes, so a genuinely finished edit never keeps
    * blocking a different window from opening the same file. Fires for
-   * every closed document, Gangway-managed or not; releaseEditSession is a
+   * every closed document, Gangway-managed or not; EditLockRegistry.release is a
    * no-op (ENOENT, swallowed) for anything that was never claimed.
    */
   const sessionReleaseListener = vscode.workspace.onDidCloseTextDocument((document) => {
-    void lockBasesFor(document.uri.fsPath)
-      .then((bases) => Promise.all(bases.map((base) => releaseEditSession(base))))
-      .catch(() => {});
+    void editLocks.release(document.uri.fsPath).catch(() => {});
   });
 
   /**
