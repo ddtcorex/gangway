@@ -1205,6 +1205,53 @@ describe('activate - realistic command invocation', () => {
         infoSpy.mockRestore();
       });
 
+      it('download and upload folder act on the clicked folder when several rows are selected', async () => {
+        fakeRawClient.list.mockImplementation(async (dirPath: string) =>
+          dirPath === '/var/www/app' ? [{ name: 'config.php', type: '-' }] : [],
+        );
+        const folder = { connectionId: connection.id, entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 } };
+        const other = { connectionId: connection.id, entry: { path: '/var/www/other', isDirectory: true, isSymbolicLink: false, size: 0 } };
+        const errorSpy = vi.spyOn(vscode.window, 'showErrorMessage');
+        try {
+          await (handlers.get('gangway.downloadFolder') as (...args: unknown[]) => Promise<void>)(folder, [folder, other]);
+          expect(fakeRawClient.fastGet).toHaveBeenCalledWith('/var/www/app/config.php', expect.any(String));
+          await (handlers.get('gangway.uploadFolder') as (...args: unknown[]) => Promise<void>)(folder, [folder, other]);
+          expect(errorSpy).not.toHaveBeenCalled();
+        } finally {
+          errorSpy.mockRestore();
+        }
+      });
+
+      it('no tree context command breaks when VS Code passes the selection as a second argument', async () => {
+        const manifest = JSON.parse(
+          await fs.readFile(path.join(__dirname, '..', 'package.json'), 'utf8'),
+        ) as { contributes: { menus: Record<string, Array<{ command: string }>> } };
+        const ids = [...new Set(manifest.contributes.menus['view/item/context'].map((m) => m.command))];
+        expect(ids.length).toBeGreaterThan(10);
+        stats();
+        const fileStats = fakeRawClient.stat.getMockImplementation()!;
+        fakeRawClient.stat.mockImplementation(async (p: string) =>
+          p === '/var/www/app' ? { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false } : fileStats(p),
+        );
+        // A folder row with a child, so the folder commands walk something and take their real path.
+        fakeRawClient.list.mockImplementation(async (dirPath: string) =>
+          dirPath === '/var/www/app' ? [{ name: 'config.php', type: '-' }] : [],
+        );
+        const a = { connectionId: connection.id, entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 } };
+        const b = row('/var/www/app/b.php');
+        const errorSpy = vi.spyOn(vscode.window, 'showErrorMessage');
+        try {
+          for (const id of ids) {
+            const handler = handlers.get(id);
+            expect(handler, id).toBeDefined();
+            await expect((handler as (...args: unknown[]) => Promise<void>)(a, [a, b]), id).resolves.not.toThrow();
+          }
+          expect(errorSpy.mock.calls.map((c) => String(c[0]))).toEqual([]);
+        } finally {
+          errorSpy.mockRestore();
+        }
+      });
+
       it('download, rename and chmod still act on the clicked row only', async () => {
         stats();
         const a = row('/var/www/app/a.php');
@@ -2662,6 +2709,36 @@ describe('activate - realistic command invocation', () => {
         stats(['/var/www/a.php'], ['/var/www/dest']);
         await dragAndDrop(['/var/www/a.php'], dir('/var/www/dest'), 'some-other-connection');
         expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+      });
+
+      it('does not ask, and does nothing, when the drop lands on the current folder', async () => {
+        stats(['/var/www/dest/a.php'], ['/var/www/dest']);
+        await dragAndDrop(['/var/www/dest/a.php'], dir('/var/www/dest'));
+        expect(moveModals()).toHaveLength(0);
+        expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+      });
+
+      it('does not ask when the drop lands on a sibling file in the same folder', async () => {
+        stats(['/var/www/dest/a.php', '/var/www/dest/x.php'], ['/var/www/dest']);
+        await dragAndDrop(['/var/www/dest/a.php'], file('/var/www/dest/x.php'));
+        expect(moveModals()).toHaveLength(0);
+        expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+      });
+
+      it('explains a folder dropped on itself without a confirmation modal', async () => {
+        stats([], ['/var/www/dir']);
+        await dragAndDrop(['/var/www/dir'], dir('/var/www/dir'));
+        expect(moveModals()).toHaveLength(0);
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('cannot move a folder into itself'));
+        expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+      });
+
+      it('counts only the items that will really move in the confirmation', async () => {
+        stats(['/var/www/dest/a.php', '/var/www/b.php'], ['/var/www/dest']);
+        mockWindow.__test_queueWarning('Move');
+        await dragAndDrop(['/var/www/dest/a.php', '/var/www/b.php'], dir('/var/www/dest'));
+        expect(warnSpy).toHaveBeenCalledWith('Move 1 item(s) into /var/www/dest?', { modal: true }, 'Move');
+        expect(fakeRawClient.posixRename).toHaveBeenCalledTimes(1);
       });
 
       it('asks once for several conflicts and never downloads a skipped source', async () => {

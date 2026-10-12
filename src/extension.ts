@@ -12,7 +12,7 @@ import { checkConflict } from './conflictGuard';
 import { readSidecar, writeSidecar } from './tmpStore';
 import { preparePush } from './pushTarget';
 import { BrokenLinkError, LinkLoopError, LinkRetargetedError, resolveTarget } from './realTarget';
-import { moveByDrop, type DropConflictChoice } from './dropMove';
+import { moveByDrop, planDropMove, type DropConflictChoice } from './dropMove';
 import { createDestinationGate } from './destinationGate';
 import { purgeExpiredTmp, sweepUnknownTmpRoots } from './tmpRetention';
 import { tmpFilePathFor, tmpRootFor, connectionSlug, sidecarPathFor } from './tmpPath';
@@ -1536,16 +1536,27 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
           ? destination.entry.path
           : path.posix.dirname(destination.entry.path)
         : connection.remotePath;
-    if (vscode.workspace.getConfiguration('gangway').get<boolean>('confirmDragAndDrop', true)) {
-      const choice = await vscode.window.showWarningMessage(
-        `Move ${paths.length} item(s) into ${destDir}?`,
-        { modal: true },
-        'Move',
-      );
-      if (choice !== 'Move') return;
-    }
     try {
       const adapter = await getAdapter(connection);
+      // Plan before asking: a drop that would change nothing (already in the
+      // folder) stays silent, a refused one is explained without a modal, and
+      // the modal counts only the items that will really move.
+      const plan = await planDropMove(adapter, connection, paths, destDir);
+      if (plan.movable.length === 0) {
+        if (plan.skipped.length > 0) {
+          for (const skip of plan.skipped) output.appendLine(`Move skipped: ${skip.path} (${skip.reason})`);
+          await vscode.window.showWarningMessage(`Nothing moved: ${plan.skipped[0].reason}.`);
+        }
+        return;
+      }
+      if (vscode.workspace.getConfiguration('gangway').get<boolean>('confirmDragAndDrop', true)) {
+        const choice = await vscode.window.showWarningMessage(
+          `Move ${plan.movable.length} item(s) into ${destDir}?`,
+          { modal: true },
+          'Move',
+        );
+        if (choice !== 'Move') return;
+      }
       const result = await withCancellableProgress('Moving…', (signal, reportProgress) =>
         moveByDrop(
           adapter,
@@ -2696,8 +2707,10 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       const connection = requireActiveConnection();
       if (connection) await purgeExpiredTmp(tmpRootFor(connection), 0);
     }),
-    vscode.commands.registerCommand('gangway.downloadFolder', runDownloadFolderCommand),
-    vscode.commands.registerCommand('gangway.uploadFolder', runUploadFolderCommand),
+    // Wrapped: with multi-select VS Code passes the selected rows as a second
+    // argument, which would otherwise land in the Retry-failed `onlyPaths` set.
+    vscode.commands.registerCommand('gangway.downloadFolder', (node?: RemoteTreeNode) => runDownloadFolderCommand(node)),
+    vscode.commands.registerCommand('gangway.uploadFolder', (node?: RemoteTreeNode) => runUploadFolderCommand(node)),
     vscode.commands.registerCommand('gangway.compareFile', runCompareFileCommand),
     vscode.commands.registerCommand('gangway.copyRemotePath', runCopyRemotePathCommand),
     vscode.commands.registerCommand('gangway.newFile', (node?: RemoteTreeNode) => runNewRemoteCommand('file', node)),
