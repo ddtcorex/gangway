@@ -75,10 +75,18 @@ export function assertMutatingAllowed(connection: ConnectionConfig): void {
   if (connection.frozen === true) throw new FrozenError(connection.name);
 }
 
+/**
+ * Pure lexical containment: true when remotePath is root itself or below it.
+ * No server calls; symlinks are not followed (see realTarget.ts for that).
+ */
+export function isLexicallyInside(root: string, remotePath: string): boolean {
+  const relative = path.posix.relative(root, remotePath);
+  return !(relative === '..' || relative.startsWith(`..${path.posix.sep}`) || path.posix.isAbsolute(relative));
+}
+
 /** Throws when remotePath escapes the connection root. Message matches /outside/. */
 export function assertInsideRoot(connection: ConnectionConfig, remotePath: string): void {
-  const relative = path.posix.relative(connection.remotePath, remotePath);
-  if (relative === '..' || relative.startsWith(`..${path.posix.sep}`) || path.posix.isAbsolute(relative)) {
+  if (!isLexicallyInside(connection.remotePath, remotePath)) {
     throw new Error(
       `Refusing to operate on "${remotePath}": it resolves outside the connection root "${connection.remotePath}".`,
     );

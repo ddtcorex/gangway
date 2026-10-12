@@ -18,6 +18,7 @@ import {
   duplicateRemote,
   FrozenError,
   guardUploadTarget,
+  isLexicallyInside,
   parseUriList,
   pasteEntries,
   renameRemote,
@@ -47,6 +48,14 @@ function fakeAuditLog() {
 describe('remoteOps paths', () => {
   it('refuses paths outside the root', () => {
     expect(() => assertInsideRoot(connection, '/srv/other/x.php')).toThrow(/outside/);
+  });
+
+  it('isLexicallyInside accepts the root and descendants, rejects escapes and siblings', () => {
+    expect(isLexicallyInside('/srv/app', '/srv/app')).toBe(true);
+    expect(isLexicallyInside('/srv/app', '/srv/app/a/b.php')).toBe(true);
+    expect(isLexicallyInside('/srv/app', '/srv/app/../other')).toBe(false);
+    expect(isLexicallyInside('/srv/app', '/srv/application/x')).toBe(false);
+    expect(isLexicallyInside('/srv/app', '/srv')).toBe(false);
   });
 
   it('blocks every mutating op while frozen', () => {
