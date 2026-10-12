@@ -12,6 +12,7 @@ import { checkConflict } from './conflictGuard';
 import { readSidecar, writeSidecar } from './tmpStore';
 import { preparePush } from './pushTarget';
 import { BrokenLinkError, LinkLoopError, LinkRetargetedError, resolveTarget } from './realTarget';
+import { moveByDrop, type DropConflictChoice } from './dropMove';
 import { createDestinationGate } from './destinationGate';
 import { purgeExpiredTmp, sweepUnknownTmpRoots } from './tmpRetention';
 import { tmpFilePathFor, tmpRootFor, connectionSlug, sidecarPathFor } from './tmpPath';
@@ -419,10 +420,15 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       // tree instead of leaving the node failed.
       void showCommandError(err, { retry: () => Promise.resolve(refreshTree()) });
     },
+    // In-tree drops land here with the node they were dropped on. The closure
+    // runs long after activate() finishes, so referencing runDropMove (defined
+    // below) is safe despite the textual order.
+    (destination, connectionId, paths) => runDropMove(destination, connectionId, paths),
   );
   const treeView = vscode.window.createTreeView('gangway.remoteExplorer', {
     treeDataProvider: treeProvider as never,
     dragAndDropController: treeProvider as never,
+    canSelectMany: true,
   });
 
   /**
@@ -1494,6 +1500,77 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       }
     } catch (err) {
       await showCommandError(err, { retry: () => runPasteEntriesCommand(node), connection });
+    }
+  }
+
+  /**
+   * An in-tree drop: move the dragged rows into the folder they landed on
+   * (a file target means its parent, empty space means the connection root).
+   * One confirmation unless gangway.confirmDragAndDrop is off; the move itself
+   * is cut-and-paste semantics (see moveByDrop), so every gate applies.
+   */
+  async function runDropMove(destination: RemoteTreeNode | undefined, connectionId: string, paths: string[]): Promise<void> {
+    const connection = await requireMutableConnection(destination);
+    if (!connection) return;
+    if (connection.id !== connectionId) {
+      await vscode.window.showWarningMessage('Drop ignored: the dragged items belong to another connection.');
+      return;
+    }
+    const destDir =
+      destination?.entry !== undefined
+        ? destination.entry.isDirectory
+          ? destination.entry.path
+          : path.posix.dirname(destination.entry.path)
+        : connection.remotePath;
+    if (vscode.workspace.getConfiguration('gangway').get<boolean>('confirmDragAndDrop', true)) {
+      const choice = await vscode.window.showWarningMessage(
+        `Move ${paths.length} item(s) into ${destDir}?`,
+        { modal: true },
+        'Move',
+      );
+      if (choice !== 'Move') return;
+    }
+    try {
+      const adapter = await getAdapter(connection);
+      const result = await withCancellableProgress('Moving…', (signal, reportProgress) =>
+        moveByDrop(
+          adapter,
+          connection,
+          paths,
+          destDir,
+          {
+            confirmOverwrite: ({ remotePath, stagingPath }) =>
+              resolveFileConflict(adapter, connection.id, stagingPath as string, remotePath, conflictUi),
+            chooseConflictPolicy: async (conflicting): Promise<DropConflictChoice> => {
+              const names = conflicting.map((p) => path.posix.basename(p));
+              const answer = await vscode.window.showWarningMessage(
+                `${names.length} items already exist in ${destDir}: ${joinPaths(names)}. Overwriting cannot be undone.`,
+                { modal: true },
+                'Review each',
+                'Skip the conflicting items',
+              );
+              return answer === 'Review each' ? 'review' : answer === 'Skip the conflicting items' ? 'skip' : 'cancel';
+            },
+            auditLog,
+          },
+          { signal, onAuditError: (message) => output.appendLine(message), confirmOutsideRoot },
+        ).then((r) => {
+          reportProgress(destDir);
+          return r;
+        }),
+      );
+      refreshTree();
+      if (result.skipped.length > 0) {
+        for (const skip of result.skipped) output.appendLine(`Move skipped: ${skip.path} (${skip.reason})`);
+        output.show();
+        await vscode.window.showWarningMessage(
+          `Moved ${result.pasted.length}, skipped ${result.skipped.length}. Details are in the Gangway output channel.`,
+        );
+      } else if (result.pasted.length > 0) {
+        await vscode.window.showInformationMessage(`Moved ${result.pasted.length} item(s).`);
+      }
+    } catch (err) {
+      await showCommandError(err, { retry: () => runDropMove(destination, connectionId, paths), connection });
     }
   }
 
