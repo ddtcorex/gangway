@@ -5,7 +5,7 @@ All notable changes to the Gangway extension are documented in this file.
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and
 breaking changes are marked `BREAKING:`.
 
-## [Unreleased]
+## [0.5.0] - 2026-10-12
 
 - Fixed: opening a file that is itself a symlink failed with "Not a regular
   file". The SFTP library refuses anything whose own type is not a regular
