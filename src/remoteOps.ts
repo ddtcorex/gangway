@@ -220,7 +220,7 @@ export function typedConfirmMatches(expected: string, input: string | undefined)
  * a dangling link would read as a free name and a later put would write
  * through it (create/truncate follows the link) or a rename would replace it.
  */
-async function existsOnServer(client: RemoteOpsClient, remotePath: string): Promise<boolean> {
+export async function existsOnServer(client: RemoteOpsClient, remotePath: string): Promise<boolean> {
   try {
     await client.lstat(remotePath);
     return true;
