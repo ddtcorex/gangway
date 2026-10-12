@@ -158,6 +158,8 @@ export class GangwayTreeProvider implements vscode.TreeDataProvider<GangwayTreeN
         item.description = link?.kind === 'loop' ? 'link loop' : 'broken link';
       } else {
         item.iconPath = new vscode.ThemeIcon(node.entry.isDirectory ? 'file-symlink-directory' : 'file-symlink-file');
+        // An ancestor loop still expands (it is a real directory), but warn.
+        if (link?.kind === 'loop') item.description = 'link loop';
       }
       if (link) item.tooltip = `${name} -> ${link.realPath}`;
     }

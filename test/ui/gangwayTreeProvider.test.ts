@@ -240,6 +240,14 @@ describe('GangwayTreeProvider', () => {
       expect(loop.description).toBe('link loop');
     });
 
+    it('expandable ancestor-loop link stays a collapsible folder but carries a warning', () => {
+      const item = provider().getTreeItem(linkNode({ realPath: '/var', kind: 'loop' }, true));
+      expect(item.collapsibleState).toBe(vscode.TreeItemCollapsibleState.Collapsed);
+      expect(item.contextValue).toBe('gangway.folder');
+      expect(item.description).toBe('link loop');
+      expect((item.iconPath as vscode.ThemeIcon).id).toBe('file-symlink-directory');
+    });
+
     it('tooltip shows the real path', () => {
       const item = provider().getTreeItem(linkNode({ realPath: '/srv/real.php', kind: 'file' }, false));
       expect(item.tooltip).toBe('ln -> /srv/real.php');
