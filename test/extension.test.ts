@@ -2436,11 +2436,6 @@ describe('activate - realistic command invocation', () => {
       );
     }
 
-    function uriListOf(...fsPaths: string[]) {
-      const value = fsPaths.map((p) => `file://${p}`).join('\n');
-      return { get: (mime: string) => (mime === 'text/uri-list' ? { asString: async () => value } : undefined) };
-    }
-
     beforeEach(async () => {
       lines = [];
       const outputSpy = vi.spyOn(vscode.window, 'createOutputChannel').mockReturnValue({
@@ -2489,41 +2484,6 @@ describe('activate - realistic command invocation', () => {
     });
 
     const putTargets = (): string[] => (fakeRawClient.fastPut.mock.calls as Array<[string, string]>).map(([, remote]) => remote);
-
-    it('a drag-drop into an out-of-root link directory writes nothing and reports the failure', async () => {
-      linkDir('/var/www/shared', '/etc/ext');
-      const dropped = path.join(tmpHome, 'drop.php');
-      await fs.writeFile(dropped, '<?php');
-
-      await dnd.handleDrop(
-        { connectionId: conn.id, entry: { path: '/var/www/shared', isDirectory: true, isSymbolicLink: true, size: 0 } },
-        uriListOf(dropped),
-        {},
-      );
-
-      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
-      expect(fakeRawClient.mkdir).not.toHaveBeenCalled();
-      expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
-      const message = String(errorSpy.mock.calls[0]?.[0]);
-      expect(message).toContain('"/var/www/shared"');
-      expect(message).toMatch(/outside/);
-    });
-
-    it('a drag-drop into a link directory inside the root still uploads', async () => {
-      linkDir('/var/www/current', '/var/www/releases/42');
-      const dropped = path.join(tmpHome, 'drop.php');
-      await fs.writeFile(dropped, '<?php');
-
-      await dnd.handleDrop(
-        { connectionId: conn.id, entry: { path: '/var/www/current', isDirectory: true, isSymbolicLink: true, size: 0 } },
-        uriListOf(dropped),
-        {},
-      );
-
-      expect(fakeRawClient.fastPut).toHaveBeenCalledWith(dropped, '/var/www/current/drop.php.tmp');
-      expect(errorSpy).not.toHaveBeenCalled();
-      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Uploaded 1 file(s)'));
-    });
 
     it('a folder upload whose destination is an out-of-root link writes nothing and reports the failure', async () => {
       linkDir('/var/www/app', '/etc/ext');

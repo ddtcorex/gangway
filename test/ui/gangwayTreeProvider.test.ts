@@ -265,6 +265,21 @@ describe('GangwayTreeProvider', () => {
     });
   });
 
+  describe('external drops', () => {
+    it('accepts no external drops', () => {
+      const provider = new GangwayTreeProvider(() => [], () => undefined, vi.fn(), vi.fn(), localUriFor);
+      expect(provider.dropMimeTypes).not.toContain('text/uri-list');
+    });
+
+    it('ignores a text/uri-list drop', async () => {
+      const provider = new GangwayTreeProvider(() => [], () => undefined, vi.fn(), vi.fn(), localUriFor);
+      const transfer = {
+        get: (mime: string) => (mime === 'text/uri-list' ? { asString: async () => 'file:///tmp/a.php' } : undefined),
+      };
+      await expect(provider.handleDrop(undefined, transfer as never, {} as never)).resolves.toBeUndefined();
+    });
+  });
+
   it('fires onDidChangeTreeData when refresh() is called', () => {
     const provider = new GangwayTreeProvider(() => [], () => undefined, vi.fn(), vi.fn(), localUriFor);
     const listener = vi.fn();

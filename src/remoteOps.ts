@@ -7,7 +7,7 @@ export { isLexicallyInside, isNotFoundError };
 import { sidecarPathFor, tmpFilePathFor } from './tmpPath';
 import { readSidecar, writeSidecar } from './tmpStore';
 import { isSafeListingName } from './remoteListing';
-import { isProbablyBinary, TransferCancelledError } from './folderQueue';
+import { TransferCancelledError } from './folderQueue';
 import { gateWriteTarget, resolveTarget, type ResolvedTarget } from './realTarget';
 import type { AuditLog } from './auditLog';
 import type { FileConflictDecision } from './conflictGuard';
@@ -520,66 +520,6 @@ export async function chmodRemote(
     `Changed mode of ${remotePath}`,
     options.onAuditError ?? noop,
   );
-}
-
-/**
- * Parses a text/uri-list drop payload into local file paths. Only file://
- * entries survive; anything else (https, comments, garbage) is skipped.
- */
-export function parseUriList(value: string): string[] {
-  const out: string[] = [];
-  for (const line of value.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith('file://')) continue;
-    try {
-      const decoded = decodeURIComponent(trimmed.replace(/^file:\/\/[^/]*/, ''));
-      if (!decoded.startsWith('/')) continue;
-      out.push(decoded);
-    } catch {
-      continue;
-    }
-  }
-  return out;
-}
-
-export interface DropUpload {
-  localPath: string;
-  byteSize: number;
-  needsPrompt: boolean;
-}
-
-const DROP_PROMPT_THRESHOLD_BYTES = 5 * 1024 * 1024;
-
-/**
- * Inspects dropped local paths: missing paths and directories fail fast
- * with a clear message; large or binary files are flagged for one prompt.
- */
-export async function collectDropUploads(fsPaths: string[]): Promise<DropUpload[]> {
-  const out: DropUpload[] = [];
-  for (const localPath of fsPaths) {
-    let st: import('node:fs').Stats;
-    try {
-      st = await fs.stat(localPath);
-    } catch {
-      throw new Error(`Local file "${localPath}" does not exist.`);
-    }
-    if (!st.isFile()) {
-      throw new Error(`"${localPath}" is not a file — dropping folders is not supported yet.`);
-    }
-    let needsPrompt = st.size > DROP_PROMPT_THRESHOLD_BYTES;
-    if (!needsPrompt) {
-      const fh = await fs.open(localPath, 'r');
-      try {
-        const buffer = Buffer.alloc(8192);
-        const { bytesRead } = await fh.read(buffer, 0, 8192, 0);
-        needsPrompt = isProbablyBinary(buffer.subarray(0, bytesRead));
-      } finally {
-        await fh.close();
-      }
-    }
-    out.push({ localPath, byteSize: st.size, needsPrompt });
-  }
-  return out;
 }
 
 export interface ClipboardState {

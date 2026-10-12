@@ -16,12 +16,10 @@ import {
   assertWritableTargets,
   chmodRemote,
   chooseDeleteMode,
-  collectDropUploads,
   createRemote,
   duplicateRemote,
   FrozenError,
   guardUploadTarget,
-  parseUriList,
   pasteEntries,
   renameRemote,
   typedConfirmMatches,
@@ -527,32 +525,6 @@ describe('createRemote and chmodRemote validation', () => {
       /octal/,
     );
     expect(client.chmod).not.toHaveBeenCalled();
-  });
-});
-
-describe('drop helpers', () => {
-  it('parseUriList decodes file URIs and skips the rest', () => {
-    expect(parseUriList('file:///tmp/a.php\nfile:///tmp/with%20space.js\nhttps://x/y\n')).toEqual([
-      '/tmp/a.php',
-      '/tmp/with space.js',
-    ]);
-    expect(parseUriList('')).toEqual([]);
-  });
-
-  it('collectDropUploads flags large and binary files, throws on missing ones', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'drop-test-'));
-    const small = path.join(dir, 'a.php');
-    const binary = path.join(dir, 'b.bin');
-    await fs.writeFile(small, '<?php echo 1;');
-    await fs.writeFile(binary, Buffer.from([0, 1, 2, 3, 0, 255, 254]));
-    try {
-      const collected = await collectDropUploads([small, binary]);
-      expect(collected.find((c) => c.localPath === small)!.needsPrompt).toBe(false);
-      expect(collected.find((c) => c.localPath === binary)!.needsPrompt).toBe(true);
-      await expect(collectDropUploads([path.join(dir, 'nope.php')])).rejects.toThrow(/does not exist/);
-    } finally {
-      await fs.rm(dir, { recursive: true, force: true });
-    }
   });
 });
 

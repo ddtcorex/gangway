@@ -38,14 +38,12 @@ import {
   assertWritableTarget,
   chmodRemote,
   chooseDeleteMode,
-  collectDropUploads,
   createRemote,
   duplicateRemote,
   guardUploadTarget,
   isNotFoundError,
   joinRoot,
   parentDir,
-  parseUriList,
   pasteEntries,
   renameRemote,
   typedConfirmMatches,
@@ -421,11 +419,6 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       // tree instead of leaving the node failed.
       void showCommandError(err, { retry: () => Promise.resolve(refreshTree()) });
     },
-    // Local-Explorer/OS drops land here with the tree node they were dropped
-    // on (or undefined for empty tree space). The closure runs long after
-    // activate() finishes, so referencing handleLocalDrop (defined below)
-    // is safe despite the textual order.
-    (node, uriListValue) => handleLocalDrop(node, uriListValue),
   );
   const treeView = vscode.window.createTreeView('gangway.remoteExplorer', {
     treeDataProvider: treeProvider as never,
@@ -1514,70 +1507,6 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     // without touching the server.
     await vscode.env.clipboard.writeText(remotePath);
     await vscode.window.showInformationMessage(`Copied remote path: ${remotePath}`);
-  }
-
-  /**
-   * Local-Explorer/OS drop onto a remote node. Every dropped path is
-   * inspected first (missing paths and folders fail fast); large or binary
-   * files get one combined prompt; the upload loop reuses direct-overwrite
-   * uploadFile with progress + cancel.
-   */
-  async function handleLocalDrop(targetNode: RemoteTreeNode | undefined, uriListValue: string): Promise<void> {
-    const connection = await requireMutableConnection(targetNode);
-    if (!connection) return;
-    const fsPaths = parseUriList(uriListValue);
-    if (fsPaths.length === 0) return;
-    let collected;
-    try {
-      collected = await collectDropUploads(fsPaths);
-    } catch (err) {
-      await showCommandError(err as Error, { connection });
-      return;
-    }
-    const flagged = collected.filter((c) => c.needsPrompt);
-    if (flagged.length > 0) {
-      const choice = await vscode.window.showWarningMessage(
-        `${flagged.length} of ${collected.length} dropped file(s) are large or look binary. Upload them anyway?`,
-        'Upload all',
-        'Skip flagged',
-      );
-      if (choice !== 'Upload all' && choice !== 'Skip flagged') return;
-      if (choice === 'Skip flagged') collected = collected.filter((c) => !c.needsPrompt);
-    }
-    if (collected.length === 0) return;
-    const targetDir =
-      targetNode?.entry && targetNode.entry.isDirectory
-        ? targetNode.entry.path
-        : targetNode?.entry
-          ? path.posix.dirname(targetNode.entry.path)
-          : connection.remotePath;
-    try {
-      const adapter = await getAdapter(connection);
-      const destinationGate = createDestinationGate(adapter, connection);
-      await withCancellableProgress(`Uploading ${collected.length} dropped file(s)`, (signal, reportProgress) =>
-        (async () => {
-          for (const item of collected) {
-            if (signal.aborted) throw new TransferCancelledError();
-            const remotePath = `${targetDir}/${path.posix.basename(item.localPath)}`;
-            reportProgress(remotePath);
-            await uploadFile(
-              adapter,
-              connection.id,
-              item.localPath,
-              remotePath,
-              item.byteSize,
-              auditLog,
-              (message) => output.appendLine(message),
-              { destinationGate },
-            );
-          }
-        })(),
-      );
-      refreshTree();
-      await vscode.window.showInformationMessage(`Uploaded ${collected.length} file(s).`);
-    } catch (err) {
-      await showCommandError(err, { retry: () => handleLocalDrop(targetNode, uriListValue), connection });
-    }
   }
 
   const SYNC_UP_LABEL = 'Upload (local → server)';
