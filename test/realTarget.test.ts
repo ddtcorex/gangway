@@ -266,6 +266,75 @@ describe('resolveTarget walks up to the nearest existing ancestor', () => {
   });
 });
 
+/**
+ * OpenSSH's realpath tolerates a missing last component, so for a dangling
+ * link it returns the link's target path instead of "no such file" (pinned
+ * against atmoz/sftp in test/links.integration.test.ts). realPath alone can
+ * then never reveal the dangling link: an lstat must run on the path itself.
+ */
+function openSshClient(map: Record<string, string>, danglingTargets: Record<string, string>): TargetClient {
+  return {
+    realPath: async (p) => map[p] ?? danglingTargets[p],
+    stat: async (p) => {
+      if (p in map) return fileStat;
+      throw notFound();
+    },
+    lstat: async (p) => {
+      if (p in danglingTargets) return { ...fileStat, isSymbolicLink: true };
+      if (p in map) return fileStat;
+      throw notFound();
+    },
+  };
+}
+
+describe('resolveTarget against OpenSSH realpath semantics', () => {
+  it('a dangling link whose realpath returns its missing target is refused', async () => {
+    const c = openSshClient({ '/srv/app': '/srv/app' }, { '/srv/app/config.php': '/srv/app/gone.php' });
+    const err = await resolveTarget(c, base, '/srv/app/config.php').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BrokenLinkError);
+    expect((err as BrokenLinkError).clickedPath).toBe('/srv/app/config.php');
+  });
+
+  it('a dangling link ancestor whose realpath returns its missing target is refused', async () => {
+    const c = openSshClient({ '/srv/app': '/srv/app' }, { '/srv/app/shared': '/srv/app/missing-dir' });
+    const err = await resolveTarget(c, base, '/srv/app/shared/a/new.php').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BrokenLinkError);
+    expect((err as BrokenLinkError).clickedPath).toBe('/srv/app/shared');
+  });
+
+  it('a missing last component under a link dir still resolves via the link', async () => {
+    const c = openSshClient(
+      { '/srv/app': '/srv/app', '/srv/app/shared': '/ext/shared', '/srv/app/shared/new.php': '/ext/shared/new.php' },
+      {},
+    );
+    expect(await resolveTarget(c, base, '/srv/app/shared/new.php')).toMatchObject({
+      realPath: '/ext/shared/new.php',
+      insideRoot: false,
+    });
+  });
+
+  it('a live file link resolves to its target', async () => {
+    const c: TargetClient = {
+      realPath: async (p) => ({ '/srv/app': '/srv/app', '/srv/app/l.php': '/srv/app/real.php' })[p],
+      stat: async () => fileStat,
+      lstat: async (p) => ({ ...fileStat, isSymbolicLink: p === '/srv/app/l.php' }),
+    };
+    expect(await resolveTarget(c, base, '/srv/app/l.php')).toMatchObject({ realPath: '/srv/app/real.php' });
+  });
+
+  it('a link whose stat reports a loop is refused as a loop', async () => {
+    const loop = Object.assign(new Error('Too many levels of symbolic links'), { code: 'ELOOP' });
+    const c: TargetClient = {
+      realPath: async (p) => ({ '/srv/app': '/srv/app', '/srv/app/l': '/srv/app/m' })[p],
+      stat: async () => {
+        throw loop;
+      },
+      lstat: async (p) => ({ ...fileStat, isSymbolicLink: p === '/srv/app/l' }),
+    };
+    await expect(resolveTarget(c, base, '/srv/app/l')).rejects.toBeInstanceOf(LinkLoopError);
+  });
+});
+
 describe('gateWriteTarget', () => {
   const inside: ResolvedTarget = {
     clickedPath: '/srv/app/a.php',

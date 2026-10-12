@@ -84,14 +84,40 @@ async function fallbackOnRealPathError(client: TargetClient, p: string, err: unk
 }
 
 /**
+ * Throws when p is a symlink whose target cannot be reached: BrokenLinkError
+ * for a missing target, LinkLoopError for a loop. A p that does not exist is
+ * left to the caller (a new file); any other failure propagates.
+ */
+async function refuseDanglingLink(client: TargetClient, p: string): Promise<void> {
+  let isLink: boolean;
+  try {
+    isLink = (await client.lstat(p)).isSymbolicLink;
+  } catch (err) {
+    if (isNotFoundError(err)) return;
+    throw err;
+  }
+  if (!isLink) return;
+  try {
+    await client.stat(p);
+  } catch (err) {
+    if (isLoopError(err)) throw new LinkLoopError(p);
+    if (isNotFoundError(err)) throw new BrokenLinkError(p);
+    throw err;
+  }
+}
+
+/**
  * Real path of p, or undefined when p must be judged lexically. A path that
  * does not exist yet walks up to its nearest existing ancestor and rejoins the
  * missing tail onto that ancestor's real path, so a new folder several levels
  * below a linked directory still sees the real destination (one missing level
  * was not enough: `shared/new/sub` under `shared -> /etc/ext` used to fall back
- * to the path text and pass as inside the root). A dangling link also reads as
- * "missing" to realpath, so every missing level is lstat-checked: a dangling
- * link, at p or any ancestor, is refused instead of being written through.
+ * to the path text and pass as inside the root). A dangling link reads either
+ * as "missing" to realpath (a loop, or a target missing below its last
+ * component) or as its missing target (OpenSSH tolerates a missing last
+ * component), so every missing level is lstat-checked and so is the level
+ * that resolved when realpath changed it: a dangling link, at p or any
+ * ancestor, is refused instead of being written through.
  * Only a server that refuses realpath while stat still works (or a walk that
  * reaches `/` with nothing resolvable) is judged by the path text.
  */
@@ -105,7 +131,14 @@ async function realPathOf(client: TargetClient, p: string): Promise<string | und
     } catch (err) {
       return fallbackOnRealPathError(client, current, err);
     }
-    if (real !== undefined) return missingTail.length === 0 ? real : path.posix.join(real, ...missingTail);
+    if (real !== undefined) {
+      // A path that realpath changed may itself be a link. OpenSSH's realpath
+      // tolerates a missing last component, so for a dangling link it returns
+      // the missing target instead of "no such file": only an lstat of the
+      // path, then a stat through it, can tell (pinned against atmoz/sftp).
+      if (real !== current) await refuseDanglingLink(client, current);
+      return missingTail.length === 0 ? real : path.posix.join(real, ...missingTail);
+    }
 
     try {
       const entry = await client.lstat(current);
