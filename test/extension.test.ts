@@ -1146,7 +1146,8 @@ describe('activate - realistic command invocation', () => {
 
     it.each([
       [1, 'This location is really /srv/1/a.php, outside the connection root. Continue?'],
-      [3, 'These locations are really /srv/1/a.php, /srv/2/a.php, /srv/3/a.php, outside the connection root. Continue?'],
+      [2, 'These locations are really /srv/1/a.php and /srv/2/a.php, outside the connection root. Continue?'],
+      [3, 'These locations are really /srv/1/a.php, /srv/2/a.php and /srv/3/a.php, outside the connection root. Continue?'],
       [5, 'These locations are really /srv/1/a.php, /srv/2/a.php, /srv/3/a.php and 2 more, outside the connection root. Continue?'],
     ])('names %i out-of-root path(s) in one modal', async (count, message) => {
       fakeRawClient.realPath.mockImplementation(async (p: string) => p.replace(/^\/var\/www\/app\/l(\d)/, '/srv/$1'));

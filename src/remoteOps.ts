@@ -108,8 +108,6 @@ export interface OpOptions {
   /**
    * Asked once per operation when the real target lives outside the
    * connection root. Absent means no UI is available: the op is refused.
-   */
-  /**
    * realPath is the first out-of-root real path; allRealPaths lists every
    * distinct one in the operation (first element equals realPath), so a
    * prompt can name them all. Callers may ignore the second argument.
