@@ -135,6 +135,16 @@ describe('downloadFile', () => {
     expect(result.localPath).toBe(tmpFilePathFor(connection, '/var/www/current/config.php'));
   });
 
+  it('fetches a link from its real path, never from the link itself', async () => {
+    // The library's fastGet refuses a path whose lstat type is not a regular
+    // file, so asking it for the link fails with "Not a regular file".
+    const client = fakeClient(async (p) => (p === '/var/www' ? '/var/www' : '/var/www/releases/7/config.php'));
+    await downloadFile(client, connection, '/var/www/current/config.php');
+
+    expect(client.fastGet).toHaveBeenCalledTimes(1);
+    expect(client.fastGet.mock.calls[0][0]).toBe('/var/www/releases/7/config.php');
+  });
+
   it('download of a plain file stores no realPath', async () => {
     const client = fakeClient(async (p) => p);
     const result = await downloadFile(client, connection, '/var/www/app/config.php');
