@@ -137,6 +137,11 @@ export async function remoteBaseForSidecar(
 export class EditLockRegistry {
   private readonly bases = new Map<string, string>();
   private readonly holders = new Map<string, Set<string>>();
+  private readonly isAlive: (pid: number) => boolean;
+
+  constructor(options: { isAlive?: (pid: number) => boolean } = {}) {
+    this.isAlive = options.isAlive ?? defaultIsAlive;
+  }
 
   async claim(localPath: string, remoteBase: string | undefined): Promise<void> {
     await acquireEditSession(localPath);
@@ -149,7 +154,7 @@ export class EditLockRegistry {
   }
 
   async release(localPath: string): Promise<void> {
-    await releaseEditSession(localPath);
+    await releaseEditSession(localPath, this.isAlive);
     const remoteBase = this.bases.get(localPath);
     if (!remoteBase) return;
     this.bases.delete(localPath);
@@ -157,7 +162,7 @@ export class EditLockRegistry {
     set?.delete(localPath);
     if (set && set.size === 0) {
       this.holders.delete(remoteBase);
-      await releaseEditSession(remoteBase);
+      await releaseEditSession(remoteBase, this.isAlive);
     }
   }
 }

@@ -163,10 +163,11 @@ describe('releaseEditSession ownership', () => {
   });
 
   it('registry release keeps a remote lock now owned by another live pid', async () => {
-    const reg = new EditLockRegistry();
+    const foreignPid = 999999;
+    const reg = new EditLockRegistry({ isAlive: (pid) => pid === foreignPid });
     const remote = remoteLockBase(tmpDir, 'conn-1', '/srv/app/real.php');
     await reg.claim(file, remote);
-    await fs.writeFile(`${remote}.gangway-session.json`, JSON.stringify({ pid: process.ppid, startedAt: 1 }), 'utf8');
+    await fs.writeFile(`${remote}.gangway-session.json`, JSON.stringify({ pid: foreignPid, startedAt: 1 }), 'utf8');
     await reg.release(file);
     await expect(fs.access(`${remote}.gangway-session.json`)).resolves.toBeUndefined();
   });
