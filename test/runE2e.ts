@@ -2,9 +2,9 @@ import { runTests } from '@vscode/test-electron';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { seedLinks } from './fixtures/seedLinks';
+import { HOTFIX_SEED, seedLinks } from './fixtures/seedLinks';
 
-const SEED_CONTENT = "<?php echo 'v1';";
+const SEED_CONTENT = HOTFIX_SEED;
 
 // tsc (rootDir ".") mirrors test/runE2e.ts to out/test/runE2e.js, so __dirname
 // at runtime is <repo>/out/test -- one directory deeper than the brief's

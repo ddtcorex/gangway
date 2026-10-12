@@ -24,6 +24,8 @@ export const LINK_SEEDS: ReadonlyArray<readonly [name: string, target: string]> 
   ['up', '..'],
 ];
 
+/** Content of the main seed's `hotfix.php` (shared with test/runE2e.ts). */
+export const HOTFIX_SEED = "<?php echo 'v1';";
 export const HOTFIX2_SEED = "<?php echo 'hotfix2';";
 export const SUBDIR_FILE_SEED = "<?php echo 'subdir';";
 
@@ -31,11 +33,18 @@ export const SUBDIR_FILE_SEED = "<?php echo 'subdir';";
  * Recreates the link seeds and the in-root files they point at. Idempotent:
  * existing links are removed first (fs.rm on a link removes the link itself,
  * never its target), so a test that deleted or retargeted one is undone.
- * `hotfix.php` (the out-of-root target) belongs to the main seed and is not
- * written here.
+ * `hotfix.php` (the out-of-root target of `link-file`) is created here too when
+ * missing, so the suite does not depend on the e2e seed having run first (in CI
+ * the fixture starts empty). An existing one is never touched: the e2e reset
+ * owns its content.
  */
 export async function seedLinks(fixtureDir: string): Promise<void> {
   const nested = path.join(fixtureDir, 'nested');
+  try {
+    await fs.writeFile(path.join(fixtureDir, 'hotfix.php'), HOTFIX_SEED, { encoding: 'utf8', flag: 'wx' });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+  }
   await fs.mkdir(path.join(nested, 'subdir'), { recursive: true });
   await fs.writeFile(path.join(nested, 'subdir', 'sub.php'), SUBDIR_FILE_SEED, 'utf8');
   await fs.writeFile(path.join(nested, 'hotfix2.php'), HOTFIX2_SEED, 'utf8');
