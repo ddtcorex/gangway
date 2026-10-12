@@ -17,6 +17,12 @@ export interface LinkResolveClient {
 const DEFAULT_CONCURRENCY = 8;
 const LOOP_RE = /loop|too many levels/i;
 
+function isLoopError(err: unknown): boolean {
+  if ((err as { code?: unknown } | null)?.code === 'ELOOP') return true;
+  const message = err instanceof Error ? err.message : String(err);
+  return LOOP_RE.test(message);
+}
+
 function isStrictAncestor(ancestor: string, path: string): boolean {
   if (ancestor === path) return false;
   const prefix = ancestor.endsWith('/') ? ancestor : `${ancestor}/`;
@@ -26,11 +32,11 @@ function isStrictAncestor(ancestor: string, path: string): boolean {
 async function kindFromStat(
   client: LinkResolveClient,
   path: string,
-): Promise<'file' | 'dir' | 'broken'> {
+): Promise<'file' | 'dir' | 'broken' | 'loop'> {
   try {
     return (await client.stat(path)).isDirectory ? 'dir' : 'file';
-  } catch {
-    return 'broken';
+  } catch (err) {
+    return isLoopError(err) ? 'loop' : 'broken';
   }
 }
 
@@ -39,8 +45,7 @@ export async function resolveLink(client: LinkResolveClient, linkPath: string): 
   try {
     resolved = await client.realPath(linkPath);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (LOOP_RE.test(message)) return { realPath: linkPath, kind: 'loop' };
+    if (isLoopError(err)) return { realPath: linkPath, kind: 'loop' };
     // Server without realpath support: treat the path as its own real path.
     return { realPath: linkPath, kind: await kindFromStat(client, linkPath) };
   }
@@ -73,7 +78,10 @@ export async function resolveLinkEntries(
       } catch {
         link = { realPath: entry.path, kind: 'broken' };
       }
-      const isDirectory = link.kind === 'dir' || link.kind === 'loop' ? true : entry.isDirectory;
+      // Only an ancestor loop is expandable; a loop reported by the server is not.
+      const expandable =
+        link.kind === 'dir' || (link.kind === 'loop' && isStrictAncestor(link.realPath, entry.path));
+      const isDirectory = expandable ? true : entry.isDirectory;
       out[idx] = { ...entry, isDirectory, link };
     }
   };

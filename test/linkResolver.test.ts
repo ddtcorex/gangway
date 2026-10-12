@@ -90,6 +90,34 @@ describe('resolveLink', () => {
     expect(await resolveLink(none, '/srv/www/z')).toEqual({ realPath: '/srv/www/z', kind: 'broken' });
   });
 
+  it('stat loop error is loop, not expandable (realPath generic failure)', async () => {
+    const c = client({
+      realPath: async () => {
+        throw new Error('Failure');
+      },
+      stat: async () => {
+        throw new Error('ELOOP: too many levels of symbolic links');
+      },
+    });
+    expect(await resolveLink(c, '/srv/www/l')).toEqual({ realPath: '/srv/www/l', kind: 'loop' });
+    const [out] = await resolveLinkEntries(c, [linkEntry('/srv/www/l')]);
+    expect(out.link?.kind).toBe('loop');
+    expect(out.isDirectory).toBe(false);
+  });
+
+  it('stat loop error after resolved realPath is loop, not expandable', async () => {
+    const c = client({
+      realPath: async () => '/srv/real/x',
+      stat: async () => {
+        throw Object.assign(new Error('x'), { code: 'ELOOP' });
+      },
+    });
+    expect((await resolveLink(c, '/srv/www/x')).kind).toBe('loop');
+    const [out] = await resolveLinkEntries(c, [linkEntry('/srv/www/x')]);
+    expect(out.link?.kind).toBe('loop');
+    expect(out.isDirectory).toBe(false);
+  });
+
   it('not-found stat after a resolved realPath is broken', async () => {
     const c = client({
       realPath: async () => '/srv/real/gone',
