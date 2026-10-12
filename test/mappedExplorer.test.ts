@@ -26,6 +26,9 @@ const fakeRawClient = vi.hoisted(() => ({
   end: vi.fn().mockResolvedValue(undefined),
   list: vi.fn().mockResolvedValue([] as Array<{ name: string; type: string }>),
   stat: vi.fn().mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: false }),
+  // Identity realPath and a not-a-link lstat by default (plain files).
+  lstat: vi.fn().mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: false }),
+  realPath: vi.fn().mockImplementation(async (p: string) => p),
   fastGet: vi.fn().mockImplementation(async (_remotePath: string, localPath: string) => {
     await fs.mkdir(path.dirname(localPath), { recursive: true });
     await fs.writeFile(localPath, 'server content');
@@ -43,6 +46,8 @@ function resetFakeClient(): void {
   fakeRawClient.end.mockClear();
   fakeRawClient.list.mockReset().mockResolvedValue([]);
   fakeRawClient.stat.mockReset().mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: false });
+  fakeRawClient.lstat.mockReset().mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: false });
+  fakeRawClient.realPath.mockReset().mockImplementation(async (p: string) => p);
   fakeRawClient.fastGet.mockClear();
   fakeRawClient.fastPut.mockClear();
   fakeRawClient.posixRename.mockClear();

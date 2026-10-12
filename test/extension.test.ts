@@ -21,6 +21,10 @@ const fakeRawClient = vi.hoisted(() => ({
   end: vi.fn().mockResolvedValue(undefined),
   list: vi.fn().mockResolvedValue([] as Array<{ name: string; type: string }>),
   stat: vi.fn().mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: false }),
+  // Identity realPath and a not-a-link lstat by default, so every plain-file
+  // test resolves exactly as before; link tests override both.
+  lstat: vi.fn().mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: false }),
+  realPath: vi.fn().mockImplementation(async (p: string) => p),
   fastGet: vi.fn().mockImplementation(async (_remotePath: string, localPath: string) => {
     await fs.mkdir(path.dirname(localPath), { recursive: true });
     await fs.writeFile(localPath, 'server content');
@@ -38,6 +42,8 @@ function resetFakeClient(): void {
   fakeRawClient.end.mockClear();
   fakeRawClient.list.mockReset().mockResolvedValue([]);
   fakeRawClient.stat.mockReset().mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: false });
+  fakeRawClient.lstat.mockReset().mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: false });
+  fakeRawClient.realPath.mockReset().mockImplementation(async (p: string) => p);
   fakeRawClient.fastGet.mockClear();
   fakeRawClient.fastPut.mockClear();
   fakeRawClient.posixRename.mockClear();
@@ -70,9 +76,9 @@ import { activate } from '../src/extension';
 import { AuditLog } from '../src/auditLog';
 import { ConnectionPool } from '../src/transfer/connectionPool';
 import type { ConnectionManager } from '../src/connectionManager';
-import { writeSidecar } from '../src/tmpStore';
+import { readSidecar, writeSidecar } from '../src/tmpStore';
 import { tmpFilePathFor } from '../src/tmpPath';
-import type { ConnectionConfig } from '../src/types';
+import type { ConnectionConfig, SidecarMeta } from '../src/types';
 
 /**
  * `globalStorageUri` is the real, always-writable per-extension directory VS
@@ -437,6 +443,86 @@ describe('activate - realistic command invocation', () => {
     expect(fakeRawClient.stat).toHaveBeenCalledWith('/var/www/app/config.php');
     expect(fakeRawClient.fastPut).toHaveBeenCalledWith(localPath, '/var/www/app/config.php.tmp');
     expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/app/config.php.tmp', '/var/www/app/config.php');
+  });
+
+  describe('push through a link', () => {
+    async function seedLinkFile(extra: Partial<SidecarMeta> = {}): Promise<string> {
+      const localPath = path.join(tmpHome, 'linked-config.php');
+      await fs.writeFile(localPath, 'edited content');
+      await writeSidecar(localPath, {
+        connectionId: connection.id,
+        remotePath: '/var/www/app/config.php',
+        realPath: '/var/www/shared/config.php',
+        mtime: 1700000000000,
+        size: 5,
+        downloadedAt: Date.now(),
+        ...extra,
+      });
+      fakeRawClient.stat.mockResolvedValue({ size: 5, modifyTime: 1700000000000, isDirectory: false, isSymbolicLink: false });
+      vscode.window.activeTextEditor = { document: { uri: { fsPath: localPath } } } as unknown as vscode.TextEditor;
+      return localPath;
+    }
+
+    it('writes the tmp file and renames at the real target, never at the clicked link path', async () => {
+      const localPath = await seedLinkFile();
+      fakeRawClient.realPath.mockImplementation(async (p: string) =>
+        p === '/var/www/app/config.php' ? '/var/www/shared/config.php' : p,
+      );
+
+      await handlers.get('gangway.uploadFile')!();
+
+      expect(fakeRawClient.stat).toHaveBeenCalledWith('/var/www/shared/config.php');
+      expect(fakeRawClient.lstat).toHaveBeenCalledWith('/var/www/shared/config.php');
+      expect(fakeRawClient.fastPut).toHaveBeenCalledWith(localPath, '/var/www/shared/config.php.tmp');
+      expect(fakeRawClient.posixRename).toHaveBeenCalledWith(
+        '/var/www/shared/config.php.tmp',
+        '/var/www/shared/config.php',
+      );
+      const written = [...fakeRawClient.fastPut.mock.calls, ...fakeRawClient.posixRename.mock.calls].flat();
+      expect(written.some((p) => String(p).startsWith('/var/www/app/config.php'))).toBe(false);
+      const sidecar = await readSidecar(localPath);
+      expect(sidecar!.remotePath).toBe('/var/www/app/config.php');
+      expect(sidecar!.realPath).toBe('/var/www/shared/config.php');
+    });
+
+    it('warns and pushes nothing when the link now points somewhere else', async () => {
+      await seedLinkFile();
+      fakeRawClient.realPath.mockImplementation(async (p: string) =>
+        p === '/var/www/app/config.php' ? '/var/www/shared/other.php' : p,
+      );
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+
+      await handlers.get('gangway.uploadFile')!();
+
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('now points elsewhere'));
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+      expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+    });
+
+    it('asks before pushing outside the root and pushes nothing when declined', async () => {
+      await seedLinkFile({ realPath: '/srv/shared/config.php' });
+      fakeRawClient.realPath.mockImplementation(async (p: string) =>
+        p === '/var/www/app/config.php' ? '/srv/shared/config.php' : p,
+      );
+      mockWindow.__test_queueWarning(undefined);
+
+      await handlers.get('gangway.uploadFile')!();
+
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+    });
+
+    it('pushes outside the root after a yes and remembers it in the sidecar', async () => {
+      const localPath = await seedLinkFile({ realPath: '/srv/shared/config.php' });
+      fakeRawClient.realPath.mockImplementation(async (p: string) =>
+        p === '/var/www/app/config.php' ? '/srv/shared/config.php' : p,
+      );
+      mockWindow.__test_queueWarning('Push');
+
+      await handlers.get('gangway.uploadFile')!();
+
+      expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/srv/shared/config.php.tmp', '/srv/shared/config.php');
+      expect((await readSidecar(localPath))!.outsideRootConfirmedFor).toBe('/srv/shared/config.php');
+    });
   });
 
   it('gangway.uploadFile warns and never attempts an upload when there is no active editor', async () => {

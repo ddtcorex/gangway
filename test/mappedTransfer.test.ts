@@ -10,10 +10,28 @@ function fakePutClient() {
     posixRename: vi.fn().mockResolvedValue(undefined),
     mkdir: vi.fn().mockResolvedValue(undefined),
     delete: vi.fn().mockResolvedValue(undefined),
+    lstat: vi.fn().mockResolvedValue({ mtime: 1, size: 1, isDirectory: false, isSymbolicLink: false }),
   };
 }
 
 describe('pushMappedFile', () => {
+  it('refuses a destination that is itself a symlink and writes nothing', async () => {
+    const client = fakePutClient();
+    client.lstat.mockResolvedValue({ mtime: 1, size: 1, isDirectory: false, isSymbolicLink: true });
+    await expect(pushMappedFile(client, '/ws/app.php', '/var/www/app.php')).rejects.toThrow(
+      '"/var/www/app.php" is a symlink; open it from the tree to edit its target.',
+    );
+    expect(client.fastPut).not.toHaveBeenCalled();
+    expect(client.posixRename).not.toHaveBeenCalled();
+  });
+
+  it('pushes a new file when the destination does not exist yet', async () => {
+    const client = fakePutClient();
+    client.lstat.mockRejectedValue(Object.assign(new Error('No such file'), { code: 2 }));
+    await pushMappedFile(client, '/ws/app.php', '/var/www/app.php');
+    expect(client.posixRename).toHaveBeenCalledWith('/var/www/app.php.tmp', '/var/www/app.php');
+  });
+
   it('puts to .tmp then posix-renames over the target', async () => {
     const client = fakePutClient();
     await pushMappedFile(client, '/ws/app.php', '/var/www/app.php');

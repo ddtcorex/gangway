@@ -9,7 +9,9 @@ import { downloadFile } from './transfer/downloadFile';
 import { uploadFile } from './transfer/uploadFile';
 import { AuditLog } from './auditLog';
 import { checkConflict } from './conflictGuard';
-import { readSidecar } from './tmpStore';
+import { readSidecar, writeSidecar } from './tmpStore';
+import { preparePush } from './pushTarget';
+import { LinkRetargetedError } from './realTarget';
 import { purgeExpiredTmp, sweepUnknownTmpRoots } from './tmpRetention';
 import { tmpFilePathFor, tmpRootFor, connectionSlug, sidecarPathFor } from './tmpPath';
 import { mapSftpError, actionLabel, isConnectionError } from './errorMapper';
@@ -741,7 +743,41 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         );
         return;
       }
-      const freshStat = await adapter.stat(remotePath);
+      // Resolve where the bytes really go. A link is pushed through to its
+      // real target (never replaced by a regular file); a link that now
+      // points elsewhere than at download time is a hard stop; a target
+      // outside the root needs a confirmation (or is blocked when frozen).
+      let prepared: Awaited<ReturnType<typeof preparePush>>;
+      try {
+        prepared = await preparePush(adapter, connection, sidecar, remotePath, async (realPath) => {
+          const choice = await vscode.window.showWarningMessage(
+            `${remotePath} is a link to ${realPath}, which is outside the connection root (${connection.name}). Push to that file?`,
+            { modal: true },
+            'Push',
+          );
+          return choice === 'Push';
+        });
+      } catch (err) {
+        if (err instanceof LinkRetargetedError) {
+          await vscode.window.showWarningMessage(err.message);
+          return;
+        }
+        throw err;
+      }
+      if (prepared.status !== 'ready') {
+        if (prepared.status === 'blocked') {
+          await vscode.window.showInformationMessage(
+            `Connection "${connection.name}" is frozen and ${remotePath} resolves outside its root. Nothing was pushed.`,
+          );
+        }
+        return;
+      }
+      const target = prepared.target;
+      const confirmedFor = prepared.sidecarUpdate?.outsideRootConfirmedFor ?? sidecar?.outsideRootConfirmedFor;
+      if (sidecar && prepared.sidecarUpdate) {
+        await writeSidecar(localPath, { ...sidecar, ...prepared.sidecarUpdate });
+      }
+      const freshStat = await adapter.stat(target.realPath);
       // The local file was proven to exist by the byteSize stat above (a
       // never-downloaded file already returned "no local copy yet" before
       // this point), yet its sidecar is missing or unreadable (a torn write,
@@ -751,8 +787,20 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       // gets -- rather than silently falling through to an unconditional
       // overwrite.
       if (!sidecar || checkConflict(sidecar, freshStat) === 'conflict') {
-        const decision = await resolveFileConflict(adapter, connection.id, localPath, remotePath, conflictUi);
+        const decision = await resolveFileConflict(adapter, connection.id, localPath, target.realPath, conflictUi);
         if (decision === 'keepServer') {
+          // resolveFileConflict refreshed the sidecar keyed on the path it
+          // read (the real target); restore the link identity so the next
+          // push still resolves the clicked path and the retarget check holds.
+          const refreshed = target.viaLink ? await readSidecar(localPath) : undefined;
+          if (refreshed) {
+            await writeSidecar(localPath, {
+              ...refreshed,
+              remotePath,
+              realPath: target.realPath,
+              ...(confirmedFor === target.realPath ? { outsideRootConfirmedFor: target.realPath } : {}),
+            });
+          }
           dirtyDecorations.refresh(vscode.Uri.file(localPath));
           await vscode.window.showInformationMessage(
             `Local edits discarded: ${localPath} now matches the server copy of ${remotePath}.`,
@@ -763,7 +811,17 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       }
       await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, title: `Gangway: uploading ${remotePath}` },
-        () => uploadFile(adapter, connection.id, localPath as string, remotePath as string, byteSize, auditLog, (message) => output.appendLine(message)),
+        () =>
+          uploadFile(
+            adapter,
+            connection.id,
+            localPath as string,
+            target.realPath,
+            byteSize,
+            auditLog,
+            (message) => output.appendLine(message),
+            target.viaLink ? { sidecarRemotePath: remotePath } : undefined,
+          ),
       );
       dirtyDecorations.refresh(vscode.Uri.file(localPath));
       treeProvider.refresh();
