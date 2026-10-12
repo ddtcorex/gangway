@@ -12,6 +12,10 @@ breaking changes are marked `BREAKING:`.
   Broken links and loops are dimmed and explain themselves on click (on
   OpenSSH a pair of links pointing at each other reports as "no such file",
   so it is shown as a broken link rather than a loop).
+- On a restricted server that refuses `realpath` while `stat` works, a path
+  is judged by its text, so a directory link leading outside the connection
+  root cannot be detected there. The freeze check runs first and still
+  blocks every write on a frozen connection.
 - Edits through a link are pushed to the real target with the usual temp and
   rename overwrite, so the link is never replaced by a regular file. A push
   is stopped if the link now points somewhere else than when it was opened,

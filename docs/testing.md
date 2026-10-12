@@ -100,6 +100,10 @@ host-only dir appears.
    `No such file` with code `ENOENT`, not ELOOP; and ssh2-sftp-client
    appends the path to every error message, so a loop check must never
    match a bare "loop" (it would match `loop-a` in the path).
+   A server that refuses `realpath` while `stat` works cannot be resolved:
+   `resolveTarget` then falls back to the path text (`resolved: false`), so
+   an out-of-root directory link is not detected there; only the unit fakes
+   in `test/realTarget.test.ts` exercise that branch.
 10. **jsdom mocks can mask real-DOM behavior.** `test/mocks/vscode.ts` is
    not the only fake: any hand-rolled DOM stand-in (e.g. `children` as a
    plain Array) hides APIs the production DOM lacks
