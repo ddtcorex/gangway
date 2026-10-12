@@ -195,6 +195,34 @@ describe('moveByDrop', () => {
     expect(d.confirmOverwrite).not.toHaveBeenCalled();
   });
 
+  it('does not warn about overwriting for folders that pasteEntries will only skip', async () => {
+    const c = server({
+      dirs: ['/srv/app', '/srv/app/dest', '/srv/app/d1', '/srv/app/d2', '/srv/app/dest/d1', '/srv/app/dest/d2'],
+    });
+    const d = deps();
+    const result = await moveByDrop(c as never, connection, ['/srv/app/d1', '/srv/app/d2'], '/srv/app/dest', d);
+    expect(d.chooseConflictPolicy).not.toHaveBeenCalled();
+    expect(result.pasted).toEqual([]);
+    expect(result.skipped.map((s) => s.reason)).toEqual([
+      expect.stringContaining('merging into existing folder'),
+      expect.stringContaining('merging into existing folder'),
+    ]);
+  });
+
+  it('does not warn about overwriting for destinations that are links', async () => {
+    const c = server({
+      ...base,
+      files: ['/srv/app/a.php', '/srv/app/b.php'],
+      links: ['/srv/app/dest/a.php', '/srv/app/dest/b.php'],
+    });
+    const d = deps();
+    const result = await moveByDrop(c as never, connection, ['/srv/app/a.php', '/srv/app/b.php'], '/srv/app/dest', d);
+    expect(d.chooseConflictPolicy).not.toHaveBeenCalled();
+    expect(result.pasted).toEqual([]);
+    expect(result.skipped).toHaveLength(2);
+    expect(c.posixRename).not.toHaveBeenCalled();
+  });
+
   it('cancel rejects before any write', async () => {
     const c = withThreeConflicts();
     await expect(moveByDrop(c as never, connection, three, '/srv/app/dest', deps('cancel'))).rejects.toBeInstanceOf(

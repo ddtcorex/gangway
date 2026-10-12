@@ -35,6 +35,14 @@ async function isLink(client: RemoteOpsClient, remotePath: string): Promise<bool
   }
 }
 
+async function isDirectory(client: RemoteOpsClient, remotePath: string): Promise<boolean> {
+  try {
+    return (await client.stat(remotePath)).isDirectory === true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Filters a dropped batch before anything touches the server. A source already
  * in the destination folder is dropped silently (a no-op move). A source that
@@ -109,7 +117,12 @@ export async function moveByDrop(
   const conflicting: string[] = [];
   for (const source of movable) {
     const dest = joinRoot(destDir, path.posix.basename(source));
-    if (await existsOnServer(client, dest)) conflicting.push(source);
+    if (!(await existsOnServer(client, dest))) continue;
+    // Only a file that would really be overwritten counts: pasteEntries skips a
+    // folder onto an existing name and any link destination without asking.
+    if (await isLink(client, dest)) continue;
+    if (await isDirectory(client, source)) continue;
+    conflicting.push(source);
   }
   if (conflicting.length >= 2) {
     const names = conflicting.map((source) => joinRoot(destDir, path.posix.basename(source)));
