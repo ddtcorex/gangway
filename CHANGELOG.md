@@ -7,6 +7,10 @@ breaking changes are marked `BREAKING:`.
 
 ## [Unreleased]
 
+- Fixed: opening a file that is itself a symlink failed with "Not a regular
+  file". The SFTP library refuses anything whose own type is not a regular
+  file, so the file is now fetched from its real path. Compare, conflict
+  review and mapped pull read through a link the same way.
 - BREAKING: dropping files from the local Explorer or the OS onto the remote
   tree no longer uploads them. Drag and drop is now a remote-only gesture;
   upload with the upload commands instead.

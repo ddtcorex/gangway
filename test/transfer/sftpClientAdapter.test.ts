@@ -158,4 +158,79 @@ describe('SftpClientAdapter', () => {
 
     await expect(adapter.realPath('/root/x')).rejects.toThrow('Permission denied');
   });
+
+  describe('fastGet through a link', () => {
+    const notRegular = (p: string) => new Error(`fastGet: Not a regular file ${p}`);
+
+    it('retries at the real path when the library refuses a link as "Not a regular file"', async () => {
+      const calls: string[] = [];
+      const adapter = new SftpClientAdapter(
+        fakeRawClient({
+          realPath: async () => '/srv/real/env.php',
+          fastGet: async (r) => {
+            calls.push(r);
+            if (r === '/srv/link/env.php') throw notRegular(r);
+            return 'ok';
+          },
+        }),
+      );
+      expect(await adapter.fastGet('/srv/link/env.php', '/local')).toBe('ok');
+      expect(calls).toEqual(['/srv/link/env.php', '/srv/real/env.php']);
+    });
+
+    it('does not look up the real path for a regular file', async () => {
+      let lookups = 0;
+      const adapter = new SftpClientAdapter(
+        fakeRawClient({
+          realPath: async (p) => {
+            lookups += 1;
+            return p;
+          },
+        }),
+      );
+      await adapter.fastGet('/srv/app/env.php', '/local');
+      expect(lookups).toBe(0);
+    });
+
+    it('rethrows the original error when the real path is the same path (a folder)', async () => {
+      const adapter = new SftpClientAdapter(
+        fakeRawClient({
+          realPath: async (p) => p,
+          fastGet: async (r) => {
+            throw notRegular(r);
+          },
+        }),
+      );
+      await expect(adapter.fastGet('/srv/app/dir', '/local')).rejects.toThrow('Not a regular file /srv/app/dir');
+    });
+
+    it('rethrows the original error when the path has no real path (missing)', async () => {
+      const adapter = new SftpClientAdapter(
+        fakeRawClient({
+          realPath: async () => '',
+          fastGet: async (r) => {
+            throw notRegular(r);
+          },
+        }),
+      );
+      await expect(adapter.fastGet('/srv/app/gone', '/local')).rejects.toThrow('Not a regular file /srv/app/gone');
+    });
+
+    it('does not retry other errors', async () => {
+      let lookups = 0;
+      const adapter = new SftpClientAdapter(
+        fakeRawClient({
+          realPath: async (p) => {
+            lookups += 1;
+            return p;
+          },
+          fastGet: async () => {
+            throw new Error('connection reset');
+          },
+        }),
+      );
+      await expect(adapter.fastGet('/srv/app/a.php', '/local')).rejects.toThrow('connection reset');
+      expect(lookups).toBe(0);
+    });
+  });
 });

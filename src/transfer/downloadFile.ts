@@ -54,8 +54,11 @@ export async function downloadFile(
   await fs.writeFile(downloadingPath, '', { mode: 0o600 });
   await ensureOwnerOnlyPermissions(downloadingPath);
 
+  // The library's fastGet refuses anything whose lstat type is not a regular
+  // file ("Not a regular file"), so a link is read at its real path.
+  const source = target?.viaLink ? target.realPath : remotePath;
   try {
-    await client.fastGet(remotePath, downloadingPath);
+    await client.fastGet(source, downloadingPath);
   } catch (err) {
     await fs.rm(downloadingPath, { force: true });
     throw err;

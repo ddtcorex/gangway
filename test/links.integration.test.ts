@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import Client from 'ssh2-sftp-client';
 import { SftpClientAdapter } from '../src/transfer/sftpClientAdapter';
+import { downloadFile } from '../src/transfer/downloadFile';
 import { uploadFile } from '../src/transfer/uploadFile';
 import { mapListingToEntries } from '../src/remoteListing';
 import { isLoopError, resolveLinkEntries } from '../src/linkResolver';
@@ -125,6 +126,29 @@ describe.runIf(enabled)('symlink behavior (docker sftp)', () => {
     expect((await adapter.lstat(`${ROOT}/loop-a`)).isSymbolicLink).toBe(true);
     // No write can go through it: the dangling-link check refuses it.
     expect(await caught(resolveTarget(adapter, connection, `${ROOT}/loop-a`))).toBeInstanceOf(BrokenLinkError);
+  });
+
+  it.each([
+    ['link-rel', `${ROOT}/hotfix2.php`],
+    ['link-file', '/var/www/hotfix.php'],
+  ])('downloads a file link (%s) from its real target', { timeout: 30_000 }, async (name, realPath) => {
+    // ssh2-sftp-client's fastGet refuses a path whose lstat type is not '-',
+    // so asking it for the link itself fails with "Not a regular file".
+    const clicked = `${ROOT}/${name}`;
+    const { localPath, meta } = await downloadFile(adapter, connection, clicked);
+    try {
+      expect(await fs.readFile(localPath, 'utf8')).toBe(await readRemote(realPath));
+      expect(meta.remotePath).toBe(clicked);
+      expect(meta.realPath).toBe(realPath);
+    } finally {
+      await fs.rm(path.dirname(localPath), { recursive: true, force: true });
+    }
+  });
+
+  it('adapter.fastGet reads through a file link, as compare and conflict resolution need', { timeout: 30_000 }, async () => {
+    expect(await readRemote(`${ROOT}/link-rel`)).toBe(await readRemote(`${ROOT}/hotfix2.php`));
+    expect(await caught(readRemote(`${ROOT}/subdir`))).toBeInstanceOf(Error);
+    expect(await caught(readRemote(`${ROOT}/broken`))).toBeInstanceOf(Error);
   });
 
   it('resolveLinkEntries classifies the seeded links', { timeout: 30_000 }, async () => {

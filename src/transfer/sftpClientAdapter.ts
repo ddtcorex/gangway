@@ -113,8 +113,23 @@ export class SftpClientAdapter {
     };
   }
 
-  fastGet(remotePath: string, localPath: string): Promise<unknown> {
-    return this.raw.fastGet(remotePath, localPath);
+  /**
+   * The library's fastGet checks the path's lstat type first and refuses
+   * anything that is not a regular file, so a symlink fails with "Not a
+   * regular file" even though the server would happily read through it. When
+   * that exact refusal comes back, the path is retried at its real path: a
+   * regular file pays nothing, a folder (same real path) keeps its original
+   * error. Reading through a link is allowed by design; writes never do this.
+   */
+  async fastGet(remotePath: string, localPath: string): Promise<unknown> {
+    try {
+      return await this.raw.fastGet(remotePath, localPath);
+    } catch (err) {
+      if (!/Not a regular file/.test(err instanceof Error ? err.message : '')) throw err;
+      const real = await this.realPath(remotePath).catch(() => undefined);
+      if (real === undefined || real === remotePath) throw err;
+      return this.raw.fastGet(real, localPath);
+    }
   }
 
   fastPut(localPath: string, remotePath: string): Promise<unknown> {
