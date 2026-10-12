@@ -33,6 +33,13 @@ export interface RawSftpClient {
   connect(options: Record<string, unknown>): Promise<void>;
   end(): Promise<void>;
   stat(remotePath: string): Promise<RawSftpStat>;
+  /** Same shape as `stat`, but does not follow a trailing symlink. */
+  lstat(remotePath: string): Promise<RawSftpStat>;
+  /**
+   * Server-side canonical path. The lib resolves `''` (not a rejection) for
+   * SFTP status 2 (no such file); every other failure rejects.
+   */
+  realPath(remotePath: string): Promise<string>;
   fastGet(remotePath: string, localPath: string): Promise<unknown>;
   fastPut(localPath: string, remotePath: string): Promise<unknown>;
   /**
@@ -84,7 +91,20 @@ export class SftpClientAdapter {
   }
 
   async stat(remotePath: string): Promise<RemoteStat> {
-    const raw = await this.raw.stat(remotePath);
+    return SftpClientAdapter.toRemoteStat(await this.raw.stat(remotePath));
+  }
+
+  async lstat(remotePath: string): Promise<RemoteStat> {
+    return SftpClientAdapter.toRemoteStat(await this.raw.lstat(remotePath));
+  }
+
+  /** `undefined` when the path does not exist; any other error rejects. */
+  async realPath(remotePath: string): Promise<string | undefined> {
+    const resolved = await this.raw.realPath(remotePath);
+    return resolved === '' ? undefined : resolved;
+  }
+
+  private static toRemoteStat(raw: RawSftpStat): RemoteStat {
     return {
       mtime: raw.modifyTime,
       size: raw.size,
