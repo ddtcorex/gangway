@@ -16,6 +16,46 @@ export interface LinkResolveClient {
 }
 
 const DEFAULT_CONCURRENCY = 8;
+const DEFAULT_CACHE_TTL_MS = 60_000;
+
+/**
+ * Short-lived memo of successful link resolutions, so re-expanding or
+ * refreshing a directory full of links does not repeat two round trips per
+ * entry. Failures (`unresolved`) are never stored: a retry must hit the wire.
+ */
+export class LinkCache {
+  private readonly entries = new Map<string, { info: LinkInfo; expires: number }>();
+
+  constructor(
+    private readonly ttlMs: number = DEFAULT_CACHE_TTL_MS,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  get(key: string): LinkInfo | undefined {
+    const hit = this.entries.get(key);
+    if (!hit) return undefined;
+    if (this.now() >= hit.expires) {
+      this.entries.delete(key);
+      return undefined;
+    }
+    return hit.info;
+  }
+
+  set(key: string, info: LinkInfo): void {
+    if (info.kind === 'unresolved') return;
+    this.entries.set(key, { info, expires: this.now() + this.ttlMs });
+  }
+
+  clear(): void {
+    this.entries.clear();
+  }
+
+  clearPrefix(prefix: string): void {
+    for (const key of [...this.entries.keys()]) {
+      if (key.startsWith(prefix)) this.entries.delete(key);
+    }
+  }
+}
 /**
  * Loop wording only, never a bare "loop": ssh2-sftp-client appends the path
  * to every error message, so a missing `loop-a` (seen from atmoz/sftp as
@@ -66,7 +106,12 @@ export async function resolveLink(client: LinkResolveClient, linkPath: string): 
 export async function resolveLinkEntries(
   client: LinkResolveClient,
   entries: RemoteEntry[],
-  options: { concurrency?: number; signal?: AbortSignal } = {},
+  options: {
+    concurrency?: number;
+    signal?: AbortSignal;
+    cache?: LinkCache;
+    cacheKey?: (entry: RemoteEntry) => string;
+  } = {},
 ): Promise<RemoteEntry[]> {
   const out = entries.slice();
   const pending: number[] = [];
@@ -81,11 +126,15 @@ export async function resolveLinkEntries(
     while (!signal?.aborted && next < pending.length) {
       const idx = pending[next++];
       const entry = entries[idx];
-      let link: LinkInfo;
-      try {
-        link = await resolveLink(client, entry.path);
-      } catch {
-        link = { realPath: entry.path, kind: 'unresolved' };
+      const key = options.cacheKey ? options.cacheKey(entry) : entry.path;
+      let link = options.cache?.get(key);
+      if (!link) {
+        try {
+          link = await resolveLink(client, entry.path);
+        } catch {
+          link = { realPath: entry.path, kind: 'unresolved' };
+        }
+        options.cache?.set(key, link);
       }
       // Only an ancestor loop is expandable; a loop reported by the server is not.
       const expandable =

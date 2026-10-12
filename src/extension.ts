@@ -17,7 +17,7 @@ import { purgeExpiredTmp, sweepUnknownTmpRoots } from './tmpRetention';
 import { tmpFilePathFor, tmpRootFor, connectionSlug, sidecarPathFor } from './tmpPath';
 import { mapSftpError, actionLabel, isConnectionError } from './errorMapper';
 import { mapListingToEntries } from './remoteListing';
-import { resolveLinkEntries } from './linkResolver';
+import { LinkCache, resolveLinkEntries } from './linkResolver';
 import { GangwayTreeProvider, isSelectorNode, type RemoteTreeNode, type GangwayTreeNode } from './ui/gangwayTreeProvider';
 import { TmpStatusBar } from './ui/statusBar';
 import { AUTO_OPEN_PROMPT_THRESHOLD_BYTES, isProbablyBinary, buildDownloadPlan, type RemoteEntry } from './folderQueue';
@@ -168,7 +168,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         cancellable: true,
       },
       (_progress, token) =>
-        raceWithCancellation(pool.getClient(connection), token, () => pool.invalidate(connection.id)),
+        raceWithCancellation(pool.getClient(connection), token, () => invalidateConnection(connection.id)),
     );
     const adapter = new SftpClientAdapter(client as unknown as RawSftpClient);
     return adapter;
@@ -238,7 +238,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       await vscode.window.showInformationMessage('Cancelled.');
       return;
     }
-    if (connection && isConnectionError(err)) pool.invalidate(connection.id);
+    if (connection && isConnectionError(err)) invalidateConnection(connection.id);
     const mapped = mapSftpError(err);
     const available = mapped.actions.filter((action) =>
       action === 'retry' ? retry !== undefined : action === 'disconnect' ? connection !== undefined : true,
@@ -250,7 +250,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     const choice = await vscode.window.showErrorMessage(mapped.message, ...available.map(actionLabel));
     const picked = mapped.actions.find((action) => actionLabel(action) === choice);
     if (picked === 'openOutput') output.show();
-    else if (picked === 'disconnect' && connection) pool.invalidate(connection.id);
+    else if (picked === 'disconnect' && connection) invalidateConnection(connection.id);
     else if (picked === 'retry' && retry) await retry();
   }
 
@@ -341,6 +341,28 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   }
 
   /**
+   * One link-resolution memo per activation (never a module global, so
+   * activations and tests stay isolated). Mutations and Refresh clear all of
+   * it: a mutation can change a link anywhere (rename/delete/paste move
+   * targets across directories), and a full clear costs at most one
+   * re-resolve of what is currently expanded, versus the risk of a stale
+   * kind after a prefix-scoped clear misses a cross-directory change.
+   */
+  const linkCache = new LinkCache();
+
+  /** Drops the pooled client and every link resolved through it. */
+  function invalidateConnection(connectionId: string): void {
+    pool.invalidate(connectionId);
+    linkCache.clearPrefix(`${connectionId}\0`);
+  }
+
+  /** The one place the tree is refreshed: stale link kinds go with it. */
+  function refreshTree(): void {
+    linkCache.clear();
+    treeProvider.refresh();
+  }
+
+  /**
    * Created unconditionally: every saved connection is always listed as a
    * root node (a brand-new user with zero connections just sees an empty
    * tree, no special-casing needed), and expanding one connects it.
@@ -358,6 +380,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       return resolveLinkEntries(
         adapter,
         mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName),
+        { cache: linkCache, cacheKey: (entry) => `${connection.id}\0${entry.path}` },
       );
     },
     (connectionId, remotePath) => {
@@ -368,7 +391,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       // A listing failure has no single connection to invalidate (the tree
       // lists many), but re-listing is a meaningful retry: refresh the whole
       // tree instead of leaving the node failed.
-      void showCommandError(err, { retry: () => Promise.resolve(treeProvider.refresh()) });
+      void showCommandError(err, { retry: () => Promise.resolve(refreshTree()) });
     },
     // Local-Explorer/OS drops land here with the tree node they were dropped
     // on (or undefined for empty tree space). The closure runs long after
@@ -523,7 +546,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         // Any add/edit/delete can change what the tree's selector row and
         // file listing should show (a renamed bound connection, one that
         // just lost its binding because it was deleted, ...).
-        treeProvider.refresh();
+        refreshTree();
         const bound = connections.find((c) => c.id === connectionManager.getWorkspaceBinding());
         if (bound) purgeTmpFor(bound);
       },
@@ -850,7 +873,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
           ),
       );
       dirtyDecorations.refresh(vscode.Uri.file(localPath));
-      treeProvider.refresh();
+      refreshTree();
     } catch (err) {
       await showCommandError(err, { retry: () => runUploadFileCommand(nodeOrLocalPath, remotePathArg), connection });
     }
@@ -915,7 +938,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
           },
         ),
       );
-      treeProvider.refresh();
+      refreshTree();
       if (result.symlinked.length > 0) {
         // Spec §2.3: symlinks download as plain files *with a warning* --
         // the listing flag existed, but no warning was ever shown.
@@ -1060,7 +1083,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
           },
         ),
       );
-      treeProvider.refresh();
+      refreshTree();
       await vscode.window.showInformationMessage(
         `${result.cancelled ? 'Cancelled. ' : ''}Uploaded ${result.uploaded.length} file(s). ` +
           `${result.skippedConflicted.length} skipped (conflicted), ${result.skippedSymlinks.length} skipped (symlinks), ${result.failed.length} failed.`,
@@ -1182,7 +1205,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         onAuditError: (message) => output.appendLine(message),
         confirmOutsideRoot,
       });
-      treeProvider.refresh();
+      refreshTree();
       if (kind === 'file') {
         const choice = await vscode.window.showInformationMessage(`Created ${created}.`, 'Download for editing');
         if (choice === 'Download for editing') {
@@ -1218,7 +1241,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         onAuditError: (message) => output.appendLine(message),
         confirmOutsideRoot,
       });
-      treeProvider.refresh();
+      refreshTree();
       await vscode.window.showInformationMessage(`Renamed to ${newPath}.`);
     } catch (err) {
       await showCommandError(err, { retry: () => runRenameRemoteCommand(node), connection });
@@ -1312,7 +1335,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
           `Deleted ${target}, but could not write the audit log entry: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
-      treeProvider.refresh();
+      refreshTree();
       await vscode.window.showInformationMessage(`Permanently deleted ${target}.`);
     } catch (err) {
       await showCommandError(err, { retry: () => runDeleteRemoteCommand(node), connection });
@@ -1332,7 +1355,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         onAuditError: (message) => output.appendLine(message),
         confirmOutsideRoot,
       });
-      treeProvider.refresh();
+      refreshTree();
       await vscode.window.showInformationMessage(`Duplicated to ${dupPath}.`);
     } catch (err) {
       await showCommandError(err, { retry: () => runDuplicateRemoteCommand(node), connection });
@@ -1369,7 +1392,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         onAuditError: (message) => output.appendLine(message),
         confirmOutsideRoot,
       });
-      treeProvider.refresh();
+      refreshTree();
       await vscode.window.showInformationMessage(`Changed mode of ${node.entry.path} to ${mode}.`);
     } catch (err) {
       await showCommandError(err, { retry: () => runChmodRemoteCommand(node), connection });
@@ -1434,7 +1457,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         }),
       );
       if (clipboard.cut && result.pasted.length > 0 && result.skipped.length === 0) clipboard = clearClipboard();
-      treeProvider.refresh();
+      refreshTree();
       if (result.skipped.length > 0) {
         for (const skip of result.skipped) output.appendLine(`Paste skipped: ${skip.path} (${skip.reason})`);
         output.show();
@@ -1518,7 +1541,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
           }
         })(),
       );
-      treeProvider.refresh();
+      refreshTree();
       await vscode.window.showInformationMessage(`Uploaded ${collected.length} file(s).`);
     } catch (err) {
       await showCommandError(err, { retry: () => handleLocalDrop(targetNode, uriListValue), connection });
@@ -1886,7 +1909,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       for (const skip of skipped) output.appendLine(`Sync skipped: ${skip}`);
       for (const name of skippedSymlinks) output.appendLine(`Sync skipped symlink: ${name}`);
       if (skipped.length > 0 || skippedSymlinks.length > 0) output.show();
-      treeProvider.refresh();
+      refreshTree();
       await vscode.window.showInformationMessage(
         `Synced ${done} file(s) ${direction} (${label})` +
           (skipped.length > 0 || skippedSymlinks.length > 0 ? ` (${skipped.length + skippedSymlinks.length} skipped, see Output).` : ''),
@@ -2255,7 +2278,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       for (const remotePath of result.done) output.appendLine(`Uploaded ${remotePath}`);
       for (const rel of walk.skippedSymlinks) output.appendLine(`Upload skipped symlink: ${rel}`);
       if (result.failed.length > 0 || walk.skippedSymlinks.length > 0) output.show();
-      treeProvider.refresh();
+      refreshTree();
       await vscode.window.showInformationMessage(
         (result.cancelled
           ? `Cancelled after uploading ${result.done.length} file(s).`
@@ -2377,7 +2400,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       for (const remotePath of result.done) output.appendLine(`Downloaded ${remotePath}`);
       for (const skipped of skippedSymlinks) output.appendLine(`Download skipped ${skipped}`);
       if (result.failed.length > 0 || skippedSymlinks.length > 0) output.show();
-      treeProvider.refresh();
+      refreshTree();
       await vscode.window.showInformationMessage(
         (result.cancelled
           ? `Cancelled after downloading ${result.done.length} file(s).`
@@ -2544,7 +2567,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       }
       return;
     }
-    treeProvider.refresh();
+    refreshTree();
     const importedNote = `Imported ${selected.length} (${selected.map((c) => `${c.name}${c.frozen === true ? ' (frozen)' : ''}`).join(', ')}).`;
     const presentNote = alreadyPresent.length > 0 ? ` Already present: ${alreadyPresent.join(', ')}.` : '';
     const skippedNote =
@@ -2605,7 +2628,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       }
       if (!picked.connectionId) return;
       await connectionManager.setWorkspaceBinding(picked.connectionId);
-      treeProvider.refresh();
+      refreshTree();
     }),
     vscode.commands.registerCommand('gangway.cleanupCache', async () => {
       // Explicit user gesture, so it intentionally bypasses the default
@@ -2643,14 +2666,14 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     vscode.commands.registerCommand('gangway.uploadMappedFolder', (uri?: { fsPath: string }) => runUploadMappedFolderCommand(uri)),
     vscode.commands.registerCommand('gangway.downloadMappedFolder', (uri?: { fsPath: string }) => runDownloadMappedFolderCommand(uri)),
     vscode.commands.registerCommand('gangway.downloadToWorkspaceFolder', (node?: RemoteTreeNode) => runDownloadToWorkspaceFolderCommand(node)),
-    vscode.commands.registerCommand('gangway.refreshExplorer', () => treeProvider.refresh()),
+    vscode.commands.registerCommand('gangway.refreshExplorer', () => refreshTree()),
     vscode.commands.registerCommand('gangway.toggleFreeze', async (node?: RemoteTreeNode) => {
       const connection = node
         ? connectionManager.list().find((c) => c.id === node.connectionId)
         : requireActiveConnection();
       if (!connection) return;
       const updated = await connectionManager.update(connection.id, { frozen: !(connection.frozen === true) });
-      treeProvider.refresh();
+      refreshTree();
       await vscode.window.showInformationMessage(
         updated.frozen === true
           ? `Locked "${updated.name}": uploads, deletes, and other server mutations are now blocked.`

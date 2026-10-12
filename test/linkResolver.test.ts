@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { isLoopError, resolveLink, resolveLinkEntries, type LinkResolveClient } from '../src/linkResolver';
+import { describe, expect, it, vi } from 'vitest';
+import { isLoopError, LinkCache, resolveLink, resolveLinkEntries, type LinkResolveClient } from '../src/linkResolver';
 import type { RemoteEntry } from '../src/folderQueue';
 import type { RemoteStat } from '../src/types';
 
@@ -257,5 +257,86 @@ describe('resolveLinkEntries', () => {
     const out = await resolveLinkEntries(c, [linkEntry('/l/ok'), linkEntry('/l/bad')]);
     expect(out[0].link?.kind).toBe('file');
     expect(out[1].link?.kind).toBe('unresolved');
+  });
+});
+
+describe('LinkCache', () => {
+  const info = { realPath: '/srv/real', kind: 'file' as const };
+
+  it('returns a stored entry and undefined for an absent key', () => {
+    const cache = new LinkCache();
+    expect(cache.get('a')).toBeUndefined();
+    cache.set('a', info);
+    expect(cache.get('a')).toEqual(info);
+  });
+
+  it('expires after the ttl using the injected clock', () => {
+    let now = 1000;
+    const cache = new LinkCache(60_000, () => now);
+    cache.set('a', info);
+    now += 59_999;
+    expect(cache.get('a')).toEqual(info);
+    now += 1;
+    expect(cache.get('a')).toBeUndefined();
+  });
+
+  it('never stores an unresolved result', () => {
+    const cache = new LinkCache();
+    cache.set('a', { realPath: '/x', kind: 'unresolved' });
+    expect(cache.get('a')).toBeUndefined();
+  });
+
+  it('clear drops everything and clearPrefix only matching keys', () => {
+    const cache = new LinkCache();
+    cache.set('c1\0/a', info);
+    cache.set('c1\0/b', info);
+    cache.set('c2\0/a', info);
+    cache.clearPrefix('c1\0');
+    expect(cache.get('c1\0/a')).toBeUndefined();
+    expect(cache.get('c1\0/b')).toBeUndefined();
+    expect(cache.get('c2\0/a')).toEqual(info);
+    cache.clear();
+    expect(cache.get('c2\0/a')).toBeUndefined();
+  });
+});
+
+describe('resolveLinkEntries with a cache', () => {
+  it('a cache hit makes no realPath or stat call', async () => {
+    const cache = new LinkCache();
+    const realPath = vi.fn(async (p: string) => p);
+    const stat = vi.fn(async () => st(false));
+    const c = client({ realPath, stat });
+    await resolveLinkEntries(c, [linkEntry('/l/a')], { cache });
+    expect(realPath).toHaveBeenCalledTimes(1);
+    const [out] = await resolveLinkEntries(c, [linkEntry('/l/a')], { cache });
+    expect(realPath).toHaveBeenCalledTimes(1);
+    expect(stat).toHaveBeenCalledTimes(1);
+    expect(out.link).toEqual({ realPath: '/l/a', kind: 'file' });
+  });
+
+  it('applies the cached kind to isDirectory and honours cacheKey', async () => {
+    const cache = new LinkCache();
+    cache.set('k\0/l/d', { realPath: '/real/d', kind: 'dir' });
+    const realPath = vi.fn(async (p: string) => p);
+    const [out] = await resolveLinkEntries(client({ realPath }), [linkEntry('/l/d')], {
+      cache,
+      cacheKey: (e) => `k\0${e.path}`,
+    });
+    expect(realPath).not.toHaveBeenCalled();
+    expect(out.isDirectory).toBe(true);
+  });
+
+  it('does not cache an unresolved failure, so the next listing retries', async () => {
+    const cache = new LinkCache();
+    const realPath = vi.fn(async () => {
+      throw new Error('timeout');
+    });
+    const stat = vi.fn(async () => {
+      throw new Error('timeout');
+    });
+    const c = client({ realPath, stat });
+    await resolveLinkEntries(c, [linkEntry('/l/a')], { cache });
+    await resolveLinkEntries(c, [linkEntry('/l/a')], { cache });
+    expect(realPath).toHaveBeenCalledTimes(2);
   });
 });

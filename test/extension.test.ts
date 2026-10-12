@@ -187,6 +187,7 @@ describe('activate - realistic command invocation', () => {
   let connection: ConnectionConfig;
   let connectionManager: ConnectionManager;
   let osTmpdirSpy: ReturnType<typeof vi.spyOn>;
+  let capturedProvider: { getChildren: (n?: unknown) => Promise<unknown[]> };
   let capturedTreeView: { __test_fireDidChangeSelection: (node: unknown) => void } | undefined;
 
   beforeEach(async () => {
@@ -212,6 +213,7 @@ describe('activate - realistic command invocation', () => {
     const originalCreateTreeView = vscode.window.createTreeView;
     vscode.window.createTreeView = ((id: string, options: never) => {
       const view = originalCreateTreeView(id, options);
+      capturedProvider = (options as unknown as { treeDataProvider: typeof capturedProvider }).treeDataProvider;
       capturedTreeView = view as unknown as { __test_fireDidChangeSelection: (node: unknown) => void };
       return view;
     }) as typeof originalCreateTreeView;
@@ -1972,6 +1974,22 @@ describe('activate - realistic command invocation', () => {
       await handlers.get('gangway.refreshExplorer')!();
 
       expect(refreshSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('caches link resolution across listings until the Refresh command clears it', async () => {
+      const provider = capturedProvider;
+      fakeRawClient.list.mockResolvedValue([{ name: 'ln', type: 'l' }]);
+      const dir = nodeFor('/var/www/app', true);
+
+      await provider.getChildren(dir);
+      const first = fakeRawClient.realPath.mock.calls.length;
+      expect(first).toBeGreaterThan(0);
+      await provider.getChildren(dir);
+      expect(fakeRawClient.realPath.mock.calls.length).toBe(first);
+
+      await handlers.get('gangway.refreshExplorer')!();
+      await provider.getChildren(dir);
+      expect(fakeRawClient.realPath.mock.calls.length).toBeGreaterThan(first);
     });
 
     it('gangway.uploadFile accepts a tree file node, resolving paths through the tmp mirror', async () => {
