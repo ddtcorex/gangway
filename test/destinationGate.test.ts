@@ -62,6 +62,32 @@ describe('createDestinationGate', () => {
     await expect(gate('/srv/app/shared')).rejects.toThrow(/outside/);
   });
 
+  it('gate refuses a destination two missing levels below an out-of-root link', async () => {
+    const client = fakeClient({ '/srv/app': '/srv/app', '/srv/app/shared': '/etc/ext' });
+    const gate = createDestinationGate(client, base);
+    await expect(gate('/srv/app/shared/new/sub')).rejects.toThrow(/outside/);
+  });
+
+  it('gate refuses a destination three missing levels below an out-of-root link', async () => {
+    const client = fakeClient({ '/srv/app': '/srv/app', '/srv/app/shared': '/etc/ext' });
+    const gate = createDestinationGate(client, base);
+    await expect(gate('/srv/app/shared/new/sub/deeper')).rejects.toThrow(/outside/);
+  });
+
+  it('a missing nested path under an in-root link still resolves inside and is allowed', async () => {
+    const client = fakeClient({ '/srv/app': '/srv/app', '/srv/app/current': '/srv/app/releases/42' });
+    const gate = createDestinationGate(client, base);
+    await expect(gate('/srv/app/current/new/sub')).resolves.toBeUndefined();
+  });
+
+  it('a dangling link ancestor several levels up still throws a broken link refusal', async () => {
+    const client = fakeClient({ '/srv/app': '/srv/app' }, ['/srv/app/gone']);
+    const gate = createDestinationGate(client, base);
+    const err = (await gate('/srv/app/gone/a/b').catch((e: unknown) => e)) as Error;
+    expect(err.message).toMatch(/broken link/);
+    expect(err.message).toContain('"/srv/app/gone/a/b"');
+  });
+
   it('lets a link inside the root through', async () => {
     const client = fakeClient({ '/srv/app': '/srv/app', '/srv/app/current': '/srv/app/releases/42' });
     const gate = createDestinationGate(client, base);

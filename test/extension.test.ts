@@ -2235,6 +2235,28 @@ describe('activate - realistic command invocation', () => {
       expect(lines.some((l) => l.includes('/var/www/sub/x.php') && /outside/.test(l))).toBe(true);
     });
 
+    it('a sync upload of a new nested folder under an out-of-root link writes nothing there', async () => {
+      fakeRawClient.realPath.mockImplementation(async (p: string) => {
+        if (p === '/var/www/shared') return '/etc/ext';
+        // The new folders do not exist yet on the server: realpath reports missing.
+        if (p.startsWith('/var/www/shared/')) return undefined;
+        return p;
+      });
+      fakeRawClient.lstat.mockImplementation(async (p: string) => {
+        if (p.startsWith('/var/www/shared/')) throw Object.assign(new Error('No such file'), { code: 2 });
+        return { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: p === '/var/www/shared' };
+      });
+      await fs.mkdir(path.join(workRoot, 'shared', 'new', 'sub'), { recursive: true });
+      await fs.writeFile(path.join(workRoot, 'shared', 'new', 'sub', 'x.php'), '<?php // nested');
+      mockWindow.__test_queuePick((items: unknown[]) => items);
+
+      await handlers.get('gangway.syncWorkspaceUp')!();
+
+      expect(putTargets().some((p) => p.startsWith('/var/www/shared/'))).toBe(false);
+      expect((fakeRawClient.mkdir.mock.calls as Array<[string]>).some(([p]) => p.startsWith('/var/www/shared'))).toBe(false);
+      expect(lines.some((l) => l.includes('/var/www/shared/new/sub/x.php') && /outside/.test(l))).toBe(true);
+    });
+
     it('a mapped single-file push into an out-of-root link directory writes nothing', async () => {
       linkDir('/var/www/sub', '/etc/ext');
       mockWindow.__test_queueWarning('Upload');

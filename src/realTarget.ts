@@ -85,39 +85,42 @@ async function fallbackOnRealPathError(client: TargetClient, p: string, err: unk
 
 /**
  * Real path of p, or undefined when p must be judged lexically. A path that
- * does not exist yet resolves its parent and appends the leaf, so creating a
- * new file under a linked directory still sees the real destination. A
- * dangling link also reads as "missing" to realpath, so lstat tells the two
- * apart: a dangling link is refused instead of being replaced by a file.
+ * does not exist yet walks up to its nearest existing ancestor and rejoins the
+ * missing tail onto that ancestor's real path, so a new folder several levels
+ * below a linked directory still sees the real destination (one missing level
+ * was not enough: `shared/new/sub` under `shared -> /etc/ext` used to fall back
+ * to the path text and pass as inside the root). A dangling link also reads as
+ * "missing" to realpath, so every missing level is lstat-checked: a dangling
+ * link, at p or any ancestor, is refused instead of being written through.
+ * Only a server that refuses realpath while stat still works (or a walk that
+ * reaches `/` with nothing resolvable) is judged by the path text.
  */
 async function realPathOf(client: TargetClient, p: string): Promise<string | undefined> {
-  let direct: string | undefined;
-  try {
-    direct = await client.realPath(p);
-  } catch (err) {
-    return fallbackOnRealPathError(client, p, err);
-  }
-  if (direct !== undefined) return direct;
+  const missingTail: string[] = [];
+  let current = p;
+  for (;;) {
+    let real: string | undefined;
+    try {
+      real = await client.realPath(current);
+    } catch (err) {
+      return fallbackOnRealPathError(client, current, err);
+    }
+    if (real !== undefined) return missingTail.length === 0 ? real : path.posix.join(real, ...missingTail);
 
-  try {
-    const entry = await client.lstat(p);
-    if (entry.isSymbolicLink) throw new BrokenLinkError(p);
-  } catch (err) {
-    if (err instanceof BrokenLinkError) throw err;
-    if (isLoopError(err)) throw new LinkLoopError(p);
-    if (!isNotFoundError(err)) throw err;
-  }
+    try {
+      const entry = await client.lstat(current);
+      if (entry.isSymbolicLink) throw new BrokenLinkError(current);
+    } catch (err) {
+      if (err instanceof BrokenLinkError) throw err;
+      if (isLoopError(err)) throw new LinkLoopError(current);
+      if (!isNotFoundError(err)) throw err;
+    }
 
-  const parent = path.posix.dirname(p);
-  if (parent === p) return undefined;
-  let parentReal: string | undefined;
-  try {
-    parentReal = await client.realPath(parent);
-  } catch (err) {
-    return fallbackOnRealPathError(client, parent, err);
+    const parent = path.posix.dirname(current);
+    if (parent === current) return undefined;
+    missingTail.unshift(path.posix.basename(current));
+    current = parent;
   }
-  if (parentReal === undefined) return undefined;
-  return path.posix.join(parentReal, path.posix.basename(p));
 }
 
 /**

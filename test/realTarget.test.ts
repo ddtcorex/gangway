@@ -214,6 +214,58 @@ describe('resolveTarget fails closed', () => {
   });
 });
 
+describe('resolveTarget walks up to the nearest existing ancestor', () => {
+  it('a path two missing levels below an out-of-root link resolves outside', async () => {
+    const c = client({ '/srv/app': '/srv/app', '/srv/app/shared': '/etc/ext' });
+    expect(await resolveTarget(c, base, '/srv/app/shared/new/sub')).toEqual({
+      clickedPath: '/srv/app/shared/new/sub',
+      realPath: '/etc/ext/new/sub',
+      viaLink: true,
+      insideRoot: false,
+      resolved: true,
+    });
+  });
+
+  it('a missing nested path under an in-root link resolves inside', async () => {
+    const c = client({ '/srv/app': '/srv/app', '/srv/app/current': '/srv/app/releases/42' });
+    expect(await resolveTarget(c, base, '/srv/app/current/a/b/c.php')).toMatchObject({
+      realPath: '/srv/app/releases/42/a/b/c.php',
+      insideRoot: true,
+      resolved: true,
+    });
+  });
+
+  it('a dangling link ancestor several levels up throws BrokenLinkError', async () => {
+    const c = client({ '/srv/app': '/srv/app' }, { dangling: ['/srv/app/gone'] });
+    const err = await resolveTarget(c, base, '/srv/app/gone/a/b/c.php').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BrokenLinkError);
+    expect((err as BrokenLinkError).clickedPath).toBe('/srv/app/gone');
+  });
+
+  it('an ancestor realpath loop several levels up throws LinkLoopError', async () => {
+    const loop = Object.assign(new Error('Too many levels of symbolic links'), { code: 'ELOOP' });
+    const c = client({ '/srv/app': '/srv/app' }, { realPathErrors: { '/srv/app/loop': loop } });
+    await expect(resolveTarget(c, base, '/srv/app/loop/a/b')).rejects.toBeInstanceOf(LinkLoopError);
+  });
+
+  it('an ancestor transport error several levels up is rethrown', async () => {
+    const dropped = new Error('Connection lost');
+    const c = client(
+      { '/srv/app': '/srv/app' },
+      { realPathErrors: { '/srv/app/dir': dropped }, statErrors: { '/srv/app/dir': new Error('Connection lost') } },
+    );
+    await expect(resolveTarget(c, base, '/srv/app/dir/a/b/new.php')).rejects.toBe(dropped);
+  });
+
+  it('nothing resolvable up to / keeps the path text with resolved false', async () => {
+    const c = client({ '/srv/app': '/srv/app' });
+    expect(await resolveTarget(c, base, '/elsewhere/x/y')).toMatchObject({
+      realPath: '/elsewhere/x/y',
+      resolved: false,
+    });
+  });
+});
+
 describe('gateWriteTarget', () => {
   const inside: ResolvedTarget = {
     clickedPath: '/srv/app/a.php',
