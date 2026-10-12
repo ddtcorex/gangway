@@ -19,7 +19,7 @@ describe('pushMappedFile', () => {
     const client = fakePutClient();
     client.lstat.mockResolvedValue({ mtime: 1, size: 1, isDirectory: false, isSymbolicLink: true });
     await expect(pushMappedFile(client, '/ws/app.php', '/var/www/app.php')).rejects.toThrow(
-      '"/var/www/app.php" is a symlink; open it from the tree to edit its target.',
+      '"/var/www/app.php" is a symlink, and Gangway did not resolve it to its target for this upload, so the link was left untouched and nothing was written.',
     );
     expect(client.fastPut).not.toHaveBeenCalled();
     expect(client.posixRename).not.toHaveBeenCalled();

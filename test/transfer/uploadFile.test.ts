@@ -294,7 +294,7 @@ describe('uploadFile', () => {
       const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
 
       await expect(uploadFile(client, 'c1', localPath, '/srv/app/link.php', 14, auditLog)).rejects.toThrow(
-        '"/srv/app/link.php" is a symlink; open it from the tree to edit its target.',
+        '"/srv/app/link.php" is a symlink, and Gangway did not resolve it to its target for this upload, so the link was left untouched and nothing was written.',
       );
       expect(client.mkdir).not.toHaveBeenCalled();
       expect(client.fastPut).not.toHaveBeenCalled();

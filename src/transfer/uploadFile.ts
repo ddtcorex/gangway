@@ -175,5 +175,12 @@ export async function refuseSymlinkDestination(
     if (isNotFoundError(err)) return;
     throw err;
   }
-  if (isLink) throw new Error(`"${remotePath}" is a symlink; open it from the tree to edit its target.`);
+  // True for every caller: a bulk or mapped upload never resolves links, and a
+  // single-file push only meets a link here when the server refused realpath
+  // or the path became a link after it was resolved.
+  if (isLink) {
+    throw new Error(
+      `"${remotePath}" is a symlink, and Gangway did not resolve it to its target for this upload, so the link was left untouched and nothing was written.`,
+    );
+  }
 }
