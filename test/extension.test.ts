@@ -723,6 +723,92 @@ describe('activate - realistic command invocation', () => {
       expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
     });
 
+    it('delete of a link never calls rmdir: a dir link is unlinked without counting or recursing', async () => {
+      mockWindow.__test_queueWarning('Delete');
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      const inputSpy = vi.spyOn(vscode.window, 'showInputBox');
+
+      await handlers.get('gangway.deleteRemote')!({
+        connectionId: connection.id,
+        entry: { path: '/var/www/app/shared', isDirectory: true, isSymbolicLink: true, size: 0 },
+      });
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        'Delete the link shared? The target is not touched.',
+        { modal: true },
+        'Delete',
+      );
+      expect(inputSpy).not.toHaveBeenCalled();
+      expect(fakeRawClient.list).not.toHaveBeenCalled();
+      expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
+      expect(fakeRawClient.delete).toHaveBeenCalledTimes(1);
+      expect(fakeRawClient.delete).toHaveBeenCalledWith('/var/www/app/shared');
+      warnSpy.mockRestore();
+      inputSpy.mockRestore();
+    });
+
+    it('delete re-checks with lstat: a folder row that is now a link is unlinked, not recursed', async () => {
+      mockWindow.__test_queueWarning('Delete');
+      fakeRawClient.lstat.mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: true });
+
+      await handlers.get('gangway.deleteRemote')!(folderNode('/var/www/app/dir'));
+
+      expect(fakeRawClient.list).not.toHaveBeenCalled();
+      expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
+      expect(fakeRawClient.delete).toHaveBeenCalledWith('/var/www/app/dir');
+    });
+
+    it('a cancelled link delete touches nothing', async () => {
+      mockWindow.__test_queueWarning(undefined);
+
+      await handlers.get('gangway.deleteRemote')!({
+        connectionId: connection.id,
+        entry: { path: '/var/www/app/shared', isDirectory: true, isSymbolicLink: true, size: 0 },
+      });
+
+      expect(fakeRawClient.delete).not.toHaveBeenCalled();
+      expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
+    });
+
+    it('gangway.newFolder under an out-of-root dir link asks with the real path, per operation', async () => {
+      fakeRawClient.realPath.mockImplementation(async (p: string) =>
+        p === '/var/www/app/ext' ? '/etc/ext' : p,
+      );
+      fakeRawClient.stat.mockImplementation(async (p: string) => {
+        if (p.endsWith('/new')) {
+          const err = new Error('ENOENT') as NodeJS.ErrnoException;
+          err.code = 'ENOENT';
+          throw err;
+        }
+        return { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false };
+      });
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+
+      mockWindow.__test_queueInput('new');
+      mockWindow.__test_queueWarning('Continue');
+      await handlers.get('gangway.newFolder')!(folderNode('/var/www/app/ext'));
+      expect(warnSpy).toHaveBeenCalledWith(
+        'This location is really /etc/ext, outside the connection root. Continue?',
+        { modal: true },
+        'Continue',
+      );
+      expect(fakeRawClient.mkdir).toHaveBeenCalledWith('/etc/ext/new', false);
+
+      // Never remembered: the next operation asks again, and a dismissal writes nothing.
+      fakeRawClient.mkdir.mockClear();
+      warnSpy.mockClear();
+      mockWindow.__test_queueInput('new');
+      mockWindow.__test_queueWarning(undefined);
+      await handlers.get('gangway.newFolder')!(folderNode('/var/www/app/ext'));
+      expect(warnSpy).toHaveBeenCalledWith(
+        'This location is really /etc/ext, outside the connection root. Continue?',
+        { modal: true },
+        'Continue',
+      );
+      expect(fakeRawClient.mkdir).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
     it('gangway.deleteRemote retries the whole flow on Retry: recount, reconfirm, then delete and audit', async () => {
       mockWindow.__test_queueInput('dir');
       mockWindow.__test_queueInput('dir');

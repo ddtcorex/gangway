@@ -35,6 +35,7 @@ import {
   assertInsideRoot,
   assertMutatingAllowed,
   chmodRemote,
+  chooseDeleteMode,
   collectDropUploads,
   createRemote,
   duplicateRemote,
@@ -1092,6 +1093,19 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     return connection;
   }
 
+  /**
+   * The out-of-root confirmation for single-target user gestures. Modal,
+   * names the real path, asked per operation and never remembered.
+   */
+  async function confirmOutsideRoot(realPath: string): Promise<boolean> {
+    const choice = await vscode.window.showWarningMessage(
+      `This location is really ${realPath}, outside the connection root. Continue?`,
+      { modal: true },
+      'Continue',
+    );
+    return choice === 'Continue';
+  }
+
   async function runNewRemoteCommand(kind: 'file' | 'dir', node?: RemoteTreeNode): Promise<void> {
     const connection = await requireMutableConnection(node);
     if (!connection) return;
@@ -1107,6 +1121,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       const adapter = await getAdapter(connection);
       const { path: created } = await createRemote(adapter, connection, dirPath, name, kind, auditLog, {
         onAuditError: (message) => output.appendLine(message),
+        confirmOutsideRoot,
       });
       treeProvider.refresh();
       if (kind === 'file') {
@@ -1142,6 +1157,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       const adapter = await getAdapter(connection);
       const { newPath } = await renameRemote(adapter, connection, oldPath, newName, auditLog, {
         onAuditError: (message) => output.appendLine(message),
+        confirmOutsideRoot,
       });
       treeProvider.refresh();
       await vscode.window.showInformationMessage(`Renamed to ${newPath}.`);
@@ -1154,7 +1170,8 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     const entries = mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName);
     let count = 0;
     for (const entry of entries) {
-      if (entry.isDirectory) count += await countRemoteFiles(adapter, entry.path);
+      // A link is counted as one entry, never walked: it is unlinked, not recursed.
+      if (entry.isDirectory && !entry.isSymbolicLink) count += await countRemoteFiles(adapter, entry.path);
       else count += 1;
     }
     return count;
@@ -1171,7 +1188,25 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     try {
       const adapter = await getAdapter(connection);
       assertInsideRoot(connection, target);
-      if (!node.entry.isDirectory) {
+      // The tree row can be stale, and stat follows links: lstat now is the
+      // authority on whether this path is itself a link.
+      const isLinkNow = (await adapter.lstat(target)).isSymbolicLink;
+      const mode = chooseDeleteMode({
+        isDirectory: node.entry.isDirectory,
+        isSymbolicLink: node.entry.isSymbolicLink || isLinkNow,
+      });
+      if (mode === 'link') {
+        // Unlink only: never count, never rmdir, never a trailing slash
+        // (which would resolve through the link to its target).
+        const linkPath = target.length > 1 ? target.replace(/\/+$/, '') : target;
+        const choice = await vscode.window.showWarningMessage(
+          `Delete the link ${path.posix.basename(linkPath)}? The target is not touched.`,
+          { modal: true },
+          'Delete',
+        );
+        if (choice !== 'Delete') return;
+        await adapter.delete(linkPath);
+      } else if (mode === 'file') {
         const choice = await vscode.window.showWarningMessage(
           `Permanently delete ${target} on "${connection.name}"? There is no undo.`,
           'Delete',
@@ -1216,6 +1251,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       const adapter = await getAdapter(connection);
       const { path: dupPath } = await duplicateRemote(adapter, connection, node.entry.path, auditLog, {
         onAuditError: (message) => output.appendLine(message),
+        confirmOutsideRoot,
       });
       treeProvider.refresh();
       await vscode.window.showInformationMessage(`Duplicated to ${dupPath}.`);
@@ -1233,7 +1269,11 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     }
     const connection = await requireMutableConnection(node);
     if (!connection) return;
-    const picked = await vscode.window.showQuickPick(CHMOD_PRESETS, { placeHolder: 'Choose a mode' });
+    // SFTP setstat follows links: on a link row the mode lands on the target.
+    const placeHolder = node.entry.isSymbolicLink
+      ? 'Choose a mode for the link target (the link itself is not changed)'
+      : 'Choose a mode';
+    const picked = await vscode.window.showQuickPick(CHMOD_PRESETS, { placeHolder });
     if (!picked) return;
     let mode: string | undefined;
     if (picked === 'Custom…') {
@@ -1248,6 +1288,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       const adapter = await getAdapter(connection);
       await chmodRemote(adapter, connection, node.entry.path, mode, auditLog, {
         onAuditError: (message) => output.appendLine(message),
+        confirmOutsideRoot,
       });
       treeProvider.refresh();
       await vscode.window.showInformationMessage(`Changed mode of ${node.entry.path} to ${mode}.`);
@@ -1307,7 +1348,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
               resolveFileConflict(adapter, connection.id, stagingPath as string, remotePath, conflictUi),
             auditLog,
           },
-          { signal, onAuditError: (message) => output.appendLine(message) },
+          { signal, onAuditError: (message) => output.appendLine(message), confirmOutsideRoot },
         ).then((r) => {
           reportProgress(destDir);
           return r;
