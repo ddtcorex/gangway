@@ -369,6 +369,92 @@ describe('activate - realistic command invocation', () => {
     }
   });
 
+  describe('gangway.downloadFolder through a directory link', () => {
+    const linkFolder = (p: string) => ({
+      connectionId: connection.id,
+      entry: { path: p, isDirectory: true, isSymbolicLink: true, size: 0 },
+    });
+    const outside = () =>
+      fakeRawClient.realPath.mockImplementation(async (p: string) =>
+        p === '/var/www/app/shared' ? '/srv/other' : p,
+      );
+
+    it('asks with the real path for a link that leaves the root and downloads after Download', async () => {
+      outside();
+      fakeRawClient.list.mockImplementation(async (d: string) =>
+        d === '/var/www/app/shared' ? [{ name: 'a.php', type: '-' }] : [],
+      );
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      mockWindow.__test_queueWarning('Download');
+
+      await handlers.get('gangway.downloadFolder')!(linkFolder('/var/www/app/shared'));
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        'This folder is a link to /srv/other, outside the connection root. Download its contents anyway?',
+        { modal: true },
+        'Download',
+      );
+      expect(fakeRawClient.fastGet).toHaveBeenCalledWith('/var/www/app/shared/a.php', expect.any(String));
+      warnSpy.mockRestore();
+    });
+
+    it('cancel downloads nothing and shows no error dialog', async () => {
+      outside();
+      const errSpy = vi.spyOn(vscode.window, 'showErrorMessage');
+      mockWindow.__test_queueWarning(undefined);
+
+      await handlers.get('gangway.downloadFolder')!(linkFolder('/var/www/app/shared'));
+
+      expect(fakeRawClient.list).not.toHaveBeenCalled();
+      expect(fakeRawClient.fastGet).not.toHaveBeenCalled();
+      expect(errSpy).not.toHaveBeenCalled();
+      errSpy.mockRestore();
+    });
+
+    it('an in-root link and a plain folder get no prompt; only the link costs a resolve', async () => {
+      fakeRawClient.list.mockResolvedValue([]);
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+
+      await handlers.get('gangway.downloadFolder')!(linkFolder('/var/www/app/shared'));
+      expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('outside the connection root'), expect.anything(), expect.anything());
+      expect(fakeRawClient.list).toHaveBeenCalledWith('/var/www/app/shared');
+
+      fakeRawClient.realPath.mockClear();
+      await handlers.get('gangway.downloadFolder')!({
+        connectionId: connection.id,
+        entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 },
+      });
+      expect(fakeRawClient.realPath).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it('a broken or looping link shows a plain warning without Retry or the clicked path', async () => {
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      const errSpy = vi.spyOn(vscode.window, 'showErrorMessage');
+      fakeRawClient.realPath.mockImplementation(async () => undefined);
+      fakeRawClient.lstat.mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: true });
+
+      await handlers.get('gangway.downloadFolder')!(linkFolder('/var/www/app/shared'));
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0]).toHaveLength(1);
+      expect(String(warnSpy.mock.calls[0][0])).toContain('shared');
+      expect(String(warnSpy.mock.calls[0][0])).not.toContain('/var/www/app/shared');
+
+      warnSpy.mockClear();
+      fakeRawClient.realPath.mockImplementation(async () => {
+        throw Object.assign(new Error('loop'), { code: 'ELOOP' });
+      });
+      await handlers.get('gangway.downloadFolder')!(linkFolder('/var/www/app/shared'));
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0]).toHaveLength(1);
+      expect(String(warnSpy.mock.calls[0][0])).not.toContain('/var/www/app/shared');
+      expect(errSpy).not.toHaveBeenCalled();
+      expect(fakeRawClient.list).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+      errSpy.mockRestore();
+    });
+  });
+
   it('gangway.downloadFolder warns and never touches the network when invoked with no node', async () => {
     const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
     const handler = handlers.get('gangway.downloadFolder')!;

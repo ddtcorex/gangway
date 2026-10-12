@@ -11,7 +11,7 @@ import { AuditLog } from './auditLog';
 import { checkConflict } from './conflictGuard';
 import { readSidecar, writeSidecar } from './tmpStore';
 import { preparePush } from './pushTarget';
-import { BrokenLinkError, LinkLoopError, LinkRetargetedError } from './realTarget';
+import { BrokenLinkError, LinkLoopError, LinkRetargetedError, resolveTarget } from './realTarget';
 import { createDestinationGate } from './destinationGate';
 import { purgeExpiredTmp, sweepUnknownTmpRoots } from './tmpRetention';
 import { tmpFilePathFor, tmpRootFor, connectionSlug, sidecarPathFor } from './tmpPath';
@@ -865,6 +865,31 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     const fs = (await import('node:fs/promises')).default;
     try {
       const adapter = await getAdapter(connection);
+      if (node.entry.isSymbolicLink && node.entry.isDirectory) {
+        // A directory link can lead anywhere on the server: name the real
+        // folder before pulling its contents. One resolve, link nodes only.
+        const name = path.posix.basename(remotePath);
+        let resolved;
+        try {
+          resolved = await resolveTarget(adapter, connection, remotePath);
+        } catch (err) {
+          if (err instanceof BrokenLinkError || err instanceof LinkLoopError) {
+            await vscode.window.showWarningMessage(
+              err instanceof BrokenLinkError ? `${name} is a broken link` : `${name} is a symbolic link loop`,
+            );
+            return;
+          }
+          throw err;
+        }
+        if (!resolved.insideRoot) {
+          const choice = await vscode.window.showWarningMessage(
+            `This folder is a link to ${resolved.realPath}, outside the connection root. Download its contents anyway?`,
+            { modal: true },
+            'Download',
+          );
+          if (choice !== 'Download') return;
+        }
+      }
       const result = await withCancellableProgress(`Downloading ${remotePath}`, (signal, reportProgress) =>
         runFolderDownload(
           { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 },
