@@ -350,9 +350,25 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
    */
   const linkCache = new LinkCache();
 
+  /**
+   * In-flight link resolution per listed directory. A newer listing of the
+   * same directory supersedes (aborts) the older one; deactivation and
+   * connection invalidation abort what is left.
+   */
+  const linkResolutions = new Map<string, AbortController>();
+
+  function abortLinkResolutions(prefix = ''): void {
+    for (const [key, controller] of [...linkResolutions]) {
+      if (!key.startsWith(prefix)) continue;
+      controller.abort();
+      linkResolutions.delete(key);
+    }
+  }
+
   /** Drops the pooled client and every link resolved through it. */
   function invalidateConnection(connectionId: string): void {
     pool.invalidate(connectionId);
+    abortLinkResolutions(`${connectionId}\0`);
     linkCache.clearPrefix(`${connectionId}\0`);
   }
 
@@ -377,11 +393,20 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     },
     async (connection, dirPath) => {
       const adapter = await getAdapter(connection);
-      return resolveLinkEntries(
-        adapter,
-        mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName),
-        { cache: linkCache, cacheKey: (entry) => `${connection.id}\0${entry.path}` },
-      );
+      const entries = mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName);
+      const resolutionKey = `${connection.id}\0${dirPath}`;
+      linkResolutions.get(resolutionKey)?.abort();
+      const controller = new AbortController();
+      linkResolutions.set(resolutionKey, controller);
+      try {
+        return await resolveLinkEntries(adapter, entries, {
+          cache: linkCache,
+          cacheKey: (entry) => `${connection.id}\0${entry.path}`,
+          signal: controller.signal,
+        });
+      } finally {
+        if (linkResolutions.get(resolutionKey) === controller) linkResolutions.delete(resolutionKey);
+      }
     },
     (connectionId, remotePath) => {
       const connection = connectionManager.list().find((c) => c.id === connectionId);
@@ -2591,6 +2616,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     // Pooled sockets and idle timers are extension-host resources: dropping
     // them here keeps a window reload from orphaning live connections.
     { dispose: () => void pool.dispose() },
+    { dispose: () => abortLinkResolutions() },
     vscode.commands.registerCommand('gangway.downloadFile', runDownloadFileCommand),
     vscode.commands.registerCommand('gangway.uploadFile', (nodeOrLocalPath?: RemoteTreeNode | string, remotePathArg?: string) => runUploadFileCommand(nodeOrLocalPath, remotePathArg)),
     vscode.commands.registerCommand('gangway.manageRemotes', () => openManageRemotesPanel(getActiveConnection())),

@@ -134,6 +134,9 @@ export async function resolveLinkEntries(
         } catch {
           link = { realPath: entry.path, kind: 'unresolved' };
         }
+        // A superseded or cancelled batch is discarded whole: nothing it
+        // resolved after the abort is cached or written back.
+        if (signal?.aborted) return;
         options.cache?.set(key, link);
       }
       // Only an ancestor loop is expandable; a loop reported by the server is not.

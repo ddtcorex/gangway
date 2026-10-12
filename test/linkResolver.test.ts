@@ -340,3 +340,34 @@ describe('resolveLinkEntries with a cache', () => {
     expect(realPath).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('resolveLinkEntries cancellation', () => {
+  it('an aborted batch returns without throwing and caches nothing resolved after the abort', async () => {
+    const cache = new LinkCache();
+    const ctrl = new AbortController();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const realPath = vi.fn(async (p: string) => {
+      await gate;
+      return p;
+    });
+    const c = client({ realPath });
+    const entries = Array.from({ length: 20 }, (_, i) => linkEntry(`/l/${i}`));
+    const run = resolveLinkEntries(c, entries, { cache, signal: ctrl.signal, concurrency: 4 });
+    await Promise.resolve();
+    ctrl.abort();
+    release();
+    const out = await run;
+    expect(out).toHaveLength(20);
+    expect(realPath.mock.calls.length).toBe(4);
+    for (let i = 0; i < 20; i++) expect(cache.get(`/l/${i}`)).toBeUndefined();
+  });
+
+  it('an already-aborted signal makes no client call', async () => {
+    const ctrl = new AbortController();
+    ctrl.abort();
+    const realPath = vi.fn(async (p: string) => p);
+    await resolveLinkEntries(client({ realPath }), [linkEntry('/l/a')], { signal: ctrl.signal });
+    expect(realPath).not.toHaveBeenCalled();
+  });
+});

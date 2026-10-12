@@ -1992,6 +1992,67 @@ describe('activate - realistic command invocation', () => {
       expect(fakeRawClient.realPath.mock.calls.length).toBeGreaterThan(first);
     });
 
+    describe('link resolution cancellation', () => {
+      const manyLinks = (n: number) => Array.from({ length: n }, (_, i) => ({ name: `ln${i}`, type: 'l' }));
+      function gatedRealPath() {
+        let release!: () => void;
+        const gate = new Promise<void>((r) => (release = r));
+        fakeRawClient.realPath.mockImplementation(async (p: string) => {
+          await gate;
+          return p;
+        });
+        return release;
+      }
+      const settle = () => new Promise((r) => setTimeout(r, 0));
+
+      it('a second listing of the same directory aborts the first, whose result carries no link info', async () => {
+        const provider = capturedProvider as { getChildren: (n?: unknown) => Promise<Array<{ entry: { link?: unknown } }>> };
+        fakeRawClient.list.mockResolvedValue(manyLinks(20));
+        const release = gatedRealPath();
+        const dir = nodeFor('/var/www/app', true);
+
+        const first = provider.getChildren(dir);
+        await settle();
+        const second = provider.getChildren(dir);
+        await settle();
+        release();
+        const [a, b] = await Promise.all([first, second]);
+
+        expect(a.every((n) => n.entry.link === undefined)).toBe(true);
+        expect(b.every((n) => n.entry.link !== undefined)).toBe(true);
+        // 8 in flight for the superseded batch, then all 20 for the winner.
+        expect(fakeRawClient.realPath.mock.calls.length).toBe(8 + 20);
+      });
+
+      it('disposing the extension aborts in-flight resolution and caches nothing', async () => {
+        const ctx = fakeContext();
+        const second = activate(ctx);
+        const conn = await second.connectionManager.add({
+          name: 'other',
+          host: 'example.org',
+          port: 22,
+          username: 'deploy',
+          remotePath: '/var/www',
+          authMethod: 'password',
+        });
+        const provider = capturedProvider as { getChildren: (n?: unknown) => Promise<unknown[]> };
+        fakeRawClient.list.mockResolvedValue(manyLinks(20));
+        const release = gatedRealPath();
+        const dir = { connectionId: conn.id, entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 } };
+
+        const pending = provider.getChildren(dir);
+        await settle();
+        for (const d of ctx.subscriptions) d.dispose();
+        release();
+        await pending;
+        expect(fakeRawClient.realPath.mock.calls.length).toBe(8);
+
+        fakeRawClient.realPath.mockClear().mockImplementation(async (p: string) => p);
+        await provider.getChildren(dir);
+        expect(fakeRawClient.realPath.mock.calls.length).toBe(20);
+      });
+    });
+
     it('gangway.uploadFile accepts a tree file node, resolving paths through the tmp mirror', async () => {
       const localFile = tmpFilePathFor(connection, '/var/www/app/config.php');
       await fs.mkdir(path.dirname(localFile), { recursive: true });
