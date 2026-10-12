@@ -1172,6 +1172,58 @@ describe('activate - realistic command invocation', () => {
       warnSpy.mockRestore();
     });
 
+    describe('multi-select', () => {
+      const row = (p: string) => ({ connectionId: connection.id, entry: { path: p, isDirectory: false, isSymbolicLink: false, size: 1 } });
+      const destNode = () => ({ connectionId: connection.id, entry: { path: '/var/www/other', isDirectory: true, isSymbolicLink: false, size: 0 } });
+      const stats = () =>
+        fakeRawClient.stat.mockImplementation(async (p: string) => {
+          if (p === '/var/www/other') return { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false };
+          if (['/var/www/app/a.php', '/var/www/app/b.php', '/var/www/app/c.php'].includes(p)) {
+            return { size: 1, modifyTime: 1, isDirectory: false, isSymbolicLink: false };
+          }
+          throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+        });
+
+      it('cut acts on the whole selection when the clicked row is part of it', async () => {
+        stats();
+        const a = row('/var/www/app/a.php');
+        const b = row('/var/www/app/b.php');
+        await (handlers.get('gangway.cutEntries') as (...args: unknown[]) => Promise<void>)(a, [a, b]);
+        await handlers.get('gangway.pasteEntries')!(destNode());
+        expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/app/a.php', '/var/www/other/a.php');
+        expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/app/b.php', '/var/www/other/b.php');
+      });
+
+      it('copy acts on the clicked row alone when it is outside the selection', async () => {
+        stats();
+        const a = row('/var/www/app/a.php');
+        const b = row('/var/www/app/b.php');
+        const c = row('/var/www/app/c.php');
+        const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+        await (handlers.get('gangway.copyEntries') as (...args: unknown[]) => Promise<void>)(c, [a, b]);
+        expect(infoSpy).toHaveBeenCalledWith('Copied 1 item(s).');
+        infoSpy.mockRestore();
+      });
+
+      it('download, rename and chmod still act on the clicked row only', async () => {
+        stats();
+        const a = row('/var/www/app/a.php');
+        const b = row('/var/www/app/b.php');
+        await (handlers.get('gangway.downloadFile') as (...args: unknown[]) => Promise<void>)(a, [a, b]);
+        expect(fakeRawClient.fastGet.mock.calls.map((c) => c[0])).toEqual(['/var/www/app/a.php']);
+
+        mockWindow.__test_queueInput('renamed.php');
+        await (handlers.get('gangway.renameRemote') as (...args: unknown[]) => Promise<void>)(a, [a, b]);
+        expect(fakeRawClient.posixRename).toHaveBeenCalledTimes(1);
+        expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/app/a.php', '/var/www/app/renamed.php');
+
+        mockWindow.__test_queuePick('644 (files)');
+        await (handlers.get('gangway.chmodRemote') as (...args: unknown[]) => Promise<void>)(a, [a, b]);
+        expect(fakeRawClient.chmod).toHaveBeenCalledTimes(1);
+        expect(fakeRawClient.chmod.mock.calls[0][0]).toBe('/var/www/app/a.php');
+      });
+    });
+
     it('cut then paste moves server-side with no re-upload', async () => {
       fakeRawClient.stat.mockImplementation(async (p: string) => {
         if (p === '/var/www/other') return { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false };

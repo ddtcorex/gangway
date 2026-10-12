@@ -1433,6 +1433,20 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   /** The tree clipboard: cut/copy names connections, paste resolves them. Local state only. */
   let clipboard: ClipboardState = clearClipboard();
 
+  /**
+   * With multi-select on, VS Code passes (clickedRow, selectedRows). Cut and
+   * copy act on the whole selection when the clicked row is part of it, and on
+   * the clicked row alone otherwise (a right-click outside the selection).
+   */
+  function selectionFor(
+    node: RemoteTreeNode | RemoteTreeNode[] | undefined,
+    selected: RemoteTreeNode[] | undefined,
+  ): RemoteTreeNode | RemoteTreeNode[] | undefined {
+    if (node === undefined || Array.isArray(node) || !Array.isArray(selected) || selected.length === 0) return node;
+    const clicked = node.entry?.path;
+    return selected.some((row) => row.entry?.path === clicked) ? selected : node;
+  }
+
   async function runCutCopyCommand(cut: boolean, node?: RemoteTreeNode | RemoteTreeNode[]): Promise<void> {
     const nodes = node === undefined ? [] : Array.isArray(node) ? node : [node];
     if (nodes.length === 0) {
@@ -2692,8 +2706,12 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     vscode.commands.registerCommand('gangway.deleteRemote', runDeleteRemoteCommand),
     vscode.commands.registerCommand('gangway.duplicateRemote', runDuplicateRemoteCommand),
     vscode.commands.registerCommand('gangway.chmodRemote', runChmodRemoteCommand),
-    vscode.commands.registerCommand('gangway.cutEntries', (node?: RemoteTreeNode | RemoteTreeNode[]) => runCutCopyCommand(true, node)),
-    vscode.commands.registerCommand('gangway.copyEntries', (node?: RemoteTreeNode | RemoteTreeNode[]) => runCutCopyCommand(false, node)),
+    vscode.commands.registerCommand('gangway.cutEntries', (node?: RemoteTreeNode | RemoteTreeNode[], selected?: RemoteTreeNode[]) =>
+      runCutCopyCommand(true, selectionFor(node, selected)),
+    ),
+    vscode.commands.registerCommand('gangway.copyEntries', (node?: RemoteTreeNode | RemoteTreeNode[], selected?: RemoteTreeNode[]) =>
+      runCutCopyCommand(false, selectionFor(node, selected)),
+    ),
     vscode.commands.registerCommand('gangway.pasteEntries', runPasteEntriesCommand),
     vscode.commands.registerCommand('gangway.syncFolder', runSyncFolderCommand),
     vscode.commands.registerCommand('gangway.syncWorkspaceUp', () => runSyncWorkspaceCommand('up')),
