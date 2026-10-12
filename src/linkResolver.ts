@@ -1,6 +1,6 @@
 import type { RemoteEntry } from './folderQueue';
 import type { RemoteStat } from './types';
-import { isNotFoundError } from './remoteOps';
+import { isNotFoundError } from './remotePathUtils';
 
 export type LinkKind = 'file' | 'dir' | 'broken' | 'loop' | 'unresolved';
 

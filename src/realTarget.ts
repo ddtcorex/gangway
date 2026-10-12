@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { isLoopError } from './linkResolver';
-import { isLexicallyInside, isNotFoundError } from './remoteOps';
+import { isLexicallyInside, isNotFoundError } from './remotePathUtils';
 import type { ConnectionConfig, RemoteStat } from './types';
 
 /** The client surface target resolution needs. SftpClientAdapter satisfies it. */
