@@ -2,6 +2,7 @@ import { runTests } from '@vscode/test-electron';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { seedLinks } from './fixtures/seedLinks';
 
 const SEED_CONTENT = "<?php echo 'v1';";
 
@@ -32,6 +33,9 @@ async function resetFixture(): Promise<void> {
     await fs.mkdir(path.join(fixtureDir, 'node_modules'), { recursive: true });
     await fs.writeFile(path.join(fixtureDir, 'node_modules', 'skip.js'), 'skip me', 'utf8');
     await fs.writeFile(path.join(fixtureDir, 'conflict.php'), "<?php echo 'base';", 'utf8');
+    // Symlink seeds under nested/ (file, dir, relative, broken, loop pair,
+    // ancestor loop): see test/fixtures/seedLinks.ts.
+    await seedLinks(fixtureDir);
     // Prior runs leave e2e scratch dirs in the bind mount: sweep them so
     // every run starts from the same tree. (Trash/backup roots are gone:
     // the extension no longer creates them, so they are not swept.)
