@@ -637,8 +637,24 @@ export async function pasteEntries(
           continue;
         }
       }
-      if (clipboard.cut) await client.posixRename(realSource, dest);
-      else await client.fastPut(stagingPath as string, dest);
+      if (clipboard.cut) {
+        await client.posixRename(realSource, dest);
+        // Local tmp copies and sidecars are keyed on the clicked paths, like
+        // rename: without this a later push would recreate the old path. The
+        // move already happened, so a local bookkeeping failure is only logged.
+        try {
+          await remapSidecarsForRename(
+            connection,
+            sourcePath,
+            joinRoot(destDir, path.posix.basename(sourcePath)),
+            sourceStat.isDirectory,
+          );
+        } catch (err) {
+          (options.onAuditError ?? noop)(`Could not move local copies of ${sourcePath}: ${(err as Error).message}`);
+        }
+      } else {
+        await client.fastPut(stagingPath as string, dest);
+      }
       pasted.push(dest);
       await appendAudit(
         deps.auditLog,
