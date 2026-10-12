@@ -92,7 +92,7 @@ remote tree's context menu or in the Command Palette under `Gangway:`.
   (turn it off with `gangway.confirmDragAndDrop`), and when two or more items
   already exist at the destination it asks once: review each, skip them, or
   cancel. There is no overwrite-all, a folder cannot be moved into itself, and
-  links are never moved. Dragging between the remote tree and the local
+  a dragged link row is never moved. Dragging between the remote tree and the local
   Explorer or the OS is not supported; use the upload and download commands.
   `Copy Remote Path` grabs a server path for the terminal.
 - **Freeze production.** Toggling freeze on a connection refuses every
