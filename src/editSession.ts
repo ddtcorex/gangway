@@ -91,7 +91,15 @@ export async function acquireEditSession(localPath: string): Promise<void> {
   await fs.writeFile(lockPathFor(localPath), JSON.stringify(owner), 'utf8');
 }
 
-export async function releaseEditSession(localPath: string): Promise<void> {
+/**
+ * Removes the lock only when it is ours to remove: missing, torn, owned by
+ * this process, or owned by a process that is gone. A live lock owned by
+ * another window is left alone, otherwise a close event in a window that
+ * never claimed the file would disable that window's cross-window warning.
+ */
+export async function releaseEditSession(localPath: string, isAlive: (pid: number) => boolean = defaultIsAlive): Promise<void> {
+  const owner = await readLock(localPath);
+  if (owner && owner.pid !== process.pid && isAlive(owner.pid)) return;
   try {
     await fs.rm(lockPathFor(localPath));
   } catch (err) {

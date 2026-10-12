@@ -130,6 +130,48 @@ describe('EditLockRegistry', () => {
   });
 });
 
+describe('releaseEditSession ownership', () => {
+  const lock = () => `${file}.gangway-session.json`;
+  const writeLock = (pid: number) => fs.writeFile(lock(), JSON.stringify({ pid, startedAt: 1 }), 'utf8');
+
+  it('removes a lock owned by this process', async () => {
+    await acquireEditSession(file);
+    await releaseEditSession(file);
+    await expect(fs.access(lock())).rejects.toThrow();
+  });
+
+  it('keeps a lock owned by another live process', async () => {
+    await writeLock(424242);
+    await releaseEditSession(file, (pid) => pid === 424242);
+    await expect(fs.access(lock())).resolves.toBeUndefined();
+  });
+
+  it('removes a lock whose foreign owner is dead', async () => {
+    await writeLock(424242);
+    await releaseEditSession(file, () => false);
+    await expect(fs.access(lock())).rejects.toThrow();
+  });
+
+  it('removes a torn lock', async () => {
+    await fs.writeFile(lock(), '{"pid":', 'utf8');
+    await releaseEditSession(file, () => true);
+    await expect(fs.access(lock())).rejects.toThrow();
+  });
+
+  it('does not error when the lock is missing', async () => {
+    await expect(releaseEditSession(file)).resolves.toBeUndefined();
+  });
+
+  it('registry release keeps a remote lock now owned by another live pid', async () => {
+    const reg = new EditLockRegistry();
+    const remote = remoteLockBase(tmpDir, 'conn-1', '/srv/app/real.php');
+    await reg.claim(file, remote);
+    await fs.writeFile(`${remote}.gangway-session.json`, JSON.stringify({ pid: process.ppid, startedAt: 1 }), 'utf8');
+    await reg.release(file);
+    await expect(fs.access(`${remote}.gangway-session.json`)).resolves.toBeUndefined();
+  });
+});
+
 describe('remoteBaseForSidecar', () => {
   const conn = { id: 'c1', host: 'h', username: 'u', port: 22, remotePath: '/srv' };
 
