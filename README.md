@@ -86,9 +86,15 @@ remote tree's context menu or in the Command Palette under `Gangway:`.
   confirm says so, and folders additionally require typing the name. Uploads
   overwrite directly, with no server-side backup copy.
 - **Clipboard and drag and drop.** Cut, copy, and paste entries inside the
-  remote tree, or drop files from the local Explorer or the OS onto a remote
-  folder to upload them. `Copy Remote Path` grabs a server path for the
-  terminal.
+  remote tree, or select one or more rows (Ctrl or Shift) and drag them onto
+  a folder to move them. A drop on a file lands in that file's folder, a drop
+  on empty space in the connection root. A drop asks for confirmation first
+  (turn it off with `gangway.confirmDragAndDrop`), and when two or more items
+  already exist at the destination it asks once: review each, skip them, or
+  cancel. There is no overwrite-all, a folder cannot be moved into itself, and
+  links are never moved. Dragging between the remote tree and the local
+  Explorer or the OS is not supported; use the upload and download commands.
+  `Copy Remote Path` grabs a server path for the terminal.
 - **Freeze production.** Toggling freeze on a connection refuses every
   mutating op until it is unlocked. Govard `protected` remotes import frozen.
 - **Sync with preview.** Sync a folder, or the whole workspace via path
