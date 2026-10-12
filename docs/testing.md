@@ -70,15 +70,20 @@ host-only dir appears.
    listener was ever attached. Both bugs predated this repo's CI entirely
    (the script was never wired into anything, so nobody ran it) -- it is now
    gated in CI's `e2e` job specifically so that stops happening again.
-8. **A real SFTP server speaks numeric codes, never `ENOENT`.**
-   `ssh2-sftp-client` surfaces failures like `'2'` (= NO_SUCH_FILE) with
-   no `code`/`errno` fields, so any not-found check that only matches
-   `ENOENT` passes against mocks and dies on the first live run (found
-   2026-09-19: trash/inventory/sweep + the sync walk all broke in CI's
-   e2e while every unit test stayed green). Centralize the spelling in
-   one helper (`isNotFoundError`: `ENOENT` | `'2'` | `/no such file/`)
-   and prove it with a docker-integration or e2e run -- mocks encode the
-   author's assumption, which is exactly what is being tested.
+8. **A real SFTP server does not answer "not found" in one spelling.**
+   What `ssh2-sftp-client` surfaces depends on the call: `stat`, `lstat`
+   and `exists` map SFTP status 2 (NO_SUCH_FILE) to `code: 'ENOENT'`
+   (pinned in `test/links.integration.test.ts`), `realPath` resolves `''`
+   instead of rejecting, and most other calls (`list`, `get`, `delete`,
+   `rename`, ...) carry the raw status as `code: 2` with a "No such file"
+   message. So a not-found check that only matches `ENOENT` passes against
+   mocks and dies on the first live run (found 2026-09-19:
+   trash/inventory/sweep + the sync walk all broke in CI's e2e while every
+   unit test stayed green). Centralize the spelling in one helper
+   (`isNotFoundError`: `ENOENT` | `'2'` | `/no such file/`, so every form
+   above matches) and prove it with a docker-integration or e2e run --
+   mocks encode the author's assumption, which is exactly what is being
+   tested.
 9. **Symlink seeds are real links, and OpenSSH answers differently from a
    textbook.** `test/fixtures/seedLinks.ts` writes relative links under
    `sftp-data/nested/` from the host (`resetFixture` calls it, and

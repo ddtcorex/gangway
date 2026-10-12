@@ -75,8 +75,12 @@ async function fallbackOnRealPathError(client: TargetClient, p: string, err: unk
   try {
     await client.stat(p);
   } catch (statErr) {
-    // OpenSSH often reports ELOOP as a generic failure on realpath; the stat
-    // probe surfaces the loop with a clearer message.
+    // Only a server that reports a loop as such on stat is refused as a
+    // loop here. OpenSSH does not surface loops at all: it maps ELOOP to
+    // NO_SUCH_FILE, so realpath answers "missing" (no rejection, this path is
+    // not reached) and stat rejects as "No such file" (code ENOENT). A loop
+    // pair there is refused as a broken link by the lstat check instead
+    // (pinned in links.integration.test.ts).
     if (isLoopError(statErr)) throw new LinkLoopError(p);
     throw err;
   }

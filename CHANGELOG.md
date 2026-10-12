@@ -9,7 +9,9 @@ breaking changes are marked `BREAKING:`.
 
 - Remote symlinks are supported in the tree: a directory link expands, a file
   link opens and edits like a file, and the tooltip shows the real target.
-  Broken links and loops are dimmed and explain themselves on click.
+  Broken links and loops are dimmed and explain themselves on click (on
+  OpenSSH a pair of links pointing at each other reports as "no such file",
+  so it is shown as a broken link rather than a loop).
 - Edits through a link are pushed to the real target with the usual temp and
   rename overwrite, so the link is never replaced by a regular file. A push
   is stopped if the link now points somewhere else than when it was opened,
