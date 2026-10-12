@@ -753,6 +753,41 @@ describe('activate - realistic command invocation', () => {
       inputSpy.mockRestore();
     });
 
+    it('deletes a dangling link by unlinking it: only the parent is resolved, never the link, never rmdir', async () => {
+      const linkPath = '/var/www/app/dangling';
+      fakeRawClient.lstat.mockImplementation(async (p: string) => {
+        if (p === linkPath) return { size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: true };
+        return { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false };
+      });
+      fakeRawClient.stat.mockImplementation(async (p: string) => {
+        if (p === linkPath) throw Object.assign(new Error('No such file'), { code: 2 });
+        return { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false };
+      });
+      fakeRawClient.realPath.mockImplementation(async (p: string) => {
+        if (p === linkPath) throw Object.assign(new Error('No such file'), { code: 2 });
+        return p;
+      });
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      mockWindow.__test_queueWarning('Delete');
+
+      await handlers.get('gangway.deleteRemote')!({
+        connectionId: connection.id,
+        entry: { path: linkPath, isDirectory: false, isSymbolicLink: true, size: 0, link: { realPath: linkPath, kind: 'broken' } },
+      });
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        'Delete the link dangling? The target is not touched.',
+        { modal: true },
+        'Delete',
+      );
+      expect(fakeRawClient.delete).toHaveBeenCalledTimes(1);
+      expect(fakeRawClient.delete).toHaveBeenCalledWith(linkPath);
+      expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
+      expect(fakeRawClient.stat).not.toHaveBeenCalledWith(linkPath);
+      expect(fakeRawClient.realPath).not.toHaveBeenCalledWith(linkPath);
+      warnSpy.mockRestore();
+    });
+
     it('delete re-checks with lstat: a folder row that is now a link is unlinked, not recursed', async () => {
       mockWindow.__test_queueWarning('Delete');
       fakeRawClient.lstat.mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: true });

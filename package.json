@@ -262,6 +262,11 @@
           "group": "4_danger"
         },
         {
+          "command": "gangway.deleteRemote",
+          "when": "view == gangway.remoteExplorer && viewItem == gangway.brokenLink",
+          "group": "4_danger"
+        },
+        {
           "command": "gangway.cutEntries",
           "when": "view == gangway.remoteExplorer && viewItem == gangway.folder",
           "group": "1_clipboard"
