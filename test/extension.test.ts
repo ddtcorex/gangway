@@ -2711,6 +2711,20 @@ describe('activate - realistic command invocation', () => {
         expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
       });
 
+      it('forgets dropped items in an armed cut so a later paste does not move them again', async () => {
+        stats(['/var/www/a.php', '/var/www/b.php'], ['/var/www/dest', '/var/www/dest2']);
+        const a = file('/var/www/a.php');
+        const b = file('/var/www/b.php');
+        await (handlers.get('gangway.cutEntries') as (...args: unknown[]) => Promise<void>)(a, [a, b]);
+        mockWindow.__test_queueWarning('Move');
+
+        await dragAndDrop(['/var/www/a.php'], dir('/var/www/dest'));
+        await handlers.get('gangway.pasteEntries')!(dir('/var/www/dest2'));
+
+        const renames = fakeRawClient.posixRename.mock.calls.map((c) => `${c[0]} -> ${c[1]}`);
+        expect(renames).toEqual(['/var/www/a.php -> /var/www/dest/a.php', '/var/www/b.php -> /var/www/dest2/b.php']);
+      });
+
       it('does not ask, and does nothing, when the drop lands on the current folder', async () => {
         stats(['/var/www/dest/a.php'], ['/var/www/dest']);
         await dragAndDrop(['/var/www/dest/a.php'], dir('/var/www/dest'));

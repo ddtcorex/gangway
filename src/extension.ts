@@ -1584,6 +1584,12 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
           return r;
         }),
       );
+      // An armed cut must not move again what the drop already moved.
+      if (clipboard.cut && clipboard.connectionId === connection.id) {
+        const moved = new Set(plan.movable.filter((p) => !result.skipped.some((skip) => skip.path === p)));
+        const remaining = clipboard.paths.filter((p) => !moved.has(p));
+        clipboard = remaining.length === 0 ? clearClipboard() : { ...clipboard, paths: remaining };
+      }
       refreshTree();
       if (result.skipped.length > 0) {
         for (const skip of result.skipped) output.appendLine(`Move skipped: ${skip.path} (${skip.reason})`);
