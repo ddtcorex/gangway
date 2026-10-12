@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BrokenLinkError,
   gateWriteTarget,
+  LinkLoopError,
   LinkRetargetedError,
   resolveTarget,
   type ResolvedTarget,
@@ -20,16 +22,35 @@ const base: ConnectionConfig = {
 
 const fileStat: RemoteStat = { mtime: 0, size: 1, isDirectory: false, isSymbolicLink: false };
 
+interface FakeOptions {
+  /** realPath rejects with this error for the given path. */
+  realPathErrors?: Record<string, Error>;
+  /** stat rejects with this error for the given path (else stat succeeds when known). */
+  statErrors?: Record<string, Error>;
+  /** Paths that exist as symlinks (lstat says isSymbolicLink) but realPath returns undefined. */
+  dangling?: string[];
+}
+
+const notFound = (): Error => Object.assign(new Error('No such file'), { code: 2 });
+
 /** Fake server: `map` lists every existing path and its real path. */
-function client(map: Record<string, string>, failing: string[] = []): TargetClient {
+function client(map: Record<string, string>, options: FakeOptions = {}): TargetClient {
+  const known = (p: string): boolean => p in map || (options.dangling ?? []).includes(p);
   return {
     realPath: async (p) => {
-      if (failing.includes(p)) throw new Error('Permission denied');
+      const err = options.realPathErrors?.[p];
+      if (err) throw err;
       return map[p];
     },
     stat: async (p) => {
+      const err = options.statErrors?.[p];
+      if (err) throw err;
       if (p in map) return fileStat;
-      throw Object.assign(new Error('No such file'), { code: 2 });
+      throw notFound();
+    },
+    lstat: async (p) => {
+      if (!known(p)) throw notFound();
+      return { ...fileStat, isSymbolicLink: (options.dangling ?? []).includes(p) };
     },
   };
 }
@@ -88,7 +109,10 @@ describe('resolveTarget', () => {
   });
 
   it('realpath failure falls back to the clicked path with resolved false', async () => {
-    const c = client({ '/srv/app': '/srv/app', '/srv/app/a.php': '/srv/app/a.php' }, ['/srv/app/a.php']);
+    const c = client(
+      { '/srv/app': '/srv/app', '/srv/app/a.php': '/srv/app/a.php' },
+      { realPathErrors: { '/srv/app/a.php': new Error('Permission denied') } },
+    );
     expect(await resolveTarget(c, base, '/srv/app/a.php')).toEqual({
       clickedPath: '/srv/app/a.php',
       realPath: '/srv/app/a.php',
@@ -99,10 +123,94 @@ describe('resolveTarget', () => {
   });
 
   it('root realpath failure falls back lexically for the root only', async () => {
-    const c = client({ '/srv/app/a.php': '/srv/app/a.php' }, ['/srv/app']);
+    const c = client(
+      { '/srv/app': '/srv/app', '/srv/app/a.php': '/srv/app/a.php' },
+      { realPathErrors: { '/srv/app': new Error('Permission denied') } },
+    );
     const target = await resolveTarget(c, base, '/srv/app/a.php');
     expect(target.resolved).toBe(true);
     expect(target.insideRoot).toBe(true);
+  });
+});
+
+describe('resolveTarget fails closed', () => {
+  it('dangling link is refused, not treated as a new file', async () => {
+    const c = client({ '/srv/app': '/srv/app' }, { dangling: ['/srv/app/config.php'] });
+    const err = await resolveTarget(c, base, '/srv/app/config.php').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BrokenLinkError);
+    expect((err as BrokenLinkError).clickedPath).toBe('/srv/app/config.php');
+  });
+
+  it('genuinely new file under a real parent still resolves via the parent', async () => {
+    const c = client({ '/srv/app': '/srv/app', '/srv/app/dir': '/srv/app/dir' });
+    expect(await resolveTarget(c, base, '/srv/app/dir/new.php')).toEqual({
+      clickedPath: '/srv/app/dir/new.php',
+      realPath: '/srv/app/dir/new.php',
+      viaLink: false,
+      insideRoot: true,
+      resolved: true,
+    });
+  });
+
+  it('loop error on realpath throws LinkLoopError', async () => {
+    const loop = Object.assign(new Error('Too many levels of symbolic links'), { code: 'ELOOP' });
+    const c = client(
+      { '/srv/app': '/srv/app' },
+      { realPathErrors: { '/srv/app/loop': loop }, statErrors: { '/srv/app/loop': loop } },
+    );
+    const err = await resolveTarget(c, base, '/srv/app/loop').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LinkLoopError);
+    expect((err as LinkLoopError).clickedPath).toBe('/srv/app/loop');
+  });
+
+  it('loop reported as a generic failure is caught by the stat probe', async () => {
+    const c = client(
+      { '/srv/app': '/srv/app' },
+      {
+        realPathErrors: { '/srv/app/loop': new Error('Failure') },
+        statErrors: { '/srv/app/loop': new Error('Too many levels of symbolic links') },
+      },
+    );
+    await expect(resolveTarget(c, base, '/srv/app/loop')).rejects.toBeInstanceOf(LinkLoopError);
+  });
+
+  it('realpath fails with a generic error and stat also fails rethrows', async () => {
+    const dropped = new Error('Connection lost');
+    const c = client(
+      { '/srv/app': '/srv/app', '/srv/app/a.php': '/srv/app/a.php' },
+      { realPathErrors: { '/srv/app/a.php': dropped }, statErrors: { '/srv/app/a.php': new Error('Connection lost') } },
+    );
+    await expect(resolveTarget(c, base, '/srv/app/a.php')).rejects.toBe(dropped);
+  });
+
+  it('realpath fails with a generic error but stat succeeds falls back to the clicked path with resolved false', async () => {
+    const c = client(
+      { '/srv/app': '/srv/app', '/srv/app/a.php': '/srv/app/a.php' },
+      { realPathErrors: { '/srv/app/a.php': new Error('Operation unsupported') } },
+    );
+    expect(await resolveTarget(c, base, '/srv/app/a.php')).toMatchObject({
+      realPath: '/srv/app/a.php',
+      insideRoot: true,
+      resolved: false,
+    });
+  });
+
+  it('root realpath failing with stat failing rethrows', async () => {
+    const dropped = new Error('Connection lost');
+    const c = client(
+      { '/srv/app': '/srv/app', '/srv/app/a.php': '/srv/app/a.php' },
+      { realPathErrors: { '/srv/app': dropped }, statErrors: { '/srv/app': new Error('Connection lost') } },
+    );
+    await expect(resolveTarget(c, base, '/srv/app/a.php')).rejects.toBe(dropped);
+  });
+
+  it('parent realpath rejection on a new file is not swallowed', async () => {
+    const dropped = new Error('Connection lost');
+    const c = client(
+      { '/srv/app': '/srv/app' },
+      { realPathErrors: { '/srv/app/dir': dropped }, statErrors: { '/srv/app/dir': new Error('Connection lost') } },
+    );
+    await expect(resolveTarget(c, base, '/srv/app/dir/new.php')).rejects.toBe(dropped);
   });
 });
 
@@ -129,5 +237,8 @@ describe('LinkRetargetedError', () => {
     expect(err.message).toContain('/etc/a/conf.ini');
     expect(err.message).toContain('/etc/b/conf.ini');
     expect(err.message).toMatch(/now points elsewhere/);
+    expect(err.clickedPath).toBe('/srv/app/conf.ini');
+    expect(err.storedRealPath).toBe('/etc/a/conf.ini');
+    expect(err.currentRealPath).toBe('/etc/b/conf.ini');
   });
 });

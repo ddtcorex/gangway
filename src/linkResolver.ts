@@ -17,7 +17,7 @@ export interface LinkResolveClient {
 const DEFAULT_CONCURRENCY = 8;
 const LOOP_RE = /loop|too many levels/i;
 
-function isLoopError(err: unknown): boolean {
+export function isLoopError(err: unknown): boolean {
   if ((err as { code?: unknown } | null)?.code === 'ELOOP') return true;
   const message = err instanceof Error ? err.message : String(err);
   return LOOP_RE.test(message);
