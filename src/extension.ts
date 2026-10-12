@@ -1221,22 +1221,27 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         isDirectory: node.entry.isDirectory,
         isSymbolicLink: node.entry.isSymbolicLink || isLinkNow,
       });
+      // Whatever the row is, it lives at its parent's real path: gate that
+      // parent (same pattern as rename), act on the resolved path, and name
+      // it in the prompt when it differs. Only the parent is resolved, never
+      // a link itself, so an unlink never follows the link to its target.
+      const realParent = (await assertWritableTarget(adapter, connection, parentDir(target), { confirmOutsideRoot }))
+        .realPath;
       if (mode === 'link') {
         // Unlink only: never count, never rmdir, never a trailing slash
         // (which would resolve through the link to its target).
         const linkPath = target.length > 1 ? target.replace(/\/+$/, '') : target;
+        const linkName = path.posix.basename(linkPath);
+        realTarget = joinRoot(realParent, linkName);
+        const really = realTarget === linkPath ? '' : ` (really ${realTarget})`;
         const choice = await vscode.window.showWarningMessage(
-          `Delete the link ${path.posix.basename(linkPath)}? The target is not touched.`,
+          `Delete the link ${linkName}${really}? The target is not touched.`,
           { modal: true },
           'Delete',
         );
         if (choice !== 'Delete') return;
-        await adapter.delete(linkPath);
+        await adapter.delete(realTarget);
       } else {
-        // A file or folder below a linked parent lives at the parent's real
-        // path: gate that (same pattern as rename), act on it, and show it.
-        const realParent = (await assertWritableTarget(adapter, connection, parentDir(target), { confirmOutsideRoot }))
-          .realPath;
         realTarget = joinRoot(realParent, path.posix.basename(target));
         const really = realTarget === target ? '' : ` (really ${realTarget})`;
         if (mode === 'file') {

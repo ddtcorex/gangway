@@ -764,6 +764,70 @@ describe('activate - realistic command invocation', () => {
       expect(fakeRawClient.delete).toHaveBeenCalledWith('/var/www/app/dir');
     });
 
+    it('a link inside an out-of-root dir link asks with the real path and unlinks the resolved path only after a yes', async () => {
+      fakeRawClient.realPath.mockImplementation(async (p: string) =>
+        p === '/var/www/app/shared' || p.startsWith('/var/www/app/shared/')
+          ? `/srv/other${p.slice('/var/www/app/shared'.length)}`
+          : p,
+      );
+      fakeRawClient.stat.mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false });
+      const linkNode = {
+        connectionId: connection.id,
+        entry: { path: '/var/www/app/shared/foo', isDirectory: false, isSymbolicLink: true, size: 0 },
+      };
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+
+      // Declined at the out-of-root gate: no link prompt, nothing unlinked.
+      mockWindow.__test_queueWarning(undefined);
+      await handlers.get('gangway.deleteRemote')!(linkNode);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        'This location is really /srv/other, outside the connection root. Continue?',
+        { modal: true },
+        'Continue',
+      );
+      expect(fakeRawClient.delete).not.toHaveBeenCalled();
+
+      // Accepted at the gate but declined at the link prompt: nothing unlinked.
+      warnSpy.mockClear();
+      mockWindow.__test_queueWarning('Continue');
+      mockWindow.__test_queueWarning(undefined);
+      await handlers.get('gangway.deleteRemote')!(linkNode);
+      expect(warnSpy).toHaveBeenCalledTimes(2);
+      expect(warnSpy.mock.calls[1][0]).toBe(
+        'Delete the link foo (really /srv/other/foo)? The target is not touched.',
+      );
+      expect(fakeRawClient.delete).not.toHaveBeenCalled();
+
+      // Accepted twice: the resolved path is unlinked, never the link text.
+      mockWindow.__test_queueWarning('Continue');
+      mockWindow.__test_queueWarning('Delete');
+      await handlers.get('gangway.deleteRemote')!(linkNode);
+      expect(fakeRawClient.delete).toHaveBeenCalledTimes(1);
+      expect(fakeRawClient.delete).toHaveBeenCalledWith('/srv/other/foo');
+      expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it('a link delete on a frozen connection stops before any prompt or network call', async () => {
+      const frozen = await activateFrozenConnection();
+      resetFakeClient();
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+
+      await handlers.get('gangway.deleteRemote')!({
+        connectionId: frozen.id,
+        entry: { path: '/var/www/app/shared/foo', isDirectory: false, isSymbolicLink: true, size: 0 },
+      });
+
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('frozen'));
+      expect(warnSpy).not.toHaveBeenCalled();
+      expect(fakeRawClient.lstat).not.toHaveBeenCalled();
+      expect(fakeRawClient.delete).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+      infoSpy.mockRestore();
+    });
+
     it('a folder under an out-of-root dir link asks with the real path and rmdirs the resolved path only after a yes', async () => {
       fakeRawClient.realPath.mockImplementation(async (p: string) =>
         p === '/var/www/app/ext' || p.startsWith('/var/www/app/ext/') ? `/etc/ext${p.slice('/var/www/app/ext'.length)}` : p,
