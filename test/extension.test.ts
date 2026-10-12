@@ -1172,6 +1172,105 @@ describe('activate - realistic command invocation', () => {
       warnSpy.mockRestore();
     });
 
+    describe('multi-select', () => {
+      const row = (p: string) => ({ connectionId: connection.id, entry: { path: p, isDirectory: false, isSymbolicLink: false, size: 1 } });
+      const destNode = () => ({ connectionId: connection.id, entry: { path: '/var/www/other', isDirectory: true, isSymbolicLink: false, size: 0 } });
+      const stats = () =>
+        fakeRawClient.stat.mockImplementation(async (p: string) => {
+          if (p === '/var/www/other') return { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false };
+          if (['/var/www/app/a.php', '/var/www/app/b.php', '/var/www/app/c.php'].includes(p)) {
+            return { size: 1, modifyTime: 1, isDirectory: false, isSymbolicLink: false };
+          }
+          throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+        });
+
+      it('cut acts on the whole selection when the clicked row is part of it', async () => {
+        stats();
+        const a = row('/var/www/app/a.php');
+        const b = row('/var/www/app/b.php');
+        await (handlers.get('gangway.cutEntries') as (...args: unknown[]) => Promise<void>)(a, [a, b]);
+        await handlers.get('gangway.pasteEntries')!(destNode());
+        expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/app/a.php', '/var/www/other/a.php');
+        expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/app/b.php', '/var/www/other/b.php');
+      });
+
+      it('copy acts on the clicked row alone when it is outside the selection', async () => {
+        stats();
+        const a = row('/var/www/app/a.php');
+        const b = row('/var/www/app/b.php');
+        const c = row('/var/www/app/c.php');
+        const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+        await (handlers.get('gangway.copyEntries') as (...args: unknown[]) => Promise<void>)(c, [a, b]);
+        expect(infoSpy).toHaveBeenCalledWith('Copied 1 item(s).');
+        infoSpy.mockRestore();
+      });
+
+      it('download and upload folder act on the clicked folder when several rows are selected', async () => {
+        fakeRawClient.list.mockImplementation(async (dirPath: string) =>
+          dirPath === '/var/www/app' ? [{ name: 'config.php', type: '-' }] : [],
+        );
+        const folder = { connectionId: connection.id, entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 } };
+        const other = { connectionId: connection.id, entry: { path: '/var/www/other', isDirectory: true, isSymbolicLink: false, size: 0 } };
+        const errorSpy = vi.spyOn(vscode.window, 'showErrorMessage');
+        try {
+          await (handlers.get('gangway.downloadFolder') as (...args: unknown[]) => Promise<void>)(folder, [folder, other]);
+          expect(fakeRawClient.fastGet).toHaveBeenCalledWith('/var/www/app/config.php', expect.any(String));
+          await (handlers.get('gangway.uploadFolder') as (...args: unknown[]) => Promise<void>)(folder, [folder, other]);
+          expect(errorSpy).not.toHaveBeenCalled();
+        } finally {
+          errorSpy.mockRestore();
+        }
+      });
+
+      it('no tree context command breaks when VS Code passes the selection as a second argument', async () => {
+        const manifest = JSON.parse(
+          await fs.readFile(path.join(__dirname, '..', 'package.json'), 'utf8'),
+        ) as { contributes: { menus: Record<string, Array<{ command: string }>> } };
+        const ids = [...new Set(manifest.contributes.menus['view/item/context'].map((m) => m.command))];
+        expect(ids.length).toBeGreaterThan(10);
+        stats();
+        const fileStats = fakeRawClient.stat.getMockImplementation()!;
+        fakeRawClient.stat.mockImplementation(async (p: string) =>
+          p === '/var/www/app' ? { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false } : fileStats(p),
+        );
+        // A folder row with a child, so the folder commands walk something and take their real path.
+        fakeRawClient.list.mockImplementation(async (dirPath: string) =>
+          dirPath === '/var/www/app' ? [{ name: 'config.php', type: '-' }] : [],
+        );
+        const a = { connectionId: connection.id, entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 } };
+        const b = row('/var/www/app/b.php');
+        const errorSpy = vi.spyOn(vscode.window, 'showErrorMessage');
+        try {
+          for (const id of ids) {
+            const handler = handlers.get(id);
+            expect(handler, id).toBeDefined();
+            await expect((handler as (...args: unknown[]) => Promise<void>)(a, [a, b]), id).resolves.not.toThrow();
+          }
+          expect(errorSpy.mock.calls.map((c) => String(c[0]))).toEqual([]);
+        } finally {
+          errorSpy.mockRestore();
+        }
+      });
+
+      it('download, rename and chmod still act on the clicked row only', async () => {
+        stats();
+        const a = row('/var/www/app/a.php');
+        const b = row('/var/www/app/b.php');
+        await (handlers.get('gangway.downloadFile') as (...args: unknown[]) => Promise<void>)(a, [a, b]);
+        expect(fakeRawClient.fastGet.mock.calls.map((c) => c[0])).toEqual(['/var/www/app/a.php']);
+
+        mockWindow.__test_queueInput('renamed.php');
+        await (handlers.get('gangway.renameRemote') as (...args: unknown[]) => Promise<void>)(a, [a, b]);
+        expect(fakeRawClient.posixRename).toHaveBeenCalledTimes(1);
+        expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/app/a.php', '/var/www/app/renamed.php');
+
+        mockWindow.__test_queuePick('644 (files)');
+        await (handlers.get('gangway.chmodRemote') as (...args: unknown[]) => Promise<void>)(a, [a, b]);
+        expect(fakeRawClient.chmod).toHaveBeenCalledTimes(1);
+        expect(fakeRawClient.chmod.mock.calls[0][0]).toBe('/var/www/app/a.php');
+      });
+    });
+
     it('cut then paste moves server-side with no re-upload', async () => {
       fakeRawClient.stat.mockImplementation(async (p: string) => {
         if (p === '/var/www/other') return { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false };
@@ -2421,7 +2520,12 @@ describe('activate - realistic command invocation', () => {
 
   describe('bulk destinations and open through links', () => {
     let lines: string[];
-    let dnd: { handleDrop: (target: unknown, dataTransfer: unknown, token: unknown) => Promise<void> };
+    let dnd: {
+      handleDrag: (source: unknown[], dataTransfer: unknown, token: unknown) => Promise<void>;
+      handleDrop: (target: unknown, dataTransfer: unknown, token: unknown) => Promise<void>;
+    };
+    let treeOptions: { canSelectMany?: boolean };
+    let activated: ReturnType<typeof activate>;
     let conn: ConnectionConfig;
     let workRoot: string;
     let previousFolders: unknown;
@@ -2436,11 +2540,6 @@ describe('activate - realistic command invocation', () => {
       );
     }
 
-    function uriListOf(...fsPaths: string[]) {
-      const value = fsPaths.map((p) => `file://${p}`).join('\n');
-      return { get: (mime: string) => (mime === 'text/uri-list' ? { asString: async () => value } : undefined) };
-    }
-
     beforeEach(async () => {
       lines = [];
       const outputSpy = vi.spyOn(vscode.window, 'createOutputChannel').mockReturnValue({
@@ -2453,9 +2552,11 @@ describe('activate - realistic command invocation', () => {
       const originalCreateTreeView = vscode.window.createTreeView;
       const treeSpy = vi.spyOn(vscode.window, 'createTreeView').mockImplementation(((id: string, options: never) => {
         dnd = (options as { dragAndDropController: typeof dnd }).dragAndDropController;
+        treeOptions = options as typeof treeOptions;
         return originalCreateTreeView(id, options);
       }) as never);
       const fresh = activate(fakeContext());
+      activated = fresh;
       outputSpy.mockRestore();
       treeSpy.mockRestore();
       conn = await fresh.connectionManager.add({
@@ -2490,39 +2591,198 @@ describe('activate - realistic command invocation', () => {
 
     const putTargets = (): string[] => (fakeRawClient.fastPut.mock.calls as Array<[string, string]>).map(([, remote]) => remote);
 
-    it('a drag-drop into an out-of-root link directory writes nothing and reports the failure', async () => {
-      linkDir('/var/www/shared', '/etc/ext');
-      const dropped = path.join(tmpHome, 'drop.php');
-      await fs.writeFile(dropped, '<?php');
+    describe('drag and drop inside the tree', () => {
+      const file = (p: string) => ({ connectionId: conn.id, entry: { path: p, isDirectory: false, isSymbolicLink: false, size: 1 } });
+      const dir = (p: string, isSymbolicLink = false) => ({ connectionId: conn.id, entry: { path: p, isDirectory: true, isSymbolicLink, size: 0 } });
+      const enoent = () => Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      const stats = (files: string[], dirs: string[]) =>
+        fakeRawClient.stat.mockImplementation(async (p: string) => {
+          if (dirs.includes(p)) return { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false };
+          if (files.includes(p)) return { size: 1, modifyTime: 1, isDirectory: false, isSymbolicLink: false };
+          throw enoent();
+        });
+      /** Drags `paths` out of the tree and drops them on `target`, through the real controller. */
+      const dragAndDrop = async (paths: string[], target: unknown, connectionId = conn.id) => {
+        const store = new Map<string, { asString(): Promise<string> }>();
+        await dnd.handleDrag(
+          paths.map((p) => ({ connectionId, entry: { path: p, isDirectory: false, isSymbolicLink: false, size: 1 } })),
+          { set: (m: string, item: { asString(): Promise<string> }) => void store.set(m, item) },
+          {},
+        );
+        await dnd.handleDrop(target, { get: (m: string) => store.get(m) }, {});
+      };
+      const moveModals = () =>
+        warnSpy.mock.calls.filter((c) => typeof c[0] === 'string' && (c[0] as string).startsWith('Move '));
 
-      await dnd.handleDrop(
-        { connectionId: conn.id, entry: { path: '/var/www/shared', isDirectory: true, isSymbolicLink: true, size: 0 } },
-        uriListOf(dropped),
-        {},
-      );
+      afterEach(() => {
+        (vscode.workspace as unknown as { __test_setConfig: (k: string, v: unknown) => void }).__test_setConfig(
+          'gangway.confirmDragAndDrop',
+          undefined,
+        );
+      });
 
-      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
-      expect(fakeRawClient.mkdir).not.toHaveBeenCalled();
-      expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
-      const message = String(errorSpy.mock.calls[0]?.[0]);
-      expect(message).toContain('"/var/www/shared"');
-      expect(message).toMatch(/outside/);
-    });
+      it('turns on multi-select for the tree', () => {
+        expect(treeOptions.canSelectMany).toBe(true);
+      });
 
-    it('a drag-drop into a link directory inside the root still uploads', async () => {
-      linkDir('/var/www/current', '/var/www/releases/42');
-      const dropped = path.join(tmpHome, 'drop.php');
-      await fs.writeFile(dropped, '<?php');
+      it('asks once, then moves every dragged item server-side', async () => {
+        stats(['/var/www/a.php', '/var/www/b.php'], ['/var/www/dest']);
+        mockWindow.__test_queueWarning('Move');
 
-      await dnd.handleDrop(
-        { connectionId: conn.id, entry: { path: '/var/www/current', isDirectory: true, isSymbolicLink: true, size: 0 } },
-        uriListOf(dropped),
-        {},
-      );
+        await dragAndDrop(['/var/www/a.php', '/var/www/b.php'], dir('/var/www/dest'));
 
-      expect(fakeRawClient.fastPut).toHaveBeenCalledWith(dropped, '/var/www/current/drop.php.tmp');
-      expect(errorSpy).not.toHaveBeenCalled();
-      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Uploaded 1 file(s)'));
+        expect(warnSpy).toHaveBeenCalledWith('Move 2 item(s) into /var/www/dest?', { modal: true }, 'Move');
+        expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/a.php', '/var/www/dest/a.php');
+        expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/b.php', '/var/www/dest/b.php');
+        expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+        expect(infoSpy).toHaveBeenCalledWith('Moved 2 item(s).');
+      });
+
+      it('moves nothing when the confirmation is dismissed', async () => {
+        stats(['/var/www/a.php'], ['/var/www/dest']);
+        mockWindow.__test_queueWarning(undefined);
+        await dragAndDrop(['/var/www/a.php'], dir('/var/www/dest'));
+        expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+      });
+
+      it('skips the confirmation when gangway.confirmDragAndDrop is false', async () => {
+        (vscode.workspace as unknown as { __test_setConfig: (k: string, v: unknown) => void }).__test_setConfig(
+          'gangway.confirmDragAndDrop',
+          false,
+        );
+        stats(['/var/www/a.php'], ['/var/www/dest']);
+        await dragAndDrop(['/var/www/a.php'], dir('/var/www/dest'));
+        expect(moveModals()).toHaveLength(0);
+        expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/a.php', '/var/www/dest/a.php');
+      });
+
+      it('drops on a file target into that file\'s parent folder', async () => {
+        stats(['/var/www/a.php', '/var/www/dest/x.php'], ['/var/www/dest']);
+        mockWindow.__test_queueWarning('Move');
+        await dragAndDrop(['/var/www/a.php'], file('/var/www/dest/x.php'));
+        expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/a.php', '/var/www/dest/a.php');
+      });
+
+      it('drops on empty tree space into the connection root', async () => {
+        stats(['/var/www/sub/a.php'], ['/var/www', '/var/www/sub']);
+        mockWindow.__test_queueWarning('Move');
+        await dragAndDrop(['/var/www/sub/a.php'], undefined);
+        expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/sub/a.php', '/var/www/a.php');
+      });
+
+      it('drops into a link folder inside the root, landing on the real folder', async () => {
+        linkDir('/var/www/current', '/var/www/releases/42');
+        stats(['/var/www/a.php'], ['/var/www/current', '/var/www/releases/42']);
+        mockWindow.__test_queueWarning('Move');
+        await dragAndDrop(['/var/www/a.php'], dir('/var/www/current', true));
+        expect(fakeRawClient.posixRename).toHaveBeenCalledWith('/var/www/a.php', '/var/www/releases/42/a.php');
+      });
+
+      it('writes nothing when the destination link leaves the root and is not confirmed', async () => {
+        linkDir('/var/www/shared', '/etc/ext');
+        stats(['/var/www/a.php'], ['/var/www/shared', '/etc/ext']);
+        mockWindow.__test_queueWarning('Move', undefined);
+        await dragAndDrop(['/var/www/a.php'], dir('/var/www/shared', true));
+        expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+        expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+      });
+
+      it('refuses on a frozen connection and moves nothing', async () => {
+        const frozen = await activated.connectionManager.add({
+          name: 'prod',
+          host: 'example.com',
+          port: 22,
+          username: 'deploy',
+          remotePath: '/var/www',
+          authMethod: 'password',
+          frozen: true,
+        });
+        await activated.connectionManager.setWorkspaceBinding(frozen.id);
+        stats(['/var/www/a.php'], ['/var/www/dest']);
+        const target = { connectionId: frozen.id, entry: { path: '/var/www/dest', isDirectory: true, isSymbolicLink: false, size: 0 } };
+        await dragAndDrop(['/var/www/a.php'], target, frozen.id);
+        expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+        expect(infoSpy).toHaveBeenCalledWith(expect.stringMatching(/frozen/i));
+      });
+
+      it('ignores items that belong to another connection', async () => {
+        stats(['/var/www/a.php'], ['/var/www/dest']);
+        await dragAndDrop(['/var/www/a.php'], dir('/var/www/dest'), 'some-other-connection');
+        expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+      });
+
+      it('forgets dropped items in an armed cut so a later paste does not move them again', async () => {
+        stats(['/var/www/a.php', '/var/www/b.php'], ['/var/www/dest', '/var/www/dest2']);
+        const a = file('/var/www/a.php');
+        const b = file('/var/www/b.php');
+        await (handlers.get('gangway.cutEntries') as (...args: unknown[]) => Promise<void>)(a, [a, b]);
+        mockWindow.__test_queueWarning('Move');
+
+        await dragAndDrop(['/var/www/a.php'], dir('/var/www/dest'));
+        await handlers.get('gangway.pasteEntries')!(dir('/var/www/dest2'));
+
+        const renames = fakeRawClient.posixRename.mock.calls.map((c) => `${c[0]} -> ${c[1]}`);
+        expect(renames).toEqual(['/var/www/a.php -> /var/www/dest/a.php', '/var/www/b.php -> /var/www/dest2/b.php']);
+      });
+
+      it('does not ask, and does nothing, when the drop lands on the current folder', async () => {
+        stats(['/var/www/dest/a.php'], ['/var/www/dest']);
+        await dragAndDrop(['/var/www/dest/a.php'], dir('/var/www/dest'));
+        expect(moveModals()).toHaveLength(0);
+        expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+      });
+
+      it('does not ask when the drop lands on a sibling file in the same folder', async () => {
+        stats(['/var/www/dest/a.php', '/var/www/dest/x.php'], ['/var/www/dest']);
+        await dragAndDrop(['/var/www/dest/a.php'], file('/var/www/dest/x.php'));
+        expect(moveModals()).toHaveLength(0);
+        expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+      });
+
+      it('explains a folder dropped on itself without a confirmation modal', async () => {
+        stats([], ['/var/www/dir']);
+        await dragAndDrop(['/var/www/dir'], dir('/var/www/dir'));
+        expect(moveModals()).toHaveLength(0);
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('cannot move a folder into itself'));
+        expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+      });
+
+      it('counts only the items that will really move in the confirmation', async () => {
+        stats(['/var/www/dest/a.php', '/var/www/b.php'], ['/var/www/dest']);
+        mockWindow.__test_queueWarning('Move');
+        await dragAndDrop(['/var/www/dest/a.php', '/var/www/b.php'], dir('/var/www/dest'));
+        expect(warnSpy).toHaveBeenCalledWith('Move 1 item(s) into /var/www/dest?', { modal: true }, 'Move');
+        expect(fakeRawClient.posixRename).toHaveBeenCalledTimes(1);
+      });
+
+      it('asks once for several conflicts and never downloads a skipped source', async () => {
+        const names = ['a.php', 'b.php', 'c.php'];
+        stats(
+          [...names.map((n) => `/var/www/${n}`), ...names.map((n) => `/var/www/dest/${n}`)],
+          ['/var/www/dest'],
+        );
+        mockWindow.__test_queueWarning('Move', 'Skip the conflicting items');
+
+        await dragAndDrop(names.map((n) => `/var/www/${n}`), dir('/var/www/dest'));
+
+        const conflictCalls = warnSpy.mock.calls.filter((c) => String(c[0]).includes('already exist'));
+        expect(conflictCalls).toHaveLength(1);
+        expect(String(conflictCalls[0][0])).toContain('a.php, b.php and c.php');
+        expect(conflictCalls[0].slice(2)).toEqual(['Review each', 'Skip the conflicting items']);
+        expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+        expect(fakeRawClient.fastGet).not.toHaveBeenCalled();
+      });
+
+      it('cancelling the conflict prompt moves nothing', async () => {
+        const names = ['a.php', 'b.php'];
+        stats(
+          [...names.map((n) => `/var/www/${n}`), ...names.map((n) => `/var/www/dest/${n}`)],
+          ['/var/www/dest'],
+        );
+        mockWindow.__test_queueWarning('Move', undefined);
+        await dragAndDrop(names.map((n) => `/var/www/${n}`), dir('/var/www/dest'));
+        expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+      });
     });
 
     it('a folder upload whose destination is an out-of-root link writes nothing and reports the failure', async () => {

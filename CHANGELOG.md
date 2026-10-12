@@ -7,6 +7,20 @@ breaking changes are marked `BREAKING:`.
 
 ## [Unreleased]
 
+- BREAKING: dropping files from the local Explorer or the OS onto the remote
+  tree no longer uploads them. Drag and drop is now a remote-only gesture;
+  upload with the upload commands instead.
+- Drag and drop inside the remote tree moves the dragged rows into the folder
+  they are dropped on, with the same checks as cut and paste (freeze, the
+  connection root, link rules, audit). It asks for confirmation unless
+  `gangway.confirmDragAndDrop` is off, asks once when two or more items
+  already exist at the destination (review each, skip them, or cancel; there
+  is no overwrite-all), and refuses to move a folder into itself.
+- The remote tree allows selecting several rows. Cut and copy act on the
+  whole selection; every other command still acts on the row you clicked.
+- Fixed: moving a file with cut and paste while it was open for editing left
+  its local copy pointing at the old path, so a later push recreated the file
+  there. The local copy now follows the move, like rename.
 - Remote symlinks are supported in the tree: a directory link expands, a file
   link opens and edits like a file, and the tooltip shows the real target.
   Broken links and loops are dimmed and explain themselves on click (on

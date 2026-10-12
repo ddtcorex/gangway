@@ -12,6 +12,7 @@ import { checkConflict } from './conflictGuard';
 import { readSidecar, writeSidecar } from './tmpStore';
 import { preparePush } from './pushTarget';
 import { BrokenLinkError, LinkLoopError, LinkRetargetedError, resolveTarget } from './realTarget';
+import { moveByDrop, planDropMove, type DropConflictChoice } from './dropMove';
 import { createDestinationGate } from './destinationGate';
 import { purgeExpiredTmp, sweepUnknownTmpRoots } from './tmpRetention';
 import { tmpFilePathFor, tmpRootFor, connectionSlug, sidecarPathFor } from './tmpPath';
@@ -38,14 +39,12 @@ import {
   assertWritableTarget,
   chmodRemote,
   chooseDeleteMode,
-  collectDropUploads,
   createRemote,
   duplicateRemote,
   guardUploadTarget,
   isNotFoundError,
   joinRoot,
   parentDir,
-  parseUriList,
   pasteEntries,
   renameRemote,
   typedConfirmMatches,
@@ -421,15 +420,15 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       // tree instead of leaving the node failed.
       void showCommandError(err, { retry: () => Promise.resolve(refreshTree()) });
     },
-    // Local-Explorer/OS drops land here with the tree node they were dropped
-    // on (or undefined for empty tree space). The closure runs long after
-    // activate() finishes, so referencing handleLocalDrop (defined below)
-    // is safe despite the textual order.
-    (node, uriListValue) => handleLocalDrop(node, uriListValue),
+    // In-tree drops land here with the node they were dropped on. The closure
+    // runs long after activate() finishes, so referencing runDropMove (defined
+    // below) is safe despite the textual order.
+    (destination, connectionId, paths) => runDropMove(destination, connectionId, paths),
   );
   const treeView = vscode.window.createTreeView('gangway.remoteExplorer', {
     treeDataProvider: treeProvider as never,
     dragAndDropController: treeProvider as never,
+    canSelectMany: true,
   });
 
   /**
@@ -1434,6 +1433,20 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   /** The tree clipboard: cut/copy names connections, paste resolves them. Local state only. */
   let clipboard: ClipboardState = clearClipboard();
 
+  /**
+   * With multi-select on, VS Code passes (clickedRow, selectedRows). Cut and
+   * copy act on the whole selection when the clicked row is part of it, and on
+   * the clicked row alone otherwise (a right-click outside the selection).
+   */
+  function selectionFor(
+    node: RemoteTreeNode | RemoteTreeNode[] | undefined,
+    selected: RemoteTreeNode[] | undefined,
+  ): RemoteTreeNode | RemoteTreeNode[] | undefined {
+    if (node === undefined || Array.isArray(node) || !Array.isArray(selected) || selected.length === 0) return node;
+    const clicked = node.entry?.path;
+    return selected.some((row) => row.entry?.path === clicked) ? selected : node;
+  }
+
   async function runCutCopyCommand(cut: boolean, node?: RemoteTreeNode | RemoteTreeNode[]): Promise<void> {
     const nodes = node === undefined ? [] : Array.isArray(node) ? node : [node];
     if (nodes.length === 0) {
@@ -1504,6 +1517,94 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     }
   }
 
+  /**
+   * An in-tree drop: move the dragged rows into the folder they landed on
+   * (a file target means its parent, empty space means the connection root).
+   * One confirmation unless gangway.confirmDragAndDrop is off; the move itself
+   * is cut-and-paste semantics (see moveByDrop), so every gate applies.
+   */
+  async function runDropMove(destination: RemoteTreeNode | undefined, connectionId: string, paths: string[]): Promise<void> {
+    const connection = await requireMutableConnection(destination);
+    if (!connection) return;
+    if (connection.id !== connectionId) {
+      await vscode.window.showWarningMessage('Drop ignored: the dragged items belong to another connection.');
+      return;
+    }
+    const destDir =
+      destination?.entry !== undefined
+        ? destination.entry.isDirectory
+          ? destination.entry.path
+          : path.posix.dirname(destination.entry.path)
+        : connection.remotePath;
+    try {
+      const adapter = await getAdapter(connection);
+      // Plan before asking: a drop that would change nothing (already in the
+      // folder) stays silent, a refused one is explained without a modal, and
+      // the modal counts only the items that will really move.
+      const plan = await planDropMove(adapter, connection, paths, destDir);
+      if (plan.movable.length === 0) {
+        if (plan.skipped.length > 0) {
+          for (const skip of plan.skipped) output.appendLine(`Move skipped: ${skip.path} (${skip.reason})`);
+          await vscode.window.showWarningMessage(`Nothing moved: ${plan.skipped[0].reason}.`);
+        }
+        return;
+      }
+      if (vscode.workspace.getConfiguration('gangway').get<boolean>('confirmDragAndDrop', true)) {
+        const choice = await vscode.window.showWarningMessage(
+          `Move ${plan.movable.length} item(s) into ${destDir}?`,
+          { modal: true },
+          'Move',
+        );
+        if (choice !== 'Move') return;
+      }
+      const result = await withCancellableProgress('Moving…', (signal, reportProgress) =>
+        moveByDrop(
+          adapter,
+          connection,
+          paths,
+          destDir,
+          {
+            confirmOverwrite: ({ remotePath, stagingPath }) =>
+              resolveFileConflict(adapter, connection.id, stagingPath as string, remotePath, conflictUi),
+            chooseConflictPolicy: async (conflicting): Promise<DropConflictChoice> => {
+              const names = conflicting.map((p) => path.posix.basename(p));
+              const answer = await vscode.window.showWarningMessage(
+                `${names.length} items already exist in ${destDir}: ${joinPaths(names)}. Overwriting cannot be undone.`,
+                { modal: true },
+                'Review each',
+                'Skip the conflicting items',
+              );
+              return answer === 'Review each' ? 'review' : answer === 'Skip the conflicting items' ? 'skip' : 'cancel';
+            },
+            auditLog,
+          },
+          { signal, onAuditError: (message) => output.appendLine(message), confirmOutsideRoot },
+        ).then((r) => {
+          reportProgress(destDir);
+          return r;
+        }),
+      );
+      // An armed cut must not move again what the drop already moved.
+      if (clipboard.cut && clipboard.connectionId === connection.id) {
+        const moved = new Set(plan.movable.filter((p) => !result.skipped.some((skip) => skip.path === p)));
+        const remaining = clipboard.paths.filter((p) => !moved.has(p));
+        clipboard = remaining.length === 0 ? clearClipboard() : { ...clipboard, paths: remaining };
+      }
+      refreshTree();
+      if (result.skipped.length > 0) {
+        for (const skip of result.skipped) output.appendLine(`Move skipped: ${skip.path} (${skip.reason})`);
+        output.show();
+        await vscode.window.showWarningMessage(
+          `Moved ${result.pasted.length}, skipped ${result.skipped.length}. Details are in the Gangway output channel.`,
+        );
+      } else if (result.pasted.length > 0) {
+        await vscode.window.showInformationMessage(`Moved ${result.pasted.length} item(s).`);
+      }
+    } catch (err) {
+      await showCommandError(err, { retry: () => runDropMove(destination, connectionId, paths), connection });
+    }
+  }
+
   async function runCopyRemotePathCommand(node?: RemoteTreeNode): Promise<void> {
     const remotePath = node?.entry?.path;
     if (!remotePath) {
@@ -1514,70 +1615,6 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     // without touching the server.
     await vscode.env.clipboard.writeText(remotePath);
     await vscode.window.showInformationMessage(`Copied remote path: ${remotePath}`);
-  }
-
-  /**
-   * Local-Explorer/OS drop onto a remote node. Every dropped path is
-   * inspected first (missing paths and folders fail fast); large or binary
-   * files get one combined prompt; the upload loop reuses direct-overwrite
-   * uploadFile with progress + cancel.
-   */
-  async function handleLocalDrop(targetNode: RemoteTreeNode | undefined, uriListValue: string): Promise<void> {
-    const connection = await requireMutableConnection(targetNode);
-    if (!connection) return;
-    const fsPaths = parseUriList(uriListValue);
-    if (fsPaths.length === 0) return;
-    let collected;
-    try {
-      collected = await collectDropUploads(fsPaths);
-    } catch (err) {
-      await showCommandError(err as Error, { connection });
-      return;
-    }
-    const flagged = collected.filter((c) => c.needsPrompt);
-    if (flagged.length > 0) {
-      const choice = await vscode.window.showWarningMessage(
-        `${flagged.length} of ${collected.length} dropped file(s) are large or look binary. Upload them anyway?`,
-        'Upload all',
-        'Skip flagged',
-      );
-      if (choice !== 'Upload all' && choice !== 'Skip flagged') return;
-      if (choice === 'Skip flagged') collected = collected.filter((c) => !c.needsPrompt);
-    }
-    if (collected.length === 0) return;
-    const targetDir =
-      targetNode?.entry && targetNode.entry.isDirectory
-        ? targetNode.entry.path
-        : targetNode?.entry
-          ? path.posix.dirname(targetNode.entry.path)
-          : connection.remotePath;
-    try {
-      const adapter = await getAdapter(connection);
-      const destinationGate = createDestinationGate(adapter, connection);
-      await withCancellableProgress(`Uploading ${collected.length} dropped file(s)`, (signal, reportProgress) =>
-        (async () => {
-          for (const item of collected) {
-            if (signal.aborted) throw new TransferCancelledError();
-            const remotePath = `${targetDir}/${path.posix.basename(item.localPath)}`;
-            reportProgress(remotePath);
-            await uploadFile(
-              adapter,
-              connection.id,
-              item.localPath,
-              remotePath,
-              item.byteSize,
-              auditLog,
-              (message) => output.appendLine(message),
-              { destinationGate },
-            );
-          }
-        })(),
-      );
-      refreshTree();
-      await vscode.window.showInformationMessage(`Uploaded ${collected.length} file(s).`);
-    } catch (err) {
-      await showCommandError(err, { retry: () => handleLocalDrop(targetNode, uriListValue), connection });
-    }
   }
 
   const SYNC_UP_LABEL = 'Upload (local → server)';
@@ -2676,8 +2713,10 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       const connection = requireActiveConnection();
       if (connection) await purgeExpiredTmp(tmpRootFor(connection), 0);
     }),
-    vscode.commands.registerCommand('gangway.downloadFolder', runDownloadFolderCommand),
-    vscode.commands.registerCommand('gangway.uploadFolder', runUploadFolderCommand),
+    // Wrapped: with multi-select VS Code passes the selected rows as a second
+    // argument, which would otherwise land in the Retry-failed `onlyPaths` set.
+    vscode.commands.registerCommand('gangway.downloadFolder', (node?: RemoteTreeNode) => runDownloadFolderCommand(node)),
+    vscode.commands.registerCommand('gangway.uploadFolder', (node?: RemoteTreeNode) => runUploadFolderCommand(node)),
     vscode.commands.registerCommand('gangway.compareFile', runCompareFileCommand),
     vscode.commands.registerCommand('gangway.copyRemotePath', runCopyRemotePathCommand),
     vscode.commands.registerCommand('gangway.newFile', (node?: RemoteTreeNode) => runNewRemoteCommand('file', node)),
@@ -2686,8 +2725,12 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     vscode.commands.registerCommand('gangway.deleteRemote', runDeleteRemoteCommand),
     vscode.commands.registerCommand('gangway.duplicateRemote', runDuplicateRemoteCommand),
     vscode.commands.registerCommand('gangway.chmodRemote', runChmodRemoteCommand),
-    vscode.commands.registerCommand('gangway.cutEntries', (node?: RemoteTreeNode | RemoteTreeNode[]) => runCutCopyCommand(true, node)),
-    vscode.commands.registerCommand('gangway.copyEntries', (node?: RemoteTreeNode | RemoteTreeNode[]) => runCutCopyCommand(false, node)),
+    vscode.commands.registerCommand('gangway.cutEntries', (node?: RemoteTreeNode | RemoteTreeNode[], selected?: RemoteTreeNode[]) =>
+      runCutCopyCommand(true, selectionFor(node, selected)),
+    ),
+    vscode.commands.registerCommand('gangway.copyEntries', (node?: RemoteTreeNode | RemoteTreeNode[], selected?: RemoteTreeNode[]) =>
+      runCutCopyCommand(false, selectionFor(node, selected)),
+    ),
     vscode.commands.registerCommand('gangway.pasteEntries', runPasteEntriesCommand),
     vscode.commands.registerCommand('gangway.syncFolder', runSyncFolderCommand),
     vscode.commands.registerCommand('gangway.syncWorkspaceUp', () => runSyncWorkspaceCommand('up')),

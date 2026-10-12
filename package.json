@@ -36,6 +36,16 @@
     "onStartupFinished"
   ],
   "contributes": {
+    "configuration": {
+      "title": "Gangway",
+      "properties": {
+        "gangway.confirmDragAndDrop": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ask for confirmation before moving entries by drag and drop in the Gangway Remote Explorer."
+        }
+      }
+    },
     "commands": [
       {
         "command": "gangway.pickConnection",

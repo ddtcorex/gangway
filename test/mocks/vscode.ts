@@ -28,6 +28,14 @@ export class EventEmitter<T> {
   }
 }
 
+/** Mirrors vscode.DataTransferItem: a value that reads back as a string. */
+export class DataTransferItem {
+  constructor(public readonly value: unknown) {}
+  async asString(): Promise<string> {
+    return typeof this.value === 'string' ? this.value : JSON.stringify(this.value);
+  }
+}
+
 export enum TreeItemCollapsibleState {
   None = 0,
   Collapsed = 1,
@@ -205,7 +213,20 @@ export interface MockWorkspaceFolder {
   name: string;
 }
 
+const testConfig = new Map<string, unknown>();
+
 export const workspace = {
+  getConfiguration: (section?: string) => ({
+    get: <T>(key: string, fallback?: T): T | undefined => {
+      const full = section ? `${section}.${key}` : key;
+      return (testConfig.has(full) ? testConfig.get(full) : fallback) as T | undefined;
+    },
+  }),
+  /** Test-only: sets a configuration value (undefined restores the default). */
+  __test_setConfig: (full: string, value: unknown) => {
+    if (value === undefined) testConfig.delete(full);
+    else testConfig.set(full, value);
+  },
   onDidSaveTextDocument: onDidSaveTextDocumentEmitter.event,
   /** Test-only: fires the real onDidSaveTextDocument listeners a production
    * subscriber attached, simulating a real editor save. */

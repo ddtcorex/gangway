@@ -39,6 +39,28 @@ function compareEntries(a: RemoteEntry, b: RemoteEntry): number {
  * connection -- switching which one is bound (via the selector's QuickPick,
  * or the Manage Remotes page) is what changes what this tree shows.
  */
+/** The in-tree drag type. Never accepts text/uri-list, so nothing from the Explorer or the OS can be dropped. */
+export const GANGWAY_DRAG_MIME = 'application/vnd.gangway.remote-nodes';
+
+interface DragPayload {
+  connectionId: string;
+  paths: string[];
+}
+
+function parseDragPayload(raw: string | undefined): DragPayload | undefined {
+  if (!raw) return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  const { connectionId, paths } = (value ?? {}) as Partial<DragPayload>;
+  if (typeof connectionId !== 'string' || !Array.isArray(paths) || paths.length === 0) return undefined;
+  if (!paths.every((p) => typeof p === 'string')) return undefined;
+  return { connectionId, paths };
+}
+
 export class GangwayTreeProvider implements vscode.TreeDataProvider<GangwayTreeNode> {
   private readonly changeEmitter = new vscode.EventEmitter<GangwayTreeNode | undefined>();
   readonly onDidChangeTreeData = this.changeEmitter.event;
@@ -69,25 +91,44 @@ export class GangwayTreeProvider implements vscode.TreeDataProvider<GangwayTreeN
      * never touches vscode.window directly, matching its existing style. */
     private readonly onRootError: (error: unknown) => void = () => {},
     /**
-     * Local-Explorer/OS drops onto the tree. Kept as a callback for the same
-     * reason as onRootError: the provider parses the transfer and forwards
-     * it, the extension owns the upload. Undefined disables drops.
+     * An in-tree drop: where it landed (undefined for empty tree space), the
+     * connection the dragged rows belong to, and their remote paths. A plain
+     * callback for the same reason as onRootError: the provider parses the
+     * transfer and forwards it, the extension owns the move.
      */
-    private readonly onDrop?: (node: RemoteTreeNode | undefined, uriListValue: string) => Promise<void>,
+    private readonly onMove?: (
+      destination: RemoteTreeNode | undefined,
+      connectionId: string,
+      paths: string[],
+    ) => Promise<void>,
   ) {}
 
-  /** Drops accepted from the local Explorer and the OS file manager. */
-  readonly dropMimeTypes = ['text/uri-list'];
+  /** Only the tree's own rows can be dragged and dropped; nothing from outside is accepted. */
+  readonly dragMimeTypes = [GANGWAY_DRAG_MIME];
+  readonly dropMimeTypes = [GANGWAY_DRAG_MIME];
+
+  async handleDrag(
+    source: readonly GangwayTreeNode[],
+    dataTransfer: vscode.DataTransfer,
+    _token: vscode.CancellationToken,
+  ): Promise<void> {
+    const nodes = source.filter((node): node is RemoteTreeNode => !isSelectorNode(node));
+    if (nodes.length === 0) return;
+    const payload: DragPayload = { connectionId: nodes[0].connectionId, paths: nodes.map((n) => n.entry.path) };
+    dataTransfer.set(GANGWAY_DRAG_MIME, new vscode.DataTransferItem(JSON.stringify(payload)));
+  }
 
   async handleDrop(
     target: GangwayTreeNode | undefined,
     dataTransfer: vscode.DataTransfer,
     _token: vscode.CancellationToken,
   ): Promise<void> {
-    const value = await dataTransfer.get('text/uri-list')?.asString();
-    if (!value || !this.onDrop) return;
-    const node = target !== undefined && !isSelectorNode(target) ? target : undefined;
-    await this.onDrop(node, value);
+    if (!this.onMove) return;
+    if (target !== undefined && isSelectorNode(target)) return;
+    const raw = await dataTransfer.get(GANGWAY_DRAG_MIME)?.asString();
+    const payload = parseDragPayload(raw);
+    if (!payload) return;
+    await this.onMove(target, payload.connectionId, payload.paths);
   }
 
   private boundConnection(): ConnectionConfig | undefined {

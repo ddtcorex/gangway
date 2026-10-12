@@ -8,7 +8,7 @@ import path from 'node:path';
 // test-only __test_* queue helpers in tsc (which typechecks bare 'vscode'
 // against the real @types/vscode, like every other test file).
 import { window as mockWindow } from './mocks/vscode';
-import { tmpFilePathFor } from '../src/tmpPath';
+import { sidecarPathFor, tmpFilePathFor } from '../src/tmpPath';
 import {
   assertInsideRoot,
   assertMutatingAllowed,
@@ -16,12 +16,10 @@ import {
   assertWritableTargets,
   chmodRemote,
   chooseDeleteMode,
-  collectDropUploads,
   createRemote,
   duplicateRemote,
   FrozenError,
   guardUploadTarget,
-  parseUriList,
   pasteEntries,
   renameRemote,
   typedConfirmMatches,
@@ -530,32 +528,6 @@ describe('createRemote and chmodRemote validation', () => {
   });
 });
 
-describe('drop helpers', () => {
-  it('parseUriList decodes file URIs and skips the rest', () => {
-    expect(parseUriList('file:///tmp/a.php\nfile:///tmp/with%20space.js\nhttps://x/y\n')).toEqual([
-      '/tmp/a.php',
-      '/tmp/with space.js',
-    ]);
-    expect(parseUriList('')).toEqual([]);
-  });
-
-  it('collectDropUploads flags large and binary files, throws on missing ones', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'drop-test-'));
-    const small = path.join(dir, 'a.php');
-    const binary = path.join(dir, 'b.bin');
-    await fs.writeFile(small, '<?php echo 1;');
-    await fs.writeFile(binary, Buffer.from([0, 1, 2, 3, 0, 255, 254]));
-    try {
-      const collected = await collectDropUploads([small, binary]);
-      expect(collected.find((c) => c.localPath === small)!.needsPrompt).toBe(false);
-      expect(collected.find((c) => c.localPath === binary)!.needsPrompt).toBe(true);
-      await expect(collectDropUploads([path.join(dir, 'nope.php')])).rejects.toThrow(/does not exist/);
-    } finally {
-      await fs.rm(dir, { recursive: true, force: true });
-    }
-  });
-});
-
 describe('pasteEntries', () => {
   it('refuses cross-connection entries', async () => {
     const clipboard = { connectionId: 'other', paths: ['/srv/app/a.php'], cut: false };
@@ -594,6 +566,87 @@ describe('pasteEntries', () => {
     expect(puts[0]).toMatch(/->\/srv\/app\/dest\/a\.php$/);
     expect(auditLog.append).toHaveBeenCalledWith(expect.objectContaining({ op: 'duplicate' }));
     expect(deps.confirmOverwrite).not.toHaveBeenCalled();
+  });
+
+  describe('local sidecars', () => {
+    const meta = (remotePath: string) => ({ connectionId: 'c1', remotePath, mtime: 1, size: 1, downloadedAt: 1 });
+    const stageLocal = async (remotePath: string) => {
+      const local = tmpFilePathFor(connection, remotePath);
+      await fs.mkdir(path.dirname(local), { recursive: true });
+      await fs.writeFile(local, 'x');
+      await writeSidecar(local, meta(remotePath));
+      return local;
+    };
+    const cleanLocal = async (remotePath: string) => {
+      const local = tmpFilePathFor(connection, remotePath);
+      await fs.rm(local, { recursive: true, force: true }).catch(() => {});
+      await fs.rm(sidecarPathFor(local), { force: true }).catch(() => {});
+    };
+    const moveClient = (dirs: string[]) =>
+      fakeOpsClient({
+        stat: vi.fn().mockImplementation(async (p: string) => {
+          if (dirs.includes(p)) return dirStat;
+          if (p.startsWith('/srv/app/dest/')) throw enoent();
+          return fileStat;
+        }),
+      });
+    const deps = () => ({ confirmOverwrite: vi.fn(), auditLog: fakeAuditLog() });
+
+    it('a cut file keeps its local sidecar in step with the move', async () => {
+      const oldLocal = await stageLocal('/srv/app/a.php');
+      try {
+        const clipboard = { connectionId: 'c1', paths: ['/srv/app/a.php'], cut: true };
+        await pasteEntries(moveClient(['/srv/app', '/srv/app/dest']) as never, connection, clipboard, '/srv/app/dest', deps());
+        const newLocal = tmpFilePathFor(connection, '/srv/app/dest/a.php');
+        expect(await readSidecar(newLocal)).toMatchObject({ remotePath: '/srv/app/dest/a.php' });
+        expect(await readSidecar(oldLocal)).toBeUndefined();
+      } finally {
+        await cleanLocal('/srv/app/a.php');
+        await cleanLocal('/srv/app/dest/a.php');
+      }
+    });
+
+    it('a cut folder moves every sidecar below it', async () => {
+      await stageLocal('/srv/app/dir/one.php');
+      await stageLocal('/srv/app/dir/deep/two.php');
+      try {
+        const clipboard = { connectionId: 'c1', paths: ['/srv/app/dir'], cut: true };
+        await pasteEntries(
+          moveClient(['/srv/app', '/srv/app/dest', '/srv/app/dir']) as never,
+          connection,
+          clipboard,
+          '/srv/app/dest',
+          deps(),
+        );
+        expect(await readSidecar(tmpFilePathFor(connection, '/srv/app/dest/dir/one.php'))).toMatchObject({
+          remotePath: '/srv/app/dest/dir/one.php',
+        });
+        expect(await readSidecar(tmpFilePathFor(connection, '/srv/app/dest/dir/deep/two.php'))).toMatchObject({
+          remotePath: '/srv/app/dest/dir/deep/two.php',
+        });
+        expect(await readSidecar(tmpFilePathFor(connection, '/srv/app/dir/one.php'))).toBeUndefined();
+      } finally {
+        await cleanLocal('/srv/app/dir');
+        await cleanLocal('/srv/app/dest/dir');
+      }
+    });
+
+    it('a copy leaves local sidecars untouched', async () => {
+      const oldLocal = await stageLocal('/srv/app/a.php');
+      try {
+        const client = moveClient(['/srv/app', '/srv/app/dest']);
+        (client as { fastGet: unknown }).fastGet = vi.fn().mockImplementation(async (_r: string, l: string) => {
+          await fs.mkdir(path.dirname(l), { recursive: true });
+          await fs.writeFile(l, 'src');
+        });
+        const clipboard = { connectionId: 'c1', paths: ['/srv/app/a.php'], cut: false };
+        await pasteEntries(client as never, connection, clipboard, '/srv/app/dest', deps());
+        expect(await readSidecar(oldLocal)).toMatchObject({ remotePath: '/srv/app/a.php' });
+        expect(await readSidecar(tmpFilePathFor(connection, '/srv/app/dest/a.php'))).toBeUndefined();
+      } finally {
+        await cleanLocal('/srv/app/a.php');
+      }
+    });
   });
 
   function outsideLinkClient(puts: string[]) {

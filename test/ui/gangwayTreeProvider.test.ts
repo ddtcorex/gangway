@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import * as vscode from 'vscode';
-import { GangwayTreeProvider, type SelectorNode, type RemoteTreeNode } from '../../src/ui/gangwayTreeProvider';
+import { GANGWAY_DRAG_MIME, GangwayTreeProvider, type SelectorNode, type RemoteTreeNode } from '../../src/ui/gangwayTreeProvider';
 import type { RemoteEntry } from '../../src/folderQueue';
 import type { ConnectionConfig } from '../../src/types';
 
@@ -262,6 +262,83 @@ describe('GangwayTreeProvider', () => {
     it('tooltip shows the real path', () => {
       const item = provider().getTreeItem(linkNode({ realPath: '/srv/real.php', kind: 'file' }, false));
       expect(item.tooltip).toBe('ln -> /srv/real.php');
+    });
+  });
+
+  describe('drag and drop', () => {
+    const node = (entryPath: string, isDirectory = false): RemoteTreeNode => ({
+      connectionId: 'c1',
+      entry: { path: entryPath, isDirectory, isSymbolicLink: false, size: 1 } as RemoteEntry,
+    });
+    const make = (onMove?: (...args: unknown[]) => Promise<void>) =>
+      new GangwayTreeProvider(() => [], () => undefined, vi.fn(), vi.fn(), localUriFor, () => {}, onMove as never);
+    const transferWith = (value: string | undefined, mime = GANGWAY_DRAG_MIME) => ({
+      get: (m: string) => (m === mime && value !== undefined ? new vscode.DataTransferItem(value) : undefined),
+    });
+    const dragTransfer = () => {
+      const store = new Map<string, vscode.DataTransferItem>();
+      return { store, set: (m: string, item: vscode.DataTransferItem) => void store.set(m, item) };
+    };
+
+    it('accepts only its own drag type, never text/uri-list', () => {
+      expect(make().dropMimeTypes).toEqual([GANGWAY_DRAG_MIME]);
+      expect(make().dragMimeTypes).toEqual([GANGWAY_DRAG_MIME]);
+    });
+
+    it('drags the connection id and every dragged path', async () => {
+      const t = dragTransfer();
+      await make().handleDrag([node('/var/www/a.php'), node('/var/www/dir', true)], t as never, {} as never);
+      expect(JSON.parse(await t.store.get(GANGWAY_DRAG_MIME)!.asString())).toEqual({
+        connectionId: 'c1',
+        paths: ['/var/www/a.php', '/var/www/dir'],
+      });
+    });
+
+    it('never drags the selector row, and sets nothing when only it was selected', async () => {
+      const t = dragTransfer();
+      await make().handleDrag([SELECTOR, node('/var/www/a.php')], t as never, {} as never);
+      expect(JSON.parse(await t.store.get(GANGWAY_DRAG_MIME)!.asString()).paths).toEqual(['/var/www/a.php']);
+      const empty = dragTransfer();
+      await make().handleDrag([SELECTOR], empty as never, {} as never);
+      expect(empty.store.size).toBe(0);
+    });
+
+    it('forwards a folder target as the destination', async () => {
+      const onMove = vi.fn().mockResolvedValue(undefined);
+      const target = node('/var/www/dir', true);
+      await make(onMove).handleDrop(target, transferWith(JSON.stringify({ connectionId: 'c1', paths: ['/var/www/a.php'] })) as never, {} as never);
+      expect(onMove).toHaveBeenCalledWith(target, 'c1', ['/var/www/a.php']);
+    });
+
+    it('forwards a file target as is (the extension resolves its parent)', async () => {
+      const onMove = vi.fn().mockResolvedValue(undefined);
+      const target = node('/var/www/dir/x.php');
+      await make(onMove).handleDrop(target, transferWith(JSON.stringify({ connectionId: 'c1', paths: ['/var/www/a.php'] })) as never, {} as never);
+      expect(onMove).toHaveBeenCalledWith(target, 'c1', ['/var/www/a.php']);
+    });
+
+    it('forwards undefined for empty tree space', async () => {
+      const onMove = vi.fn().mockResolvedValue(undefined);
+      await make(onMove).handleDrop(undefined, transferWith(JSON.stringify({ connectionId: 'c1', paths: ['/var/www/a.php'] })) as never, {} as never);
+      expect(onMove).toHaveBeenCalledWith(undefined, 'c1', ['/var/www/a.php']);
+    });
+
+    it('ignores a drop on the selector row', async () => {
+      const onMove = vi.fn().mockResolvedValue(undefined);
+      await make(onMove).handleDrop(SELECTOR, transferWith(JSON.stringify({ connectionId: 'c1', paths: ['/var/www/a.php'] })) as never, {} as never);
+      expect(onMove).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a foreign mime type', transferWith('file:///tmp/a.php', 'text/uri-list')],
+      ['unparsable JSON', transferWith('{nope')],
+      ['an empty path list', transferWith(JSON.stringify({ connectionId: 'c1', paths: [] }))],
+      ['a payload with the wrong shape', transferWith(JSON.stringify({ connectionId: 1, paths: ['x'] }))],
+      ['no data at all', transferWith(undefined)],
+    ])('ignores %s', async (_name, transfer) => {
+      const onMove = vi.fn().mockResolvedValue(undefined);
+      await expect(make(onMove).handleDrop(node('/var/www/dir', true), transfer as never, {} as never)).resolves.toBeUndefined();
+      expect(onMove).not.toHaveBeenCalled();
     });
   });
 

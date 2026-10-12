@@ -47,8 +47,8 @@ artifact is `dist/extension.js` (esbuild) via `vsce`.
   op log, versioned entries), `withTimeout.ts` (bounds on secret-store calls).
 - `src/` safe remote ops — `remoteOps.ts` (the choke point for every
   mutating op: freeze gate, in-root containment, sidecar upload guard,
-  create/rename/duplicate/chmod, clipboard paste, typed-confirm +
-  uri-list/drop helpers; server-side trash and backup were removed in
+  create/rename/duplicate/chmod, clipboard paste, typed-confirm;
+  server-side trash and backup were removed in
   0.3.0, so deletes and overwrites have no remote undo), `pathMapping.ts`
   (longest-prefix
   workspace↔remote resolution, overlap notes), `syncPreview.ts`
@@ -60,11 +60,13 @@ artifact is `dist/extension.js` (esbuild) via `vsce`.
   walk, dangling-link and loop refusal, `gateWriteTarget`
   allow/confirm/block), `pushTarget.ts` (single-file push lands on the
   fresh real path, retarget check, out-of-root confirmation),
+  `dropMove.ts` (drag and drop move inside the tree: plans no-ops and
+  folder-into-itself, scans conflicts, then delegates to `pasteEntries`),
   `destinationGate.ts` (one per bulk operation: refuses a destination
   directory that really is outside the root),
   `testConnection.ts` (one-off draft dial, 15s bound, static messages).
 - `src/ui/` — `gangwayTreeProvider.ts` (lazy explorer, double-click to
-  open, drag & drop controller), `connectionFormPanel.ts` +
+  open, in-tree drag & drop controller), `connectionFormPanel.ts` +
   `connectionFormHtml.ts` +
   `media/connectionForm/` (Webview UI Toolkit form with Test button +
   mappings table), `conflictResolution.ts`
