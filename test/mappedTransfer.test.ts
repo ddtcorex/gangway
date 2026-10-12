@@ -57,6 +57,28 @@ describe('pushMappedFile', () => {
   });
 });
 
+describe('pushMappedFile destinationGate', () => {
+  it('pushMappedFile with a refusing destinationGate makes no mkdir, no fastPut, no posixRename', async () => {
+    const client = fakePutClient();
+    const destinationGate = vi.fn().mockRejectedValue(new Error('outside the connection root'));
+    await expect(pushMappedFile(client, '/ws/app.php', '/var/www/shared/app.php', { destinationGate })).rejects.toThrow(
+      'outside the connection root',
+    );
+    expect(client.mkdir).not.toHaveBeenCalled();
+    expect(client.fastPut).not.toHaveBeenCalled();
+    expect(client.posixRename).not.toHaveBeenCalled();
+  });
+
+  it('awaits the gate with the posix dirname of the remote path', async () => {
+    const client = fakePutClient();
+    const destinationGate = vi.fn().mockResolvedValue(undefined);
+    await pushMappedFile(client, '/ws/app.php', '/var/www/shared/app.php', { destinationGate });
+    expect(destinationGate).toHaveBeenCalledWith('/var/www/shared');
+    expect(destinationGate.mock.invocationCallOrder[0]).toBeLessThan(client.mkdir.mock.invocationCallOrder[0]);
+    expect(client.posixRename).toHaveBeenCalledWith('/var/www/shared/app.php.tmp', '/var/www/shared/app.php');
+  });
+});
+
 describe('pullMappedFile', () => {
   it('stages then renames: fastGet targets the staging sibling, dest holds full bytes', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mapped-pull-'));

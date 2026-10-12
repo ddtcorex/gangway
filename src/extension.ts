@@ -11,7 +11,8 @@ import { AuditLog } from './auditLog';
 import { checkConflict } from './conflictGuard';
 import { readSidecar, writeSidecar } from './tmpStore';
 import { preparePush } from './pushTarget';
-import { LinkRetargetedError } from './realTarget';
+import { BrokenLinkError, LinkLoopError, LinkRetargetedError } from './realTarget';
+import { createDestinationGate } from './destinationGate';
 import { purgeExpiredTmp, sweepUnknownTmpRoots } from './tmpRetention';
 import { tmpFilePathFor, tmpRootFor, connectionSlug, sidecarPathFor } from './tmpPath';
 import { mapSftpError, actionLabel, isConnectionError } from './errorMapper';
@@ -637,6 +638,16 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         await openForEditing(localPath);
       }
     } catch (err) {
+      // A broken link or a loop is a fact about the server, not a transient
+      // failure: say what it is in opening terms and offer no Retry. The
+      // error's own clickedPath may be a parent, so name the opened row.
+      if (err instanceof BrokenLinkError || err instanceof LinkLoopError) {
+        const name = path.posix.basename(remotePath);
+        await vscode.window.showErrorMessage(
+          err instanceof BrokenLinkError ? `${name} is a broken link` : `${name} is a symbolic link loop`,
+        );
+        return;
+      }
       await showCommandError(err, { retry: () => runDownloadFileCommand(node), connection });
     }
   }
@@ -944,6 +955,9 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         return resolved;
       };
       const adapter = await getAdapter(connection);
+      // One gate per operation: a destination directory that is a link out of
+      // the root fails its files instead of receiving them.
+      const destinationGate = createDestinationGate(adapter, connection);
       const result = await withCancellableProgress(`Uploading ${remotePath}`, (signal, reportProgress) =>
         runFolderUpload(
           { path: remotePath, isDirectory: true, isSymbolicLink: false, size: 0 },
@@ -956,8 +970,15 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
             } catch {
               throw new Error(`No local copy of ${file} -- download the folder before uploading it.`);
             }
-            await uploadFile(adapter, connection.id, localPath, file, byteSize, auditLog, (message) =>
-              output.appendLine(message),
+            await uploadFile(
+              adapter,
+              connection.id,
+              localPath,
+              file,
+              byteSize,
+              auditLog,
+              (message) => output.appendLine(message),
+              { destinationGate },
             );
             dirtyDecorations.refresh(vscode.Uri.file(localPath));
           },
@@ -1002,6 +1023,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
             reportProgress,
             onlyPaths,
             ensureDir: async (dir) => {
+              await destinationGate(dir);
               await adapter.mkdir(dir, true);
             },
           },
@@ -1437,14 +1459,22 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
           : connection.remotePath;
     try {
       const adapter = await getAdapter(connection);
+      const destinationGate = createDestinationGate(adapter, connection);
       await withCancellableProgress(`Uploading ${collected.length} dropped file(s)`, (signal, reportProgress) =>
         (async () => {
           for (const item of collected) {
             if (signal.aborted) throw new TransferCancelledError();
             const remotePath = `${targetDir}/${path.posix.basename(item.localPath)}`;
             reportProgress(remotePath);
-            await uploadFile(adapter, connection.id, item.localPath, remotePath, item.byteSize, auditLog, (message) =>
-              output.appendLine(message),
+            await uploadFile(
+              adapter,
+              connection.id,
+              item.localPath,
+              remotePath,
+              item.byteSize,
+              auditLog,
+              (message) => output.appendLine(message),
+              { destinationGate },
             );
           }
         })(),
@@ -1704,6 +1734,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       let done = 0;
       const skipped: string[] = [];
       const failed: { remotePath: string; message: string }[] = [];
+      const destinationGate = createDestinationGate(adapter, connection);
       await withCancellableProgress(`Syncing ${label} ${direction}`, (signal, reportProgress) =>
         (async () => {
           for (const { row } of picked) {
@@ -1744,7 +1775,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
                   // Workspace uploads never leave sidecars behind: a
                   // `.meta.json` next to the user's own project files would
                   // litter their repo (and could even get committed).
-                  isWorkspace ? { writeSidecar: false } : undefined,
+                  isWorkspace ? { writeSidecar: false, destinationGate } : { destinationGate },
                 );
                 dirtyDecorations.refresh(vscode.Uri.file(row.localPath));
                 done += 1;
@@ -2014,7 +2045,10 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     if (choice !== 'Upload') return;
     try {
       const adapter = await getAdapter(connection);
-      await pushMappedFile(adapter, fsPath, remotePath);
+      // Pure B: no freeze gate, but a destination directory that is a link
+      // out of the root is still refused.
+      const destinationGate = createDestinationGate(adapter, connection, { freezeGate: false });
+      await pushMappedFile(adapter, fsPath, remotePath, { destinationGate });
       await vscode.window.showInformationMessage(`Uploaded ${fsPath} → ${remotePath}.`);
     } catch (err) {
       await showCommandError(err, { retry: () => runUploadMappedFileCommand({ fsPath }), connection });
@@ -2154,6 +2188,8 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       );
       if (choice !== uploadLabel) return;
       const adapter = await getAdapter(connection);
+      // Pure B: no freeze gate, out-of-root link directories still refused.
+      const destinationGate = createDestinationGate(adapter, connection, { freezeGate: false });
       const result = await withCancellableProgress(`Uploading ${label}`, (signal, reportProgress) =>
         (async () => {
           const done: string[] = [];
@@ -2168,7 +2204,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
             const remotePath = joinRemote(file.rel);
             reportProgress(remotePath);
             try {
-              await pushMappedFile(adapter, file.localPath, remotePath);
+              await pushMappedFile(adapter, file.localPath, remotePath, { destinationGate });
               done.push(remotePath);
             } catch (err) {
               failed.push({ remotePath, message: err instanceof Error ? err.message : String(err) });

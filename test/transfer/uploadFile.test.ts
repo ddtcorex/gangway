@@ -337,4 +337,43 @@ describe('uploadFile', () => {
       expect(client.fastPut).not.toHaveBeenCalled();
     });
   });
+
+  describe('destinationGate', () => {
+    function gateClient() {
+      return {
+        fastPut: vi.fn().mockResolvedValue(undefined),
+        posixRename: vi.fn().mockResolvedValue(undefined),
+        delete: vi.fn().mockResolvedValue(undefined),
+        mkdir: vi.fn().mockResolvedValue(undefined),
+        lstat: vi.fn().mockResolvedValue(regularFile),
+        stat: vi.fn().mockResolvedValue(regularFile),
+      };
+    }
+
+    it('uploadFile with a refusing destinationGate makes no mkdir, no fastPut, no posixRename', async () => {
+      const client = gateClient();
+      const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
+      const destinationGate = vi.fn().mockRejectedValue(new Error('outside the connection root'));
+
+      await expect(
+        uploadFile(client, 'c1', localPath, '/srv/app/shared/a.php', 14, auditLog, () => {}, { destinationGate }),
+      ).rejects.toThrow('outside the connection root');
+      expect(client.mkdir).not.toHaveBeenCalled();
+      expect(client.fastPut).not.toHaveBeenCalled();
+      expect(client.posixRename).not.toHaveBeenCalled();
+      expect(auditLog.append).not.toHaveBeenCalled();
+    });
+
+    it('awaits the gate with the posix dirname of the remote path', async () => {
+      const client = gateClient();
+      const auditLog = { append: vi.fn().mockResolvedValue(undefined) } as unknown as AuditLog;
+      const destinationGate = vi.fn().mockResolvedValue(undefined);
+
+      await uploadFile(client, 'c1', localPath, '/srv/app/shared/a.php', 14, auditLog, () => {}, { destinationGate });
+
+      expect(destinationGate).toHaveBeenCalledWith('/srv/app/shared');
+      expect(destinationGate.mock.invocationCallOrder[0]).toBeLessThan(client.mkdir.mock.invocationCallOrder[0]);
+      expect(client.posixRename).toHaveBeenCalledWith('/srv/app/shared/a.php.tmp', '/srv/app/shared/a.php');
+    });
+  });
 });

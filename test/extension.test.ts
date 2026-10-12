@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -2086,6 +2086,213 @@ describe('activate - realistic command invocation', () => {
         showDocSpy.mockRestore();
         warnSpy.mockRestore();
       }
+    });
+  });
+
+  describe('bulk destinations and open through links', () => {
+    let lines: string[];
+    let dnd: { handleDrop: (target: unknown, dataTransfer: unknown, token: unknown) => Promise<void> };
+    let conn: ConnectionConfig;
+    let workRoot: string;
+    let previousFolders: unknown;
+    let errorSpy: MockInstance<typeof vscode.window.showErrorMessage>;
+    let warnSpy: MockInstance<typeof vscode.window.showWarningMessage>;
+    let infoSpy: MockInstance<typeof vscode.window.showInformationMessage>;
+
+    /** Every path at or below `link` really lives below `real`; the rest resolves to itself. */
+    function linkDir(link: string, real: string): void {
+      fakeRawClient.realPath.mockImplementation(async (p: string) =>
+        p === link || p.startsWith(`${link}/`) ? `${real}${p.slice(link.length)}` : p,
+      );
+    }
+
+    function uriListOf(...fsPaths: string[]) {
+      const value = fsPaths.map((p) => `file://${p}`).join('\n');
+      return { get: (mime: string) => (mime === 'text/uri-list' ? { asString: async () => value } : undefined) };
+    }
+
+    beforeEach(async () => {
+      lines = [];
+      const outputSpy = vi.spyOn(vscode.window, 'createOutputChannel').mockReturnValue({
+        appendLine: (line: string) => {
+          lines.push(line);
+        },
+        show: () => {},
+        dispose: () => {},
+      } as never);
+      const originalCreateTreeView = vscode.window.createTreeView;
+      const treeSpy = vi.spyOn(vscode.window, 'createTreeView').mockImplementation(((id: string, options: never) => {
+        dnd = (options as { dragAndDropController: typeof dnd }).dragAndDropController;
+        return originalCreateTreeView(id, options);
+      }) as never);
+      const fresh = activate(fakeContext());
+      outputSpy.mockRestore();
+      treeSpy.mockRestore();
+      conn = await fresh.connectionManager.add({
+        name: 'linked',
+        host: 'example.com',
+        port: 22,
+        username: 'deploy',
+        remotePath: '/var/www',
+        authMethod: 'password',
+      });
+      await fresh.connectionManager.setWorkspaceBinding(conn.id);
+      workRoot = path.join(tmpHome, 'work');
+      await fs.mkdir(path.join(workRoot, 'sub'), { recursive: true });
+      await fs.writeFile(path.join(workRoot, 'ok.php'), '<?php // ok');
+      await fs.writeFile(path.join(workRoot, 'sub', 'x.php'), '<?php // x');
+      previousFolders = vscode.workspace.workspaceFolders;
+      (vscode.workspace as unknown as { workspaceFolders: { uri: { fsPath: string }; name: string }[] }).workspaceFolders = [
+        { uri: { fsPath: workRoot }, name: 'work' },
+      ];
+      errorSpy = vi.spyOn(vscode.window, 'showErrorMessage');
+      warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      infoSpy = vi.spyOn(vscode.window, 'showInformationMessage');
+    });
+
+    afterEach(() => {
+      (vscode.workspace as unknown as { workspaceFolders: unknown }).workspaceFolders = previousFolders;
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+      infoSpy.mockRestore();
+      mockWindow.__test_resetAnswers();
+    });
+
+    const putTargets = (): string[] => (fakeRawClient.fastPut.mock.calls as Array<[string, string]>).map(([, remote]) => remote);
+
+    it('a drag-drop into an out-of-root link directory writes nothing and reports the failure', async () => {
+      linkDir('/var/www/shared', '/etc/ext');
+      const dropped = path.join(tmpHome, 'drop.php');
+      await fs.writeFile(dropped, '<?php');
+
+      await dnd.handleDrop(
+        { connectionId: conn.id, entry: { path: '/var/www/shared', isDirectory: true, isSymbolicLink: true, size: 0 } },
+        uriListOf(dropped),
+        {},
+      );
+
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+      expect(fakeRawClient.mkdir).not.toHaveBeenCalled();
+      expect(fakeRawClient.posixRename).not.toHaveBeenCalled();
+      const message = String(errorSpy.mock.calls[0]?.[0]);
+      expect(message).toContain('"/var/www/shared"');
+      expect(message).toMatch(/outside/);
+    });
+
+    it('a drag-drop into a link directory inside the root still uploads', async () => {
+      linkDir('/var/www/current', '/var/www/releases/42');
+      const dropped = path.join(tmpHome, 'drop.php');
+      await fs.writeFile(dropped, '<?php');
+
+      await dnd.handleDrop(
+        { connectionId: conn.id, entry: { path: '/var/www/current', isDirectory: true, isSymbolicLink: true, size: 0 } },
+        uriListOf(dropped),
+        {},
+      );
+
+      expect(fakeRawClient.fastPut).toHaveBeenCalledWith(dropped, '/var/www/current/drop.php.tmp');
+      expect(errorSpy).not.toHaveBeenCalled();
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Uploaded 1 file(s)'));
+    });
+
+    it('a folder upload whose destination is an out-of-root link writes nothing and reports the failure', async () => {
+      linkDir('/var/www/app', '/etc/ext');
+      fakeRawClient.list.mockImplementation(async (dirPath: string) =>
+        dirPath === '/var/www/app' ? [{ name: 'clean.php', type: '-' }] : [],
+      );
+      const localFile = tmpFilePathFor(conn, '/var/www/app/clean.php');
+      await fs.mkdir(path.dirname(localFile), { recursive: true });
+      await fs.writeFile(localFile, 'clean content');
+      await writeSidecar(localFile, {
+        connectionId: conn.id,
+        remotePath: '/var/www/app/clean.php',
+        mtime: 0,
+        size: 0,
+        downloadedAt: Date.now(),
+      });
+
+      await handlers.get('gangway.uploadFolder')!({
+        connectionId: conn.id,
+        entry: { path: '/var/www/app', isDirectory: true, isSymbolicLink: false, size: 0 },
+      });
+
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+      expect(fakeRawClient.mkdir).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('1 file(s) failed'), 'Retry failed', 'Dismiss');
+      expect(lines.some((l) => l.includes('/var/www/app/clean.php') && /outside/.test(l))).toBe(true);
+    });
+
+    it('a sync upload refuses only the files under an out-of-root link and uploads the rest', async () => {
+      linkDir('/var/www/sub', '/etc/ext');
+      mockWindow.__test_queuePick((items: unknown[]) => items);
+
+      await handlers.get('gangway.syncWorkspaceUp')!();
+
+      expect(putTargets()).toContain('/var/www/ok.php.tmp');
+      expect(putTargets().some((p) => p.startsWith('/var/www/sub/'))).toBe(false);
+      expect(fakeRawClient.mkdir).not.toHaveBeenCalledWith('/var/www/sub', true);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('1 file(s) failed'), 'Retry failed', 'Dismiss');
+      expect(lines.some((l) => l.includes('/var/www/sub/x.php') && /outside/.test(l))).toBe(true);
+    });
+
+    it('a mapped single-file push into an out-of-root link directory writes nothing', async () => {
+      linkDir('/var/www/sub', '/etc/ext');
+      mockWindow.__test_queueWarning('Upload');
+
+      await handlers.get('gangway.uploadMappedFile')!({ fsPath: path.join(workRoot, 'sub', 'x.php') });
+
+      expect(fakeRawClient.fastPut).not.toHaveBeenCalled();
+      expect(fakeRawClient.mkdir).not.toHaveBeenCalled();
+      expect(String(errorSpy.mock.calls[0]?.[0])).toContain('"/var/www/sub"');
+    });
+
+    it('a mapped folder push refuses the out-of-root link directory per file and pushes the rest', async () => {
+      linkDir('/var/www/sub', '/etc/ext');
+      mockWindow.__test_queueWarning('Upload 2 files');
+
+      await handlers.get('gangway.uploadMappedFolder')!({ fsPath: workRoot });
+
+      expect(putTargets()).toEqual(['/var/www/ok.php.tmp']);
+      expect(lines.some((l) => l.includes('/var/www/sub/x.php') && /outside/.test(l))).toBe(true);
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('1 failed'));
+    });
+
+    it('opening a broken link shows the broken-link message, offers no Retry, and writes nothing to disk', async () => {
+      const gone = '/var/www/app/gone.php';
+      fakeRawClient.realPath.mockImplementation(async (p: string) => (p === gone ? undefined : p));
+      fakeRawClient.lstat.mockImplementation(async (p: string) => ({
+        size: 0,
+        modifyTime: 0,
+        isDirectory: false,
+        isSymbolicLink: p === gone,
+      }));
+
+      await handlers.get('gangway.downloadFile')!({
+        connectionId: conn.id,
+        entry: { path: gone, isDirectory: false, isSymbolicLink: true, size: 0 },
+      });
+
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy.mock.calls[0]).toEqual(['gone.php is a broken link']);
+      expect(fakeRawClient.fastGet).not.toHaveBeenCalled();
+      await expect(fs.stat(tmpFilePathFor(conn, gone))).rejects.toThrow();
+      await expect(fs.stat(path.dirname(tmpFilePathFor(conn, gone)))).rejects.toThrow();
+    });
+
+    it('opening a link loop shows the loop message and offers no Retry', async () => {
+      const loop = '/var/www/app/loop.php';
+      fakeRawClient.realPath.mockImplementation(async (p: string) => {
+        if (p === loop) throw Object.assign(new Error('Too many levels of symbolic links'), { code: 'ELOOP' });
+        return p;
+      });
+
+      await handlers.get('gangway.downloadFile')!({
+        connectionId: conn.id,
+        entry: { path: loop, isDirectory: false, isSymbolicLink: true, size: 0 },
+      });
+
+      expect(errorSpy.mock.calls).toEqual([['loop.php is a symbolic link loop']]);
+      expect(fakeRawClient.fastGet).not.toHaveBeenCalled();
     });
   });
 });

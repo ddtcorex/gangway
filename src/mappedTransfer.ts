@@ -27,7 +27,10 @@ export async function pushMappedFile(
   client: MappedPutClient,
   localPath: string,
   remotePath: string,
+  /** destinationGate: see uploadFile's option of the same name. */
+  options?: { destinationGate?: (remoteDir: string) => Promise<void> },
 ): Promise<void> {
+  if (options?.destinationGate) await options.destinationGate(path.posix.dirname(remotePath));
   await refuseSymlinkDestination(client, remotePath);
   await client.mkdir(path.posix.dirname(remotePath), true).catch(() => {});
   const tmpRemotePath = `${remotePath}.tmp`;

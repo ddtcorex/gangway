@@ -74,10 +74,17 @@ export async function uploadFile(
      * this clicked path as its identity and records `remotePath` as realPath.
      */
     sidecarRemotePath?: string;
+    /**
+     * Bulk callers pass one createDestinationGate per operation. Awaited with
+     * the destination directory before anything is written, so a directory
+     * that is a link out of the connection root never receives the file.
+     */
+    destinationGate?: (remoteDir: string) => Promise<void>;
   },
 ): Promise<void> {
   const writeSidecarBaseline = options?.writeSidecar ?? true;
   const viaLink = options?.sidecarRemotePath !== undefined && options.sidecarRemotePath !== remotePath;
+  if (options?.destinationGate) await options.destinationGate(path.posix.dirname(remotePath));
   await refuseSymlinkDestination(client, remotePath);
   // The parent may never have existed remotely (a locally-created folder
   // pushed for the first time). Recursive mkdir is idempotent on the lib
