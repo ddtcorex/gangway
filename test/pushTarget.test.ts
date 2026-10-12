@@ -16,8 +16,12 @@ const base: ConnectionConfig = {
 const fileStat: RemoteStat = { mtime: 0, size: 1, isDirectory: false, isSymbolicLink: false };
 const notFound = (): Error => Object.assign(new Error('No such file'), { code: 2 });
 
-/** Fake server: `map` lists every existing path and its real path. */
-function client(map: Record<string, string>): TargetClient {
+/**
+ * Fake server: `map` lists every existing path and its real path. Without
+ * `links`, a path is a link when its real path differs; with `links`, only
+ * the listed paths are links (a file below a linked parent is not one).
+ */
+function client(map: Record<string, string>, links?: Set<string>): TargetClient {
   return {
     realPath: async (p) => map[p],
     stat: async (p) => {
@@ -26,7 +30,7 @@ function client(map: Record<string, string>): TargetClient {
     },
     lstat: async (p) => {
       if (!(p in map)) throw notFound();
-      return { ...fileStat, isSymbolicLink: map[p] !== p };
+      return { ...fileStat, isSymbolicLink: links ? links.has(p) : map[p] !== p };
     },
   };
 }
@@ -79,11 +83,49 @@ describe('preparePush', () => {
     ).rejects.toBeInstanceOf(LinkRetargetedError);
   });
 
-  it('legacy sidecar without realPath pushes to the fresh real path', async () => {
-    const result = await preparePush(client(linkInside), base, sidecar(), '/srv/app/link.php', vi.fn());
+  it('a plain file replaced by a link after download stops the push', async () => {
+    // Downloaded as a plain file (no realPath stored), now a link elsewhere.
+    const err = await preparePush(
+      client(linkInside),
+      base,
+      sidecar({ remotePath: '/srv/app/link.php' }),
+      '/srv/app/link.php',
+      vi.fn(),
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LinkRetargetedError);
+    const retargeted = err as LinkRetargetedError;
+    expect(retargeted.storedRealPath).toBe('/srv/app/link.php');
+    expect(retargeted.currentRealPath).toBe('/srv/app/shared/real.php');
+  });
+
+  it('legacy sidecar without realPath for a path that is not a link pushes normally', async () => {
+    const plain = { '/srv/app': '/srv/app', '/srv/app/a.php': '/srv/app/a.php' };
+    const result = await preparePush(client(plain), base, sidecar({ remotePath: '/srv/app/a.php' }), '/srv/app/a.php', vi.fn());
     expect(result.status).toBe('ready');
     if (result.status !== 'ready') return;
-    expect(result.target.realPath).toBe('/srv/app/shared/real.php');
+    expect(result.target.realPath).toBe('/srv/app/a.php');
+    expect(result.target.viaLink).toBe(false);
+  });
+
+  it('legacy sidecar without realPath below a linked parent pushes to the fresh real path', async () => {
+    // A bulk download stores no realPath; the file itself is not a link, only
+    // its parent is, so this is not a retarget.
+    const linkedParent = {
+      '/srv/app': '/srv/app',
+      '/srv/app/current': '/srv/app/releases/42',
+      '/srv/app/current/a.php': '/srv/app/releases/42/a.php',
+    };
+    const result = await preparePush(
+      client(linkedParent, new Set(['/srv/app/current'])),
+      base,
+      sidecar({ remotePath: '/srv/app/current/a.php' }),
+      '/srv/app/current/a.php',
+      vi.fn(),
+    );
+    expect(result.status).toBe('ready');
+    if (result.status !== 'ready') return;
+    expect(result.target.realPath).toBe('/srv/app/releases/42/a.php');
+    expect(result.target.viaLink).toBe(true);
   });
 
   it('outside root asks once then remembers via sidecarUpdate', async () => {
@@ -119,7 +161,7 @@ describe('preparePush', () => {
     await preparePush(
       client(linkOutside),
       base,
-      sidecar({ outsideRootConfirmedFor: '/srv/other/real.php' }),
+      sidecar({ realPath: '/srv/shared/real.php', outsideRootConfirmedFor: '/srv/other/real.php' }),
       '/srv/app/link.php',
       confirm,
     );
