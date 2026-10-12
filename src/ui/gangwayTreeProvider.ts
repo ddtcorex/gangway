@@ -150,12 +150,13 @@ export class GangwayTreeProvider implements vscode.TreeDataProvider<GangwayTreeN
     // does for local Explorer entries. A symlink is the one case an icon
     // theme cannot express on its own, so it keeps an explicit override.
     const link = node.entry.link;
-    const unusable = node.entry.isSymbolicLink && !node.entry.isDirectory && (link?.kind === 'broken' || link?.kind === 'loop');
+    const unusable = node.entry.isSymbolicLink && !node.entry.isDirectory && (link?.kind === 'broken' || link?.kind === 'loop' || link?.kind === 'unresolved');
     if (node.entry.isSymbolicLink) {
       const name = item.label as string;
       if (unusable) {
         item.iconPath = new vscode.ThemeIcon('file-symlink-file', new vscode.ThemeColor('disabledForeground'));
-        item.description = link?.kind === 'loop' ? 'link loop' : 'broken link';
+        item.description =
+          link?.kind === 'loop' ? 'link loop' : link?.kind === 'unresolved' ? 'unresolved link' : 'broken link';
       } else {
         item.iconPath = new vscode.ThemeIcon(node.entry.isDirectory ? 'file-symlink-directory' : 'file-symlink-file');
         // An ancestor loop still expands (it is a real directory), but warn.

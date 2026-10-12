@@ -69,6 +69,51 @@ describe('resolveLink', () => {
     expect((await resolveLink(c, '/srv/www/loop-a')).kind).toBe('broken');
   });
 
+  it('a transport error on both realPath and stat is unresolved, not broken', async () => {
+    const drop = Object.assign(new Error('Connection lost'), { code: 'ECONNRESET' });
+    const c = client({
+      realPath: async () => {
+        throw drop;
+      },
+      stat: async () => {
+        throw drop;
+      },
+    });
+    expect(await resolveLink(c, '/srv/www/l')).toEqual({ realPath: '/srv/www/l', kind: 'unresolved' });
+    const denied = client({
+      realPath: async () => '/srv/real/l',
+      stat: async () => {
+        throw Object.assign(new Error('Permission denied'), { code: '3' });
+      },
+    });
+    expect((await resolveLink(denied, '/srv/www/l')).kind).toBe('unresolved');
+  });
+
+  it('an unresolved link is not expandable', async () => {
+    const drop = new Error('timeout');
+    const c = client({
+      realPath: async () => {
+        throw drop;
+      },
+      stat: async () => {
+        throw drop;
+      },
+    });
+    const [out] = await resolveLinkEntries(c, [linkEntry('/srv/www/l')]);
+    expect(out.isDirectory).toBe(false);
+    expect(out.link).toEqual({ realPath: '/srv/www/l', kind: 'unresolved' });
+  });
+
+  it('a not-found stat after a successful realPath stays broken', async () => {
+    const c = client({
+      realPath: async () => '/srv/gone',
+      stat: async () => {
+        throw Object.assign(new Error('No such file'), { code: 'ENOENT' });
+      },
+    });
+    expect((await resolveLink(c, '/srv/www/l')).kind).toBe('broken');
+  });
+
   it('ELOOP error is loop', async () => {
     for (const msg of ['ELOOP: too many levels of symbolic links', 'Too many levels', 'symlink loop']) {
       const c = client({
@@ -211,6 +256,6 @@ describe('resolveLinkEntries', () => {
     });
     const out = await resolveLinkEntries(c, [linkEntry('/l/ok'), linkEntry('/l/bad')]);
     expect(out[0].link?.kind).toBe('file');
-    expect(out[1].link?.kind).toBe('broken');
+    expect(out[1].link?.kind).toBe('unresolved');
   });
 });

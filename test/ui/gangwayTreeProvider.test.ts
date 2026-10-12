@@ -240,6 +240,15 @@ describe('GangwayTreeProvider', () => {
       expect(loop.description).toBe('link loop');
     });
 
+    it('unresolved link is dimmed, labelled, and still deletable', () => {
+      const item = provider().getTreeItem(linkNode({ realPath: '/var/www/ln', kind: 'unresolved' }, false));
+      expect(item.contextValue).toBe('gangway.brokenLink');
+      expect(item.description).toBe('unresolved link');
+      expect(item.command?.command).toBe('gangway.internalFileClick');
+      expect(item.collapsibleState).toBe(vscode.TreeItemCollapsibleState.None);
+      expect((item.iconPath as vscode.ThemeIcon).id).toBe('file-symlink-file');
+    });
+
     it('expandable ancestor-loop link stays a collapsible folder but carries a warning', () => {
       const item = provider().getTreeItem(linkNode({ realPath: '/var', kind: 'loop' }, true));
       expect(item.collapsibleState).toBe(vscode.TreeItemCollapsibleState.Collapsed);

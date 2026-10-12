@@ -1,7 +1,8 @@
 import type { RemoteEntry } from './folderQueue';
 import type { RemoteStat } from './types';
+import { isNotFoundError } from './remoteOps';
 
-export type LinkKind = 'file' | 'dir' | 'broken' | 'loop';
+export type LinkKind = 'file' | 'dir' | 'broken' | 'loop' | 'unresolved';
 
 export interface LinkInfo {
   realPath: string;
@@ -37,11 +38,14 @@ function isStrictAncestor(ancestor: string, path: string): boolean {
 async function kindFromStat(
   client: LinkResolveClient,
   path: string,
-): Promise<'file' | 'dir' | 'broken' | 'loop'> {
+): Promise<'file' | 'dir' | 'broken' | 'loop' | 'unresolved'> {
   try {
     return (await client.stat(path)).isDirectory ? 'dir' : 'file';
   } catch (err) {
-    return isLoopError(err) ? 'loop' : 'broken';
+    if (isLoopError(err)) return 'loop';
+    // Only a definite not-found is a broken link; a dropped connection, a
+    // permission error or a timeout says nothing about the target.
+    return isNotFoundError(err) ? 'broken' : 'unresolved';
   }
 }
 
@@ -81,7 +85,7 @@ export async function resolveLinkEntries(
       try {
         link = await resolveLink(client, entry.path);
       } catch {
-        link = { realPath: entry.path, kind: 'broken' };
+        link = { realPath: entry.path, kind: 'unresolved' };
       }
       // Only an ancestor loop is expandable; a loop reported by the server is not.
       const expandable =

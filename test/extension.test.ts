@@ -2199,6 +2199,27 @@ describe('activate - realistic command invocation', () => {
       handlers.get('gangway.internalFileClick')!(node);
     }
 
+    it('clicking an unresolved link warns without Retry or any path and never downloads', async () => {
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      const node = {
+        connectionId: connection.id,
+        entry: {
+          path: '/var/www/app/shared/ln',
+          isDirectory: false,
+          isSymbolicLink: true,
+          size: 0,
+          link: { realPath: '/var/www/app/shared/ln', kind: 'unresolved' as const },
+        },
+      };
+      click(node);
+      click(node);
+      expect(warnSpy).toHaveBeenCalledTimes(2);
+      expect(warnSpy.mock.calls[0]).toEqual(['ln could not be resolved right now. Refresh to try again.']);
+      expect(fakeRawClient.stat).not.toHaveBeenCalled();
+      expect(fakeRawClient.fastGet).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
     it('a single click does not download or open the file', () => {
       click(nodeFor('/var/www/app/config.php'));
 

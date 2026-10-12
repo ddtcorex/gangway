@@ -408,6 +408,12 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       const key = `${node.connectionId}:${node.entry.path}`;
       const now = Date.now();
       const linkKind = node.entry.link?.kind;
+      if (node.entry.isSymbolicLink && linkKind === 'unresolved') {
+        lastClickedKey = undefined;
+        const name = node.entry.path.split('/').pop() ?? node.entry.path;
+        void vscode.window.showWarningMessage(`${name} could not be resolved right now. Refresh to try again.`);
+        return;
+      }
       if (node.entry.isSymbolicLink && (linkKind === 'broken' || linkKind === 'loop')) {
         lastClickedKey = undefined;
         const name = node.entry.path.split('/').pop() ?? node.entry.path;
