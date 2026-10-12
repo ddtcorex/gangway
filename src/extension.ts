@@ -14,6 +14,7 @@ import { purgeExpiredTmp, sweepUnknownTmpRoots } from './tmpRetention';
 import { tmpFilePathFor, tmpRootFor, connectionSlug, sidecarPathFor } from './tmpPath';
 import { mapSftpError, actionLabel, isConnectionError } from './errorMapper';
 import { mapListingToEntries } from './remoteListing';
+import { resolveLinkEntries } from './linkResolver';
 import { GangwayTreeProvider, isSelectorNode, type RemoteTreeNode, type GangwayTreeNode } from './ui/gangwayTreeProvider';
 import { TmpStatusBar } from './ui/statusBar';
 import { AUTO_OPEN_PROMPT_THRESHOLD_BYTES, isProbablyBinary, buildDownloadPlan, type RemoteEntry } from './folderQueue';
@@ -342,7 +343,10 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
     },
     async (connection, dirPath) => {
       const adapter = await getAdapter(connection);
-      return mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName);
+      return resolveLinkEntries(
+        adapter,
+        mapListingToEntries(dirPath, await adapter.list(dirPath), reportUnsafeListingName),
+      );
     },
     (connectionId, remotePath) => {
       const connection = connectionManager.list().find((c) => c.id === connectionId);
@@ -391,6 +395,14 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       }
       const key = `${node.connectionId}:${node.entry.path}`;
       const now = Date.now();
+      const linkKind = node.entry.link?.kind;
+      if (node.entry.isSymbolicLink && (linkKind === 'broken' || linkKind === 'loop')) {
+        lastClickedKey = undefined;
+        const name = node.entry.path.split('/').pop() ?? node.entry.path;
+        const reason = linkKind === 'loop' ? 'it points into a link loop' : 'its target does not exist';
+        void vscode.window.showWarningMessage(`Cannot open "${name}": ${reason}.`);
+        return;
+      }
       if (lastClickedKey === key && now - lastClickedAt < DOUBLE_CLICK_THRESHOLD_MS) {
         lastClickedKey = undefined;
         void runDownloadFileCommand(node);

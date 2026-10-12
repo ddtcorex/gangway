@@ -207,6 +207,45 @@ describe('GangwayTreeProvider', () => {
     });
   });
 
+  describe('symlink entries', () => {
+    const provider = () => new GangwayTreeProvider(() => [], () => undefined, vi.fn(), vi.fn(), localUriFor);
+    const linkNode = (link: RemoteTreeNode['entry']['link'], isDirectory: boolean): RemoteTreeNode => ({
+      connectionId: 'c1',
+      entry: { path: '/var/www/ln', isDirectory, isSymbolicLink: true, size: 0, link },
+    });
+
+    it('dir link is collapsible and uses gangway.folder', () => {
+      const item = provider().getTreeItem(linkNode({ realPath: '/var/www/app', kind: 'dir' }, true));
+      expect(item.collapsibleState).toBe(vscode.TreeItemCollapsibleState.Collapsed);
+      expect(item.contextValue).toBe('gangway.folder');
+      expect((item.iconPath as vscode.ThemeIcon).id).toBe('file-symlink-directory');
+    });
+
+    it('file link keeps the open command', () => {
+      const node = linkNode({ realPath: '/var/www/a.php', kind: 'file' }, false);
+      const item = provider().getTreeItem(node);
+      expect(item.contextValue).toBe('gangway.file');
+      expect(item.command).toEqual({ command: 'gangway.internalFileClick', title: 'Open File', arguments: [node] });
+      expect((item.iconPath as vscode.ThemeIcon).id).toBe('file-symlink-file');
+    });
+
+    it('broken link has gangway.brokenLink and no open command', () => {
+      const item = provider().getTreeItem(linkNode({ realPath: '/var/www/ln', kind: 'broken' }, false));
+      expect(item.contextValue).toBe('gangway.brokenLink');
+      expect(item.description).toBe('broken link');
+      expect(item.command?.title).not.toBe('Open File');
+      expect((item.iconPath as vscode.ThemeIcon).id).toBe('file-symlink-file');
+      const loop = provider().getTreeItem(linkNode({ realPath: '/var/www/ln', kind: 'loop' }, false));
+      expect(loop.contextValue).toBe('gangway.brokenLink');
+      expect(loop.description).toBe('link loop');
+    });
+
+    it('tooltip shows the real path', () => {
+      const item = provider().getTreeItem(linkNode({ realPath: '/srv/real.php', kind: 'file' }, false));
+      expect(item.tooltip).toBe('ln -> /srv/real.php');
+    });
+  });
+
   it('fires onDidChangeTreeData when refresh() is called', () => {
     const provider = new GangwayTreeProvider(() => [], () => undefined, vi.fn(), vi.fn(), localUriFor);
     const listener = vi.fn();

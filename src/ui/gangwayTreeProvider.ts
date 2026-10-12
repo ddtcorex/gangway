@@ -149,11 +149,22 @@ export class GangwayTreeProvider implements vscode.TreeDataProvider<GangwayTreeN
     // active icon theme resolve an icon from resourceUri, the same way it
     // does for local Explorer entries. A symlink is the one case an icon
     // theme cannot express on its own, so it keeps an explicit override.
+    const link = node.entry.link;
+    const unusable = node.entry.isSymbolicLink && !node.entry.isDirectory && (link?.kind === 'broken' || link?.kind === 'loop');
     if (node.entry.isSymbolicLink) {
-      item.iconPath = new vscode.ThemeIcon('file-symlink-file');
+      const name = item.label as string;
+      if (unusable) {
+        item.iconPath = new vscode.ThemeIcon('file-symlink-file', new vscode.ThemeColor('disabledForeground'));
+        item.description = link?.kind === 'loop' ? 'link loop' : 'broken link';
+      } else {
+        item.iconPath = new vscode.ThemeIcon(node.entry.isDirectory ? 'file-symlink-directory' : 'file-symlink-file');
+      }
+      if (link) item.tooltip = `${name} -> ${link.realPath}`;
     }
-    item.contextValue = node.entry.isDirectory ? 'gangway.folder' : 'gangway.file';
-    if (!node.entry.isDirectory) {
+    item.contextValue = unusable ? 'gangway.brokenLink' : node.entry.isDirectory ? 'gangway.folder' : 'gangway.file';
+    if (unusable) {
+      item.command = { command: 'gangway.internalFileClick', title: 'Broken Link', arguments: [node] };
+    } else if (!node.entry.isDirectory) {
       // TreeItem.command fires on every click, including a click that
       // reselects the already-selected item -- unlike
       // TreeView.onDidChangeSelection, which VS Code only fires when the
