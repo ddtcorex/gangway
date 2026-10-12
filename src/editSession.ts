@@ -1,4 +1,6 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import path from 'node:path';
 
 /**
  * One VS Code window's extension host is a distinct OS process, so its pid
@@ -13,6 +15,17 @@ export interface EditSessionOwner {
 }
 
 export type SessionCheck = { status: 'ok' } | { status: 'ownedByAnotherLiveSession'; owner: EditSessionOwner };
+
+/**
+ * Lock base keyed on the resolved remote file, so a link and its target
+ * (opened through different local tmp paths) contend for the same claim.
+ * The connection id is part of the key: equal remote paths on two servers
+ * are different files.
+ */
+export function remoteLockBase(tmpRoot: string, connectionId: string, realPath: string): string {
+  const key = crypto.createHash('sha1').update(`${connectionId}\0${realPath}`).digest('hex').slice(0, 16);
+  return path.join(tmpRoot, '.remote-locks', key);
+}
 
 function lockPathFor(localPath: string): string {
   return `${localPath}.gangway-session.json`;
@@ -71,6 +84,7 @@ export async function checkEditSession(localPath: string, isAlive: (pid: number)
 
 export async function acquireEditSession(localPath: string): Promise<void> {
   const owner: EditSessionOwner = { pid: process.pid, startedAt: Date.now() };
+  await fs.mkdir(path.dirname(lockPathFor(localPath)), { recursive: true });
   await fs.writeFile(lockPathFor(localPath), JSON.stringify(owner), 'utf8');
 }
 

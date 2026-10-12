@@ -4,11 +4,16 @@ import path from 'node:path';
 import { readSidecar } from './tmpStore';
 import { sidecarPathFor } from './tmpPath';
 
+const REMOTE_LOCKS_DIR = '.remote-locks';
+
 async function collectFiles(dir: string, out: string[]): Promise<void> {
   const entries = await fs.readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
+      // Edit-session locks (editSession.ts remoteLockBase) are not downloads:
+      // an age purge could drop a live claim held by a long-open editor.
+      if (entry.name === REMOTE_LOCKS_DIR) continue;
       await collectFiles(fullPath, out);
     } else if (!entry.isSymbolicLink() && !entry.name.endsWith('.meta.json')) {
       // Symlinks are never Gangway downloads (fastGet writes regular files),

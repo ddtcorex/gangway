@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { checkEditSession, acquireEditSession, releaseEditSession } from '../src/editSession';
+import { checkEditSession, acquireEditSession, releaseEditSession, remoteLockBase } from '../src/editSession';
 
 let tmpDir: string;
 let file: string;
@@ -59,5 +59,37 @@ describe('editSession', () => {
 
   it('releaseEditSession tolerates a lock that was never created', async () => {
     await expect(releaseEditSession(file)).resolves.toBeUndefined();
+  });
+});
+
+describe('remote lock keys', () => {
+  it('same real path from two clicked paths shares one lock key', () => {
+    const a = remoteLockBase(tmpDir, 'conn-1', '/srv/app/real.php');
+    const b = remoteLockBase(tmpDir, 'conn-1', '/srv/app/real.php');
+    expect(a).toBe(b);
+    expect(a).toMatch(/\.remote-locks[\\/][0-9a-f]{16}$/);
+    expect(path.dirname(path.dirname(a))).toBe(tmpDir);
+  });
+
+  it('different connections never share a key', () => {
+    expect(remoteLockBase(tmpDir, 'conn-1', '/srv/app/real.php')).not.toBe(
+      remoteLockBase(tmpDir, 'conn-2', '/srv/app/real.php'),
+    );
+  });
+
+  it('acquire creates the .remote-locks directory', async () => {
+    const base = remoteLockBase(tmpDir, 'conn-1', '/srv/app/real.php');
+    await acquireEditSession(base);
+    await expect(fs.stat(path.dirname(base))).resolves.toBeTruthy();
+    await expect(checkEditSession(base, () => true)).resolves.toEqual({ status: 'ok' });
+    await releaseEditSession(base);
+  });
+
+  it('stale pid lock is ignored for remote keys too', async () => {
+    const base = remoteLockBase(tmpDir, 'conn-1', '/srv/app/real.php');
+    await fs.mkdir(path.dirname(base), { recursive: true });
+    await fs.writeFile(`${base}.gangway-session.json`, JSON.stringify({ pid: 999999, startedAt: 1 }));
+    await expect(checkEditSession(base, () => false)).resolves.toEqual({ status: 'ok' });
+    await expect(checkEditSession(base, () => true)).resolves.toMatchObject({ status: 'ownedByAnotherLiveSession' });
   });
 });

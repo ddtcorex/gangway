@@ -29,7 +29,7 @@ import { parseGovardYaml, mapGovardRemote, filterNewRemotes, type MappedRemote, 
 import { raceWithCancellation } from './ui/cancellable';
 import { TransferCancelledError } from './folderQueue';
 import { resolveFileConflict, type ConflictResolutionUi } from './ui/conflictResolution';
-import { checkEditSession, acquireEditSession, releaseEditSession } from './editSession';
+import { checkEditSession, acquireEditSession, releaseEditSession, remoteLockBase } from './editSession';
 import {
   FrozenError,
   assertInsideRoot,
@@ -250,6 +250,21 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
   }
 
   /**
+   * Lock bases for one tmp file: its own path, plus (when a sidecar names
+   * the connection) a key on the resolved remote file, so a link and its
+   * target opened directly warn each other.
+   */
+  async function lockBasesFor(localPath: string): Promise<string[]> {
+    const bases = [localPath];
+    const sidecar = await readSidecar(localPath);
+    const connection = sidecar ? connectionManager.list().find((c) => c.id === sidecar.connectionId) : undefined;
+    if (sidecar && connection) {
+      bases.push(remoteLockBase(tmpRootFor(connection), sidecar.connectionId, sidecar.realPath ?? sidecar.remotePath));
+    }
+    return bases;
+  }
+
+  /**
    * Opens a downloaded tmp file for editing, unless another still-running
    * Gangway session (another VS Code window, on this machine) already has
    * it open -- editing the same deterministic local path in two windows at
@@ -258,8 +273,10 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
    * file was already downloaded/refreshed by the caller before this runs.
    */
   async function openForEditing(localPath: string): Promise<void> {
-    const check = await checkEditSession(localPath);
-    if (check.status === 'ownedByAnotherLiveSession') {
+    const bases = await lockBasesFor(localPath);
+    for (const base of bases) {
+      const check = await checkEditSession(base);
+      if (check.status !== 'ownedByAnotherLiveSession') continue;
       const startedAt = new Date(check.owner.startedAt).toLocaleTimeString();
       const choice = await vscode.window.showWarningMessage(
         `This file is already open for editing in another Gangway session (started at ${startedAt}). ` +
@@ -269,8 +286,9 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         'Open here anyway',
       );
       if (choice !== 'Open here anyway') return;
+      break;
     }
-    await acquireEditSession(localPath);
+    for (const base of bases) await acquireEditSession(base);
     await vscode.window.showTextDocument(vscode.Uri.file(localPath) as never);
   }
 
@@ -447,7 +465,9 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
    * no-op (ENOENT, swallowed) for anything that was never claimed.
    */
   const sessionReleaseListener = vscode.workspace.onDidCloseTextDocument((document) => {
-    void releaseEditSession(document.uri.fsPath).catch(() => {});
+    void lockBasesFor(document.uri.fsPath)
+      .then((bases) => Promise.all(bases.map((base) => releaseEditSession(base))))
+      .catch(() => {});
   });
 
   /**

@@ -38,6 +38,20 @@ describe('purgeExpiredTmp', () => {
     await expect(fs.access(`${stalePath}.meta.json`)).rejects.toThrow();
   });
 
+  it('never purges the .remote-locks directory, which holds live edit-session locks rather than downloads', async () => {
+    const now = Date.parse('2026-09-16T00:00:00Z');
+    const lock = path.join(tmpRoot, '.remote-locks', 'abcdef0123456789.gangway-session.json');
+    await fs.mkdir(path.dirname(lock), { recursive: true });
+    await fs.writeFile(lock, JSON.stringify({ pid: 1, startedAt: 1 }));
+    const old = new Date(now - 30 * 24 * 60 * 60 * 1000);
+    await fs.utimes(lock, old, old);
+
+    const purged = await purgeExpiredTmp(tmpRoot, 7, now);
+
+    expect(purged).toEqual([]);
+    await expect(fs.access(lock)).resolves.toBeUndefined();
+  });
+
   it('keeps a tmp file downloaded within the retention window', async () => {
     const now = Date.parse('2026-09-16T00:00:00Z');
     const oneDayAgo = now - 1 * 24 * 60 * 60 * 1000;
