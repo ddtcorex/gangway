@@ -326,6 +326,19 @@ describe('resolveLinkEntries with a cache', () => {
     expect(out.isDirectory).toBe(true);
   });
 
+  it('does not cache a result from the realPath-failed stat fallback', async () => {
+    const cache = new LinkCache();
+    const realPath = vi.fn(async () => {
+      throw new Error('Failure');
+    });
+    const c = client({ realPath, stat: async () => st(true) });
+    const [out] = await resolveLinkEntries(c, [linkEntry('/l/a')], { cache });
+    expect(out.link).toEqual({ realPath: '/l/a', kind: 'dir' });
+    expect(cache.get('/l/a')).toBeUndefined();
+    await resolveLinkEntries(c, [linkEntry('/l/a')], { cache });
+    expect(realPath).toHaveBeenCalledTimes(2);
+  });
+
   it('does not cache an unresolved failure, so the next listing retries', async () => {
     const cache = new LinkCache();
     const realPath = vi.fn(async () => {

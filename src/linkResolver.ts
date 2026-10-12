@@ -89,18 +89,27 @@ async function kindFromStat(
   }
 }
 
-export async function resolveLink(client: LinkResolveClient, linkPath: string): Promise<LinkInfo> {
+/** LinkInfo plus whether the result is trustworthy enough to memoize. */
+async function resolveLinkDetailed(
+  client: LinkResolveClient,
+  linkPath: string,
+): Promise<{ info: LinkInfo; cacheable: boolean }> {
   let resolved: string | undefined;
   try {
     resolved = await client.realPath(linkPath);
   } catch (err) {
-    if (isLoopError(err)) return { realPath: linkPath, kind: 'loop' };
-    // Server without realpath support: treat the path as its own real path.
-    return { realPath: linkPath, kind: await kindFromStat(client, linkPath) };
+    if (isLoopError(err)) return { info: { realPath: linkPath, kind: 'loop' }, cacheable: true };
+    // Server without realpath support, or a transient failure: treat the
+    // path as its own real path, but never memoize that guess.
+    return { info: { realPath: linkPath, kind: await kindFromStat(client, linkPath) }, cacheable: false };
   }
-  if (resolved === undefined) return { realPath: linkPath, kind: 'broken' };
-  if (isStrictAncestor(resolved, linkPath)) return { realPath: resolved, kind: 'loop' };
-  return { realPath: resolved, kind: await kindFromStat(client, linkPath) };
+  if (resolved === undefined) return { info: { realPath: linkPath, kind: 'broken' }, cacheable: true };
+  if (isStrictAncestor(resolved, linkPath)) return { info: { realPath: resolved, kind: 'loop' }, cacheable: true };
+  return { info: { realPath: resolved, kind: await kindFromStat(client, linkPath) }, cacheable: true };
+}
+
+export async function resolveLink(client: LinkResolveClient, linkPath: string): Promise<LinkInfo> {
+  return (await resolveLinkDetailed(client, linkPath)).info;
 }
 
 export async function resolveLinkEntries(
@@ -129,15 +138,16 @@ export async function resolveLinkEntries(
       const key = options.cacheKey ? options.cacheKey(entry) : entry.path;
       let link = options.cache?.get(key);
       if (!link) {
+        let cacheable = true;
         try {
-          link = await resolveLink(client, entry.path);
+          ({ info: link, cacheable } = await resolveLinkDetailed(client, entry.path));
         } catch {
           link = { realPath: entry.path, kind: 'unresolved' };
         }
         // A superseded or cancelled batch is discarded whole: nothing it
         // resolved after the abort is cached or written back.
         if (signal?.aborted) return;
-        options.cache?.set(key, link);
+        if (cacheable) options.cache?.set(key, link);
       }
       // Only an ancestor loop is expandable; a loop reported by the server is not.
       const expandable =
