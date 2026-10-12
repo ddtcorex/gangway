@@ -130,7 +130,12 @@ export interface OpOptions {
    * Asked once per operation when the real target lives outside the
    * connection root. Absent means no UI is available: the op is refused.
    */
-  confirmOutsideRoot?: (realPath: string) => Promise<boolean>;
+  /**
+   * realPath is the first out-of-root real path; allRealPaths lists every
+   * distinct one in the operation (first element equals realPath), so a
+   * prompt can name them all. Callers may ignore the second argument.
+   */
+  confirmOutsideRoot?: (realPath: string, allRealPaths: readonly string[]) => Promise<boolean>;
 }
 
 /** The user declined writing outside the root. A cancellation, not a failure. */
@@ -186,7 +191,10 @@ export async function assertWritableTargets(
       `Refusing to use "${outside.clickedPath}": it is really "${outside.realPath}", outside the connection root "${connection.remotePath}".`,
     );
   }
-  if (!(await options.confirmOutsideRoot(outside.realPath))) {
+  const allRealPaths = [
+    ...new Set(targets.filter((t) => gateWriteTarget(connection, t) !== 'allow').map((t) => t.realPath)),
+  ];
+  if (!(await options.confirmOutsideRoot(outside.realPath, allRealPaths))) {
     throw new OutsideRootDeclinedError(outside.clickedPath, outside.realPath);
   }
   return targets;

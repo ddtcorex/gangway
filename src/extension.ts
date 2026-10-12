@@ -1147,12 +1147,15 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
    * The out-of-root confirmation for single-target user gestures. Modal,
    * names the real path, asked per operation and never remembered.
    */
-  async function confirmOutsideRoot(realPath: string): Promise<boolean> {
-    const choice = await vscode.window.showWarningMessage(
-      `This location is really ${realPath}, outside the connection root. Continue?`,
-      { modal: true },
-      'Continue',
-    );
+  async function confirmOutsideRoot(realPath: string, allRealPaths: readonly string[] = [realPath]): Promise<boolean> {
+    const paths = allRealPaths.length > 0 ? allRealPaths : [realPath];
+    const shown = paths.slice(0, 3).join(', ');
+    const more = paths.length > 3 ? ` and ${paths.length - 3} more` : '';
+    const message =
+      paths.length === 1
+        ? `This location is really ${paths[0]}, outside the connection root. Continue?`
+        : `These locations are really ${shown}${more}, outside the connection root. Continue?`;
+    const choice = await vscode.window.showWarningMessage(message, { modal: true }, 'Continue');
     return choice === 'Continue';
   }
 

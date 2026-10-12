@@ -1142,6 +1142,33 @@ describe('activate - realistic command invocation', () => {
       expect(handlers.has(id)).toBe(false);
     });
 
+    it.each([
+      [1, 'This location is really /srv/1/a.php, outside the connection root. Continue?'],
+      [3, 'These locations are really /srv/1/a.php, /srv/2/a.php, /srv/3/a.php, outside the connection root. Continue?'],
+      [5, 'These locations are really /srv/1/a.php, /srv/2/a.php, /srv/3/a.php and 2 more, outside the connection root. Continue?'],
+    ])('names %i out-of-root path(s) in one modal', async (count, message) => {
+      fakeRawClient.realPath.mockImplementation(async (p: string) => p.replace(/^\/var\/www\/app\/l(\d)/, '/srv/$1'));
+      fakeRawClient.stat.mockImplementation(async (p: string) =>
+        p === '/var/www/dest'
+          ? { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false }
+          : { size: 1, modifyTime: 1, isDirectory: false, isSymbolicLink: false },
+      );
+      const nodes = Array.from({ length: count }, (_, i) => ({
+        connectionId: connection.id,
+        entry: { path: `/var/www/app/l${i + 1}/a.php`, isDirectory: false, isSymbolicLink: false, size: 1 },
+      }));
+      const destNode = { connectionId: connection.id, entry: { path: '/var/www/dest', isDirectory: true, isSymbolicLink: false, size: 0 } };
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      mockWindow.__test_queueWarning(undefined);
+
+      await handlers.get('gangway.copyEntries')!(nodes);
+      await handlers.get('gangway.pasteEntries')!(destNode);
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(message, { modal: true }, 'Continue');
+      warnSpy.mockRestore();
+    });
+
     it('cut then paste moves server-side with no re-upload', async () => {
       fakeRawClient.stat.mockImplementation(async (p: string) => {
         if (p === '/var/www/other') return { size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false };

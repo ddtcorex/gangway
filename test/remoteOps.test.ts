@@ -13,6 +13,7 @@ import {
   assertInsideRoot,
   assertMutatingAllowed,
   assertWritableTarget,
+  assertWritableTargets,
   chmodRemote,
   chooseDeleteMode,
   collectDropUploads,
@@ -285,9 +286,9 @@ describe('duplicateRemote', () => {
     const { path: dupPath } = await duplicateRemote(client as never, connection, '/srv/app/ext/a.php', fakeAuditLog(), {
       confirmOutsideRoot,
     });
-    // Source and destination are both out of root: one prompt, naming the source.
+    // Source and destination are both out of root: one prompt, naming both real paths.
     expect(confirmOutsideRoot).toHaveBeenCalledTimes(1);
-    expect(confirmOutsideRoot).toHaveBeenCalledWith('/etc/ext/a.php');
+    expect(confirmOutsideRoot).toHaveBeenCalledWith('/etc/ext/a.php', ['/etc/ext/a.php', '/etc/ext']);
     expect(dupPath).toBe('/srv/app/ext/a copy.php');
     expect(client.fastPut).toHaveBeenCalledWith(expect.any(String), '/etc/ext/a copy.php');
   });
@@ -327,7 +328,7 @@ describe('duplicateRemote source gate', () => {
       duplicateRemote(declined as never, connection, '/srv/app/pw.php', fakeAuditLog(), { confirmOutsideRoot: no }),
     ).rejects.toThrow(/outside/);
     expect(no).toHaveBeenCalledTimes(1);
-    expect(no).toHaveBeenCalledWith('/etc/passwd');
+    expect(no).toHaveBeenCalledWith('/etc/passwd', ['/etc/passwd']);
     expect(declined.fastGet).not.toHaveBeenCalled();
     expect(declined.fastPut).not.toHaveBeenCalled();
 
@@ -489,7 +490,7 @@ describe('createRemote through links', () => {
     const { path: created } = await createRemote(client as never, connection, '/srv/app/ext', 'new', 'dir', fakeAuditLog(), {
       confirmOutsideRoot,
     });
-    expect(confirmOutsideRoot).toHaveBeenCalledWith('/etc/ext');
+    expect(confirmOutsideRoot).toHaveBeenCalledWith('/etc/ext', ['/etc/ext']);
     expect(client.mkdir).toHaveBeenCalledWith('/etc/ext/new', false);
     expect(created).toBe('/srv/app/ext/new');
   });
@@ -514,7 +515,7 @@ describe('chmodRemote through links', () => {
     expect(client.chmod).not.toHaveBeenCalled();
     const confirmOutsideRoot = vi.fn().mockResolvedValue(true);
     await chmodRemote(client as never, connection, '/srv/app/conf.php', '644', fakeAuditLog(), { confirmOutsideRoot });
-    expect(confirmOutsideRoot).toHaveBeenCalledWith('/etc/conf.php');
+    expect(confirmOutsideRoot).toHaveBeenCalledWith('/etc/conf.php', ['/etc/conf.php']);
     expect(client.chmod).toHaveBeenCalledWith('/etc/conf.php', '644');
   });
 });
@@ -647,7 +648,7 @@ describe('pasteEntries', () => {
       confirmOutsideRoot,
     });
     expect(confirmOutsideRoot).toHaveBeenCalledTimes(1);
-    expect(confirmOutsideRoot).toHaveBeenCalledWith('/etc/ext');
+    expect(confirmOutsideRoot).toHaveBeenCalledWith('/etc/ext', ['/etc/ext']);
     expect(puts).toEqual(['/etc/ext/a.php', '/etc/ext/b.php']);
     expect(result.skipped).toEqual([]);
   });
@@ -724,7 +725,7 @@ describe('pasteEntries', () => {
       confirmOutsideRoot: yes,
     });
     expect(yes).toHaveBeenCalledTimes(1);
-    expect(yes).toHaveBeenCalledWith('/etc/ext/a.php');
+    expect(yes).toHaveBeenCalledWith('/etc/ext/a.php', ['/etc/ext/a.php', '/etc/ext/b.php']);
     expect(client.posixRename).toHaveBeenCalledWith('/etc/ext/a.php', '/srv/app/dest/a.php');
     expect(client.posixRename).toHaveBeenCalledWith('/etc/ext/b.php', '/srv/app/dest/b.php');
     expect(result.pasted).toEqual(['/srv/app/dest/a.php', '/srv/app/dest/b.php']);
@@ -776,5 +777,20 @@ describe('isNotFoundError', () => {
     expect(isNotFoundError(new Error('list: No such file /x'))).toBe(true);
     expect(isNotFoundError(Object.assign(new Error('Permission denied'), { code: '3' }))).toBe(false);
     expect(isNotFoundError(new Error('boom'))).toBe(false);
+  });
+
+  it('assertWritableTargets asks once and hands the callback every distinct out-of-root real path', async () => {
+    const client = fakeOpsClient({
+      realPath: realPathThrough({ '/srv/app/ext': '/etc/ext', '/srv/app/ext2': '/mnt/other' }),
+    });
+    const confirmOutsideRoot = vi.fn().mockResolvedValue(true);
+    await assertWritableTargets(
+      client as never,
+      connection,
+      ['/srv/app/in.php', '/srv/app/ext/a.php', '/srv/app/ext/a.php', '/srv/app/ext2/b.php'],
+      { confirmOutsideRoot },
+    );
+    expect(confirmOutsideRoot).toHaveBeenCalledTimes(1);
+    expect(confirmOutsideRoot).toHaveBeenCalledWith('/etc/ext/a.php', ['/etc/ext/a.php', '/mnt/other/b.php']);
   });
 });
