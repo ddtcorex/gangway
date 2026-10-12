@@ -34,6 +34,7 @@ import {
   FrozenError,
   assertInsideRoot,
   assertMutatingAllowed,
+  assertWritableTarget,
   chmodRemote,
   chooseDeleteMode,
   collectDropUploads,
@@ -41,6 +42,8 @@ import {
   duplicateRemote,
   guardUploadTarget,
   isNotFoundError,
+  joinRoot,
+  parentDir,
   parseUriList,
   pasteEntries,
   renameRemote,
@@ -1191,6 +1194,7 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
       // The tree row can be stale, and stat follows links: lstat now is the
       // authority on whether this path is itself a link.
       const isLinkNow = (await adapter.lstat(target)).isSymbolicLink;
+      let realTarget = target;
       const mode = chooseDeleteMode({
         isDirectory: node.entry.isDirectory,
         isSymbolicLink: node.entry.isSymbolicLink || isLinkNow,
@@ -1206,28 +1210,42 @@ export function activate(context: vscode.ExtensionContext): { connectionManager:
         );
         if (choice !== 'Delete') return;
         await adapter.delete(linkPath);
-      } else if (mode === 'file') {
-        const choice = await vscode.window.showWarningMessage(
-          `Permanently delete ${target} on "${connection.name}"? There is no undo.`,
-          'Delete',
-          'Cancel',
-        );
-        if (choice !== 'Delete') return;
-        await adapter.delete(target);
       } else {
-        const fileCount = await countRemoteFiles(adapter, target);
-        const base = path.posix.basename(target);
-        const typed = await vscode.window.showInputBox({
-          prompt: `Type "${base}" to permanently delete this folder (${fileCount} file(s)). There is no undo.`,
-        });
-        if (!typedConfirmMatches(base, typed)) {
-          await vscode.window.showInformationMessage('Delete cancelled: the typed name did not match.');
-          return;
+        // A file or folder below a linked parent lives at the parent's real
+        // path: gate that (same pattern as rename), act on it, and show it.
+        const realParent = (await assertWritableTarget(adapter, connection, parentDir(target), { confirmOutsideRoot }))
+          .realPath;
+        realTarget = joinRoot(realParent, path.posix.basename(target));
+        const really = realTarget === target ? '' : ` (really ${realTarget})`;
+        if (mode === 'file') {
+          const choice = await vscode.window.showWarningMessage(
+            `Permanently delete ${target}${really} on "${connection.name}"? There is no undo.`,
+            'Delete',
+            'Cancel',
+          );
+          if (choice !== 'Delete') return;
+          await adapter.delete(realTarget);
+        } else {
+          const fileCount = await countRemoteFiles(adapter, realTarget);
+          const base = path.posix.basename(target);
+          const typed = await vscode.window.showInputBox({
+            prompt: `Type "${base}" to permanently delete this folder${really} (${fileCount} file(s)). There is no undo.`,
+          });
+          if (!typedConfirmMatches(base, typed)) {
+            await vscode.window.showInformationMessage('Delete cancelled: the typed name did not match.');
+            return;
+          }
+          await adapter.rmdir(realTarget, true);
         }
-        await adapter.rmdir(target, true);
       }
       try {
-        await auditLog.append({ connectionId: connection.id, remotePath: target, timestamp: Date.now(), op: 'delete' });
+        await auditLog.append({
+          connectionId: connection.id,
+          remotePath: target,
+          timestamp: Date.now(),
+          op: 'delete',
+          ...(realTarget !== target ? { note: `really ${realTarget}` } : {}),
+        });
       } catch (err) {
         output.appendLine(
           `Deleted ${target}, but could not write the audit log entry: ${err instanceof Error ? err.message : String(err)}`,

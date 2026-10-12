@@ -16,14 +16,16 @@ import { env as mockEnv } from './mocks/vscode';
 // posixRename/delete/mkdir/list. Real SFTP `stat()` returns `modifyTime`, never `mtime` --
 // `SftpClientAdapter` translates it, so this fake returns `modifyTime` too,
 // exercising the same translation path a real connection would.
-const fakeRawClient = vi.hoisted(() => ({
+const fakeRawClient = vi.hoisted(() => {
+  const client = {
   connect: vi.fn().mockResolvedValue(undefined),
   end: vi.fn().mockResolvedValue(undefined),
   list: vi.fn().mockResolvedValue([] as Array<{ name: string; type: string }>),
   stat: vi.fn().mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: false }),
   // Identity realPath and a not-a-link lstat by default, so every plain-file
-  // test resolves exactly as before; link tests override both.
-  lstat: vi.fn().mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: false }),
+  // test resolves exactly as before; link tests override both. lstat answers
+  // like the stat fake (missing for stat is missing for lstat).
+  lstat: vi.fn().mockImplementation(async (p: string) => ({ ...(await client.stat(p)), isSymbolicLink: false })),
   realPath: vi.fn().mockImplementation(async (p: string) => p),
   fastGet: vi.fn().mockImplementation(async (_remotePath: string, localPath: string) => {
     await fs.mkdir(path.dirname(localPath), { recursive: true });
@@ -35,14 +37,18 @@ const fakeRawClient = vi.hoisted(() => ({
   mkdir: vi.fn().mockResolvedValue(undefined),
   rmdir: vi.fn().mockResolvedValue(undefined),
   chmod: vi.fn().mockResolvedValue(undefined),
-}));
+  };
+  return client;
+});
 
 function resetFakeClient(): void {
   fakeRawClient.connect.mockClear();
   fakeRawClient.end.mockClear();
   fakeRawClient.list.mockReset().mockResolvedValue([]);
   fakeRawClient.stat.mockReset().mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: false });
-  fakeRawClient.lstat.mockReset().mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: false, isSymbolicLink: false });
+  fakeRawClient.lstat
+    .mockReset()
+    .mockImplementation(async (p: string) => ({ ...(await fakeRawClient.stat(p)), isSymbolicLink: false }));
   fakeRawClient.realPath.mockReset().mockImplementation(async (p: string) => p);
   fakeRawClient.fastGet.mockClear();
   fakeRawClient.fastPut.mockClear();
@@ -756,6 +762,52 @@ describe('activate - realistic command invocation', () => {
       expect(fakeRawClient.list).not.toHaveBeenCalled();
       expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
       expect(fakeRawClient.delete).toHaveBeenCalledWith('/var/www/app/dir');
+    });
+
+    it('a folder under an out-of-root dir link asks with the real path and rmdirs the resolved path only after a yes', async () => {
+      fakeRawClient.realPath.mockImplementation(async (p: string) =>
+        p === '/var/www/app/ext' || p.startsWith('/var/www/app/ext/') ? `/etc/ext${p.slice('/var/www/app/ext'.length)}` : p,
+      );
+      fakeRawClient.stat.mockResolvedValue({ size: 0, modifyTime: 0, isDirectory: true, isSymbolicLink: false });
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      const inputSpy = vi.spyOn(vscode.window, 'showInputBox');
+
+      // Declined: nothing listed, nothing deleted, no typed-name prompt.
+      mockWindow.__test_queueWarning(undefined);
+      await handlers.get('gangway.deleteRemote')!(folderNode('/var/www/app/ext/sub'));
+      expect(warnSpy).toHaveBeenCalledWith(
+        'This location is really /etc/ext, outside the connection root. Continue?',
+        { modal: true },
+        'Continue',
+      );
+      expect(inputSpy).not.toHaveBeenCalled();
+      expect(fakeRawClient.rmdir).not.toHaveBeenCalled();
+      expect(fakeRawClient.delete).not.toHaveBeenCalled();
+
+      // Accepted: the typed-name prompt names the real path, rmdir hits it.
+      mockWindow.__test_queueWarning('Continue');
+      mockWindow.__test_queueInput('sub');
+      await handlers.get('gangway.deleteRemote')!(folderNode('/var/www/app/ext/sub'));
+      expect(inputSpy).toHaveBeenCalledWith({ prompt: expect.stringContaining('/etc/ext/sub') });
+      expect(fakeRawClient.rmdir).toHaveBeenCalledTimes(1);
+      expect(fakeRawClient.rmdir).toHaveBeenCalledWith('/etc/ext/sub', true);
+      warnSpy.mockRestore();
+      inputSpy.mockRestore();
+    });
+
+    it('a file under an in-root linked parent is deleted at its real path, and the prompt names it', async () => {
+      fakeRawClient.realPath.mockImplementation(async (p: string) =>
+        p === '/var/www/app/link' ? '/var/www/real' : p,
+      );
+      const warnSpy = vi.spyOn(vscode.window, 'showWarningMessage');
+      mockWindow.__test_queueWarning('Delete');
+
+      await handlers.get('gangway.deleteRemote')!(fileNode('/var/www/app/link/a.php'));
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0][0]).toContain('/var/www/real/a.php');
+      expect(fakeRawClient.delete).toHaveBeenCalledWith('/var/www/real/a.php');
+      warnSpy.mockRestore();
     });
 
     it('a cancelled link delete touches nothing', async () => {

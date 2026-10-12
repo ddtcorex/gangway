@@ -111,13 +111,13 @@ export function guardUploadTarget(connection: ConnectionConfig, sidecar: Sidecar
   assertMutatingAllowed(connection);
 }
 
-function parentDir(remotePath: string): string {
+export function parentDir(remotePath: string): string {
   const normalized = remotePath.endsWith('/') && remotePath.length > 1 ? remotePath.slice(0, -1) : remotePath;
   const idx = normalized.lastIndexOf('/');
   return idx <= 0 ? '/' : normalized.slice(0, idx);
 }
 
-function joinRoot(parent: string, leaf: string): string {
+export function joinRoot(parent: string, leaf: string): string {
   return parent === '/' ? `/${leaf}` : `${parent}/${leaf}`;
 }
 
@@ -155,24 +155,41 @@ export async function assertWritableTarget(
   remotePath: string,
   options: OpOptions,
 ): Promise<ResolvedTarget> {
+  const [target] = await assertWritableTargets(client, connection, [remotePath], options);
+  return target;
+}
+
+/**
+ * assertWritableTarget for every path an operation touches, asking at most
+ * once: all paths are resolved first (nothing is read or written yet), then
+ * the first out-of-root one is blocked on a frozen connection or confirmed
+ * by the user, and that one answer covers the whole operation.
+ */
+export async function assertWritableTargets(
+  client: RemoteOpsClient,
+  connection: ConnectionConfig,
+  remotePaths: string[],
+  options: OpOptions,
+): Promise<ResolvedTarget[]> {
   assertMutatingAllowed(connection);
-  const target = await resolveTarget(client, connection, remotePath);
-  const gate = gateWriteTarget(connection, target);
-  if (gate === 'allow') return target;
-  if (gate === 'block') {
+  const targets: ResolvedTarget[] = [];
+  for (const remotePath of remotePaths) targets.push(await resolveTarget(client, connection, remotePath));
+  const outside = targets.find((t) => gateWriteTarget(connection, t) !== 'allow');
+  if (outside === undefined) return targets;
+  if (gateWriteTarget(connection, outside) === 'block') {
     throw new Error(
-      `Refusing to write "${remotePath}": it is really "${target.realPath}", outside the root of frozen connection "${connection.name}".`,
+      `Refusing to use "${outside.clickedPath}": it is really "${outside.realPath}", outside the root of frozen connection "${connection.name}".`,
     );
   }
   if (!options.confirmOutsideRoot) {
     throw new Error(
-      `Refusing to write "${remotePath}": it is really "${target.realPath}", outside the connection root "${connection.remotePath}".`,
+      `Refusing to use "${outside.clickedPath}": it is really "${outside.realPath}", outside the connection root "${connection.remotePath}".`,
     );
   }
-  if (!(await options.confirmOutsideRoot(target.realPath))) {
-    throw new OutsideRootDeclinedError(remotePath, target.realPath);
+  if (!(await options.confirmOutsideRoot(outside.realPath))) {
+    throw new OutsideRootDeclinedError(outside.clickedPath, outside.realPath);
   }
-  return target;
+  return targets;
 }
 
 /** How a delete must act on an entry. Any symlink is unlinked, never recursed through. */
@@ -213,9 +230,14 @@ export function typedConfirmMatches(expected: string, input: string | undefined)
   return input !== undefined && input === expected;
 }
 
+/**
+ * Whether any entry holds this name. lstat, not stat: stat follows links, so
+ * a dangling link would read as a free name and a later put would write
+ * through it (create/truncate follows the link) or a rename would replace it.
+ */
 async function existsOnServer(client: RemoteOpsClient, remotePath: string): Promise<boolean> {
   try {
-    await client.stat(remotePath);
+    await client.lstat(remotePath);
     return true;
   } catch (err) {
     if (isNotFoundError(err)) return false;
@@ -249,14 +271,14 @@ export async function createRemote(
   if (kind === 'dir') {
     await client.mkdir(target, false);
   } else {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'gangway-newfile-'));
-    const tmp = path.join(dir, 'empty');
+    const stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gangway-newfile-'));
+    const tmp = path.join(stagingDir, 'empty');
     try {
       await fs.writeFile(tmp, '');
       await fs.chmod(tmp, 0o600);
       await client.fastPut(tmp, target);
     } finally {
-      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+      await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
     }
   }
   const now = options.now ?? Date.now();
@@ -358,14 +380,25 @@ export async function renameRemote(
   if (!isSafeListingName(newName)) throw new Error(`Refusing to rename to "${newName}": illegal file name.`);
   const parent = parentDir(oldPath);
   const newPath = joinRoot(parent, newName);
-  let oldStat: RemoteStat;
+  // lstat: rename acts on the entry itself, so a dangling link can be renamed.
+  let oldEntry: RemoteStat;
   try {
-    oldStat = await client.stat(oldPath);
+    oldEntry = await client.lstat(oldPath);
   } catch (err) {
     if (isNotFoundError(err)) {
       throw new Error(`"${oldPath}" does not exist on the server.`);
     }
     throw err;
+  }
+  // The local tmp mirror of a link to a folder is a folder (the tree
+  // expands it), so sidecars move as a subtree; a dangling link has none.
+  let wasDirectory = oldEntry.isDirectory;
+  if (oldEntry.isSymbolicLink) {
+    try {
+      wasDirectory = (await client.stat(oldPath)).isDirectory;
+    } catch (err) {
+      if (!isNotFoundError(err)) throw err;
+    }
   }
   const realParent = (await assertWritableTarget(client, connection, parent, options)).realPath;
   const realOld = joinRoot(realParent, path.posix.basename(oldPath));
@@ -374,7 +407,7 @@ export async function renameRemote(
     throw new Error(`"${newPath}" already exists on the server.`);
   }
   await client.posixRename(realOld, realNew);
-  await remapSidecarsForRename(connection, oldPath, newPath, oldStat.isDirectory);
+  await remapSidecarsForRename(connection, oldPath, newPath, wasDirectory);
   const now = options.now ?? Date.now();
   await appendAudit(
     auditLog,
@@ -426,7 +459,10 @@ export async function duplicateRemote(
     throw new Error('Duplicating folders is not supported yet — download the folder, then upload it where needed.');
   }
   const parent = parentDir(sourcePath);
-  const realParent = (await assertWritableTarget(client, connection, parent, options)).realPath;
+  // The source is gated too: reading an out-of-root target into the root is
+  // an exfiltration path. One answer covers source and destination.
+  const [sourceTarget, parentTarget] = await assertWritableTargets(client, connection, [sourcePath, parent], options);
+  const realParent = parentTarget.realPath;
   const { stem, ext } = splitCopyStem(path.posix.basename(sourcePath));
   let leaf = `${stem} copy${ext}`;
   let n = 2;
@@ -440,7 +476,7 @@ export async function duplicateRemote(
   const tmp = path.join(dir, 'copy');
   try {
     // fastGet follows a file link, so the staged bytes are the target content.
-    await client.fastGet(sourcePath, tmp);
+    await client.fastGet(sourceTarget.realPath, tmp);
     await fs.chmod(tmp, 0o600);
     await client.fastPut(tmp, joinRoot(realParent, leaf));
   } finally {
@@ -583,9 +619,12 @@ export interface PasteResult {
 }
 
 /**
- * Pastes clipboard entries into destDir (same connection only). destDir
- * goes through the write gate once per operation and entries land in its
- * resolved directory. New destinations land directly (cut: server-side
+ * Pastes clipboard entries into destDir (same connection only). destDir and
+ * every source that is not itself a link go through the write gate before
+ * anything is read or written, asking at most once per operation: a cut
+ * removes the source from its real directory and a copy reads the source's
+ * real target, so either can reach outside the root. Entries are read and
+ * moved at their real paths and land in the resolved destDir. New destinations land directly (cut: server-side
  * posixRename, copy: staged fastGet/fastPut); existing destinations go
  * through the overwrite confirmation first. A source or destination that
  * is itself a link is skipped: a rename onto a link replaces it and a put
@@ -602,7 +641,20 @@ export async function pasteEntries(
   if (clipboard.connectionId !== connection.id) throw new WrongConnectionError();
   assertMutatingAllowed(connection);
   assertInsideRoot(connection, destDir);
-  const realDestDir = (await assertWritableTarget(client, connection, destDir, options)).realPath;
+  // Link sources are skipped below, so they are not gated (no prompt for an
+  // entry that will never be touched).
+  const gatedSources: string[] = [];
+  for (const sourcePath of clipboard.paths) {
+    if (!(await isLinkItself(client, sourcePath))) gatedSources.push(sourcePath);
+  }
+  const [destTarget, ...sourceTargets] = await assertWritableTargets(
+    client,
+    connection,
+    [destDir, ...gatedSources],
+    options,
+  );
+  const realDestDir = destTarget.realPath;
+  const realSourceOf = new Map(gatedSources.map((p, i) => [p, sourceTargets[i].realPath]));
   try {
     await client.stat(realDestDir);
   } catch (err) {
@@ -633,7 +685,8 @@ export async function pasteEntries(
         skipped.push({ path: sourcePath, reason: 'copying folders is not supported yet' });
         continue;
       }
-      if (await isLinkItself(client, sourcePath)) {
+      const realSource = realSourceOf.get(sourcePath);
+      if (realSource === undefined || (await isLinkItself(client, sourcePath))) {
         skipped.push({ path: sourcePath, reason: 'is a symlink' });
         continue;
       }
@@ -649,7 +702,7 @@ export async function pasteEntries(
       let stagingPath: string | undefined;
       if (!clipboard.cut || destExists) {
         stagingPath = path.join(stagingDir, `${index}-${path.posix.basename(sourcePath)}`);
-        await client.fastGet(sourcePath, stagingPath);
+        await client.fastGet(realSource, stagingPath);
         await fs.chmod(stagingPath, 0o600);
       }
       if (destExists) {
@@ -659,7 +712,7 @@ export async function pasteEntries(
           continue;
         }
       }
-      if (clipboard.cut) await client.posixRename(sourcePath, dest);
+      if (clipboard.cut) await client.posixRename(realSource, dest);
       else await client.fastPut(stagingPath as string, dest);
       pasted.push(dest);
       await appendAudit(
